@@ -53,6 +53,7 @@ cmds! {
     "msg", "/msg <target> <text>", "Send a private message.";
     "names", "/names [#channel]", "List users in a channel.";
     "nick", "/nick <nick>", "Change your nickname.";
+    "network", "/network [list|add|edit [name]]", "Add or edit networks in a dialog.";
     "notice", "/notice <target> <text>", "Send a notice.";
     "notify", "/notify [all|default|highlights|mute]", "Set the notification level for the current buffer.";
     "op", "/op <nicks…>", "Give operator status.";
@@ -70,6 +71,7 @@ cmds! {
     "search", "/search [-n] <text>", "Search the message history (all networks, or -n for the current one).";
     "server", "/server <host[:[+]port]>", "Connect to a server.";
     "set", "/set [key [value]]", "Show or change a setting, e.g. /set appearance.font_size 14.";
+    "settings", "/settings", "Open the settings dialog (Ctrl+,).";
     "setname", "/setname <realname>", "Change your real name (IRCv3 setname).";
     "topic", "/topic [#channel] [text]", "Show or set the topic.";
     "unalias", "/unalias <name>", "Remove an alias.";
@@ -379,8 +381,11 @@ impl App {
                 self.send_chat(net, kind, arg1, rest_after1, Tags::new());
                 // Private notices/messages to targets without a buffer are echoed here.
                 let is_chan = self.networks[&net].session.is_channel(arg1);
-                if self.find_buffer(net, arg1).is_none() && !is_chan {
-                    self.status(buffer, LineKind::Status, format!("-> {arg1}: {rest_after1}"));
+                let sent = self.networks[&net].conn == ConnState::Ready;
+                if sent && self.find_buffer(net, arg1).is_none() && !is_chan {
+                    let shown =
+                        crate::filter::mask_service_secret(arg1, rest_after1).unwrap_or_else(|| rest_after1.to_owned());
+                    self.status(buffer, LineKind::Status, format!("-> {arg1}: {shown}"));
                 }
             }
             "query" | "q" => {
@@ -728,7 +733,12 @@ impl App {
                             .filter(|l| schwaetz_proto::format::strip(&l.text).to_lowercase().contains(&needle))
                             .map(|l| {
                                 let t = crate::time::format("%H:%M", crate::time::local(l.time));
-                                format!("[{t}] <{}> {}", l.nick, schwaetz_proto::format::strip(&l.text))
+                                let text = schwaetz_proto::format::strip(&l.text);
+                                if l.nick.is_empty() {
+                                    format!("[{t}] {text}")
+                                } else {
+                                    format!("[{t}] <{}> {text}", l.nick)
+                                }
                             })
                             .collect()
                     })
@@ -778,11 +788,44 @@ impl App {
                     None => self.status(buffer, LineKind::Error, format!("No buffer matching \"{args}\"")),
                 }
             }
+            "settings" | "options" | "prefs" => self.effect(Effect::OpenSettings),
+            "network" | "networks" => match arg1 {
+                "" | "list" => {
+                    let names: Vec<String> = self.networks.values().map(|n| n.cfg.name.clone()).collect();
+                    self.status(buffer, LineKind::Status, format!("Networks: {}", names.join(", ")));
+                    self.status(buffer, LineKind::Status, "Use /network add or /network edit [name].");
+                }
+                "add" | "new" => self.effect(Effect::OpenNetwork(None)),
+                "edit" => {
+                    let name = if rest_after1.is_empty() {
+                        self.network_of(buffer).map(|n| n.cfg.name.clone())
+                    } else {
+                        self.networks
+                            .values()
+                            .find(|n| n.cfg.name.eq_ignore_ascii_case(rest_after1))
+                            .map(|n| n.cfg.name.clone())
+                    };
+                    match name {
+                        Some(n) => self.effect(Effect::OpenNetwork(Some(n))),
+                        None => self.status(buffer, LineKind::Error, "No such network."),
+                    }
+                }
+                _ => self.usage(buffer, "network"),
+            },
             "secret" => {
                 use crate::secrets::{SecretKind, set};
-                let mut it = args.splitn(3, ' ');
-                let (net, kind, value) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
-                let kind = match kind {
+                // `/secret <network name, may contain spaces> <kind> <value>`.
+                let words: Vec<&str> = args.split(' ').collect();
+                let Some(ki) =
+                    words.iter().skip(1).position(|w| matches!(*w, "sasl" | "pass" | "twitch")).map(|i| i + 1)
+                else {
+                    return self.usage(buffer, "secret");
+                };
+                let net = words[..ki].join(" ");
+                let net = net.trim();
+                let value = words[ki + 1..].join(" ");
+                let value = value.as_str();
+                let kind = match words[ki] {
                     "sasl" => SecretKind::Sasl,
                     "pass" => SecretKind::ServerPassword,
                     "twitch" => SecretKind::TwitchToken,

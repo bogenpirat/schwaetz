@@ -346,7 +346,7 @@ async fn quit_and_close(wr: &mut WriteHalf<BoxStream>, queue: &mut SendQueue, qu
     };
     let _ = timeout(Duration::from_secs(2), async {
         // Deliver what the user already sent (messages typed right before quitting).
-        for l in queue.hi.drain(..).take(50) {
+        for l in queue.urgent.drain(..).chain(queue.hi.drain(..)).take(60) {
             let _ = wr.write_all(&l).await;
         }
         let _ = wr.write_all(format!("{line}\r\n").as_bytes()).await;
@@ -362,6 +362,8 @@ async fn quit_and_close(wr: &mut WriteHalf<BoxStream>, queue: &mut SendQueue, qu
 /// never stuck behind a burst of WHO/CHATHISTORY requests after joining many channels.
 #[derive(Default)]
 struct SendQueue {
+    /// Registration and keepalive traffic: never throttled.
+    urgent: VecDeque<Vec<u8>>,
     hi: VecDeque<Vec<u8>>,
     lo: VecDeque<Vec<u8>>,
 }
@@ -379,6 +381,10 @@ impl SendQueue {
     fn push(&mut self, msg: &Message) {
         let mut line = msg.to_line();
         line.push_str("\r\n");
+        if matches!(msg.command.to_ascii_uppercase().as_str(), "CAP" | "AUTHENTICATE" | "PASS" | "USER" | "PONG") {
+            self.urgent.push_back(line.into_bytes());
+            return;
+        }
         if Self::is_background(msg) {
             if msg.is("TAGMSG") && !self.lo.is_empty() {
                 return;
@@ -394,7 +400,7 @@ impl SendQueue {
     }
 
     fn is_empty(&self) -> bool {
-        self.hi.is_empty() && self.lo.is_empty()
+        self.urgent.is_empty() && self.hi.is_empty() && self.lo.is_empty()
     }
 }
 
@@ -430,6 +436,10 @@ async fn handle_line(
 async fn flush(wr: &mut WriteHalf<BoxStream>, queue: &mut SendQueue, bucket: &mut Bucket) -> Result<(), String> {
     bucket.refill();
     let mut wrote = false;
+    while let Some(line) = queue.urgent.pop_front() {
+        wr.write_all(&line).await.map_err(|e| e.to_string())?;
+        wrote = true;
+    }
     while bucket.tokens >= 1.0 {
         let Some(line) = queue.pop() else { break };
         wr.write_all(&line).await.map_err(|e| e.to_string())?;

@@ -194,3 +194,48 @@ mod tests {
         assert!(!ig.is_ignored("oftc", None, &Source::parse("x!y@host.bad.net"), IgnoreType::Join, cm));
     }
 }
+
+/// Hides passwords in messages to services (`NickServ IDENTIFY …`, `REGISTER …`) before they are
+/// displayed or logged. Returns `None` when nothing needs masking.
+pub fn mask_service_secret(target: &str, text: &str) -> Option<String> {
+    if !target.to_ascii_lowercase().ends_with("serv") {
+        return None;
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let cmd = words.first()?.to_ascii_uppercase();
+    let masked = |keep: usize| -> String {
+        let mut out: Vec<&str> = words[..keep.min(words.len())].to_vec();
+        out.extend(std::iter::repeat_n("********", words.len().saturating_sub(keep)));
+        out.join(" ")
+    };
+    match cmd.as_str() {
+        // IDENTIFY [account] password, GHOST nick password, …
+        "IDENTIFY" | "ID" | "LOGIN" | "GHOST" | "RECOVER" | "RELEASE" | "REGAIN" if words.len() >= 2 => {
+            let keep = if words.len() >= 3 { 2 } else { 1 };
+            Some(masked(keep))
+        }
+        "REGISTER" if words.len() >= 2 => {
+            // REGISTER password [email]
+            let mut out = vec![words[0], "********"];
+            out.extend(&words[2..]);
+            Some(out.join(" "))
+        }
+        "SET" if words.get(1).is_some_and(|w| w.eq_ignore_ascii_case("PASSWORD")) => Some(masked(2)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::mask_service_secret as m;
+
+    #[test]
+    fn masks_service_passwords() {
+        assert_eq!(m("NickServ", "IDENTIFY hunter2").as_deref(), Some("IDENTIFY ********"));
+        assert_eq!(m("nickserv", "identify me hunter2").as_deref(), Some("identify me ********"));
+        assert_eq!(m("NickServ", "REGISTER pw a@b.c").as_deref(), Some("REGISTER ******** a@b.c"));
+        assert_eq!(m("NickServ", "SET PASSWORD new").as_deref(), Some("SET PASSWORD ********"));
+        assert_eq!(m("NickServ", "INFO bob"), None);
+        assert_eq!(m("bob", "IDENTIFY hunter2"), None);
+    }
+}

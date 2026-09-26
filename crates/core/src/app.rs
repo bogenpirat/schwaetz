@@ -59,6 +59,10 @@ pub enum Effect {
     ConfigChanged,
     OpenUrl(String),
     ReloadScripts,
+    /// Open the settings dialog.
+    OpenSettings,
+    /// Open the network editor (`None` = add a new network).
+    OpenNetwork(Option<String>),
     Quit,
 }
 
@@ -718,7 +722,7 @@ impl App {
             || shown.is("OPER")
             || (shown.is("AUTHENTICATE")
                 && shown.arg(0).len() > 1
-                && !shown.arg(0).chars().all(|c| c.is_ascii_uppercase() || c == '-'));
+                && !shown.arg(0).chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-'));
         if secret {
             let skip = usize::from(shown.is("OPER"));
             for p in shown.params.iter_mut().skip(skip) {
@@ -795,6 +799,7 @@ impl App {
                 net.last_error = Some(reason.clone());
                 let sb = net.server_buffer;
                 let text = match retry_in {
+                    Some(d) if d.is_zero() && reason == "Reconnecting" => "Reconnecting…".to_owned(),
                     Some(d) if d.is_zero() => format!("Disconnected: {reason}. Reconnecting…"),
                     Some(d) => {
                         format!("Disconnected: {reason}. Reconnecting in {}…", time::duration(d.as_secs().max(1)))
@@ -1482,7 +1487,11 @@ impl App {
             ChatKind::Notice => LineKind::Notice,
             _ => LineKind::Message,
         };
-        let mut line = self.new_line(time, line_kind, &from.nick, text.as_str());
+        let shown = match (&target, own) {
+            (Target::Query { peer }, true) => crate::filter::mask_service_secret(peer, &text),
+            _ => None,
+        };
+        let mut line = self.new_line(time, line_kind, &from.nick, shown.as_deref().unwrap_or(text.as_str()));
         line.prefix = prefix;
         line.flags.set(LineFlags::OWN, own);
         line.flags.set(LineFlags::HIGHLIGHT, highlight);
@@ -2090,6 +2099,41 @@ impl App {
         if let Some(c) = self.config.networks.iter_mut().find(|c| c.name == name) {
             c.autojoin = list;
             self.effects.push(Effect::SaveConfig);
+        }
+    }
+}
+
+impl App {
+    /// Adds a network or replaces the definition of `old_name`. Connection changes (servers,
+    /// identity) take effect on the next (re)connect. Returns the network id.
+    pub fn upsert_network(&mut self, old_name: Option<&str>, cfg: NetworkConfig) -> NetworkId {
+        let key = old_name.unwrap_or(&cfg.name).to_owned();
+        match self.config.networks.iter_mut().find(|c| c.name.eq_ignore_ascii_case(&key)) {
+            Some(c) => *c = cfg.clone(),
+            None => self.config.networks.push(cfg.clone()),
+        }
+        self.effects.push(Effect::SaveConfig);
+        let existing =
+            old_name.and_then(|o| self.networks.values().find(|n| n.cfg.name.eq_ignore_ascii_case(o)).map(|n| n.id));
+        match existing {
+            Some(id) => {
+                let n = self.networks.get_mut(&id).unwrap();
+                n.cfg = cfg.clone();
+                n.session.config_mut().autojoin = cfg.autojoin_list();
+                let sb = n.server_buffer;
+                if let Some(b) = self.buffer_mut(sb) {
+                    b.name = cfg.name.clone();
+                }
+                self.dirty.sidebar = true;
+                id
+            }
+            None => {
+                let id = self.add_network(cfg.clone());
+                if cfg.auto_connect {
+                    self.connect(id);
+                }
+                id
+            }
         }
     }
 }

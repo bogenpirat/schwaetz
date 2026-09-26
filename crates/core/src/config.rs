@@ -209,6 +209,7 @@ pub enum SaslMechanism {
     None,
     Plain,
     External,
+    #[serde(rename = "scram-sha-256", alias = "scram-sha256")]
     ScramSha256,
 }
 
@@ -429,5 +430,19 @@ mod tests {
         assert_eq!(c.general.nick, "bob");
         assert_eq!(c.general.scrollback_lines, 1500);
         assert!(c.networks[0].reconnect);
+    }
+}
+
+#[cfg(test)]
+mod sasl_names {
+    use super::*;
+
+    #[test]
+    fn scram_spelling() {
+        let n: NetworkConfig = toml::from_str("sasl = \"scram-sha-256\"").unwrap();
+        assert_eq!(n.sasl, SaslMechanism::ScramSha256);
+        let n: NetworkConfig = toml::from_str("sasl = \"scram-sha256\"").unwrap();
+        assert_eq!(n.sasl, SaslMechanism::ScramSha256);
+        assert!(toml::to_string(&n).unwrap().contains("scram-sha-256"));
     }
 }

@@ -91,6 +91,7 @@ pub struct Ui {
     active_window: bool,
     /// Buffer to reselect once it exists again after startup (network, buffer).
     restore_active: Option<(String, String)>,
+    form: Option<Box<crate::form::Form>>,
 }
 
 thread_local! {
@@ -214,6 +215,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         preview_pending: Default::default(),
         active_window: true,
         restore_active: None,
+        form: None,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -543,6 +545,9 @@ impl Ui {
         if let Some(o) = self.overlay.as_mut() {
             o.render(&p, &self.text, &th, &self.app, self.win_rect, self.caret_on);
         }
+        if let Some(f) = self.form.as_mut() {
+            f.render(&p, &self.text, &th, self.win_rect, self.caret_on);
+        }
         let _ = draw_field;
         let _ = with_alpha;
     }
@@ -710,6 +715,15 @@ impl Ui {
                 }
             }
             Effect::Quit => self.begin_quit(),
+            Effect::OpenSettings => {
+                self.form = Some(Box::new(crate::form::Form::settings(&self.app.config)));
+                self.invalidate();
+            }
+            Effect::OpenNetwork(name) => {
+                let cfg = name.and_then(|n| self.app.config.network(&n).cloned());
+                self.form = Some(Box::new(crate::form::Form::network(cfg.as_ref())));
+                self.invalidate();
+            }
         }
     }
 
@@ -923,11 +937,92 @@ impl Ui {
         }
     }
 
+    fn form_action(&mut self, action: crate::form::FormAction) {
+        use crate::form::{FormAction, FormKind};
+        let Some(form) = self.form.as_mut() else { return };
+        match action {
+            FormAction::None => {}
+            FormAction::Cancel => self.form = None,
+            FormAction::Save => match form.kind.clone() {
+                FormKind::Settings => {
+                    let mut c = self.app.config.clone();
+                    match form.apply_settings(&mut c) {
+                        Err(e) => form.error = Some(e),
+                        Ok(()) => {
+                            self.app.config = c;
+                            self.app.apply_config();
+                            if let Err(e) = self.app.config.save(&self.paths.config_file()) {
+                                form.error = Some(format!("Could not save: {e}"));
+                                return;
+                            }
+                            self.form = None;
+                            self.after_update();
+                        }
+                    }
+                }
+                FormKind::Network { original } => {
+                    let base = original.as_deref().and_then(|o| self.app.config.network(o).cloned());
+                    match form.to_network(base.as_ref()) {
+                        Err(e) => form.error = Some(e),
+                        Ok((cfg, secrets)) => {
+                            use schwaetz_core::secrets::{SecretKind, get, set};
+                            if let Some(old) = original.as_deref().filter(|o| *o != cfg.name) {
+                                // Renamed: carry stored secrets over.
+                                for k in [SecretKind::Sasl, SecretKind::ServerPassword, SecretKind::TwitchToken] {
+                                    if let Some(v) = get(old, k) {
+                                        set(&cfg.name, k, &v);
+                                    }
+                                }
+                            }
+                            for (k, v) in &secrets {
+                                set(&cfg.name, *k, v);
+                            }
+                            let id = self.app.upsert_network(original.as_deref(), cfg);
+                            if let Some(n) = self.app.network(id) {
+                                let sb = n.server_buffer;
+                                self.app.switch_to(sb);
+                            }
+                            self.form = None;
+                            self.after_update();
+                        }
+                    }
+                }
+            },
+            FormAction::Delete => {
+                if let FormKind::Network { original: Some(name) } = form.kind.clone() {
+                    if let Some(id) = self.app.network_by_name(&name) {
+                        self.app.remove_network(id);
+                    }
+                    self.app.config.networks.retain(|c| c.name != name);
+                    let _ = self.app.config.save(&self.paths.config_file());
+                    self.form = None;
+                    self.after_update();
+                }
+            }
+        }
+        self.invalidate();
+    }
+
     fn key_down(&mut self, vk: u16) -> bool {
         let ctrl = win::key_down(VK_CONTROL.0);
         let shift = win::key_down(VK_SHIFT.0);
         let alt = win::key_down(VK_MENU.0);
         let v = VIRTUAL_KEY(vk);
+
+        if let Some(f) = self.form.as_mut() {
+            let hwnd = self.hwnd;
+            let action = f.key(v, ctrl, shift, || win::get_clipboard(hwnd));
+            self.form_action(action);
+            self.caret_on = true;
+            self.invalidate();
+            return true;
+        }
+        if ctrl && vk == 0xBC {
+            // Ctrl+, opens the settings.
+            self.form = Some(Box::new(crate::form::Form::settings(&self.app.config)));
+            self.invalidate();
+            return true;
+        }
 
         if self.overlay.is_some() {
             return self.overlay_key(v, ctrl, shift);
@@ -1148,6 +1243,12 @@ impl Ui {
         }
         let mut buf = [0u8; 4];
         let s = c.encode_utf8(&mut buf);
+        if let Some(f) = self.form.as_mut() {
+            f.char(s);
+            self.caret_on = true;
+            self.invalidate();
+            return;
+        }
         if let Some(o) = self.overlay.as_mut() {
             if let Some(ed) = o.editor() {
                 ed.insert(s);
@@ -1175,6 +1276,12 @@ impl Ui {
     fn mouse_down(&mut self, x: f32, y: f32, double: bool) {
         unsafe {
             SetCapture(self.hwnd);
+        }
+        if let Some(f) = self.form.as_mut() {
+            let action = f.click(self.win_rect, x, y);
+            self.form_action(action);
+            self.invalidate();
+            return;
         }
         if let Some(o) = self.overlay.as_mut() {
             match o.click(self.win_rect, x, y) {
@@ -1327,6 +1434,9 @@ impl Ui {
     }
 
     fn cursor_for(&self, x: f32, y: f32) -> PCWSTR {
+        if self.form.is_some() {
+            return IDC_ARROW;
+        }
         if self.overlay.is_some() {
             return IDC_ARROW;
         }
@@ -1363,6 +1473,11 @@ impl Ui {
         }
         let lh = self.text.fonts.line_height + 3.0;
         let dy = delta as f32 / 120.0 * lines.clamp(1, 20) as f32 * lh;
+        if let Some(f) = self.form.as_mut() {
+            f.scroll_by(dy);
+            self.invalidate();
+            return;
+        }
         if let Some(o) = self.overlay.as_mut() {
             o.scroll(dy);
         } else if self.sidebar.rect.contains(x, y) {
@@ -1448,6 +1563,7 @@ impl Ui {
                 }
                 items.push(MenuItem::Item(13, "Channel list…"));
                 items.push(MenuItem::Separator);
+                items.push(MenuItem::Item(15, "Edit network…"));
                 items.push(MenuItem::Item(14, "Remove network"));
             }
             BufferKind::Channel => {
@@ -1459,7 +1575,10 @@ impl Ui {
                 items.push(MenuItem::Item(30, "Whois"));
                 items.push(MenuItem::Item(22, "Close"));
             }
-            BufferKind::Special => {}
+            BufferKind::Special => {
+                items.push(MenuItem::Item(16, "Add network…"));
+                items.push(MenuItem::Item(17, "Settings…"));
+            }
         }
         if kind != BufferKind::Special {
             items.push(MenuItem::Separator);
@@ -1498,6 +1617,12 @@ impl Ui {
             self.app.config.networks.retain(|c| c.name != name);
             self.app.remove_network(n);
             let _ = self.app.config.save(&self.paths.config_file());
+        }
+        match choice {
+            15 => self.app.input(id, "/network edit"),
+            16 => self.app.input(id, "/network add"),
+            17 => self.app.input(id, "/settings"),
+            _ => {}
         }
         if choice == 50
             && let Some(b) = self.app.buffer_mut(id)
