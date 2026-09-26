@@ -66,6 +66,7 @@ cmds! {
     "reconnect", "/reconnect", "Reconnect to the current network now.";
     "reload", "/reload", "Reload scripts.";
     "say", "/say <text>", "Send text as a message (even if it starts with /).";
+    "secret", "/secret <network> <sasl|pass|twitch> <value>", "Store a password or token in Windows Credential Manager (never in config.toml).";
     "search", "/search [-n] <text>", "Search the message history (all networks, or -n for the current one).";
     "server", "/server <host[:[+]port]>", "Connect to a server.";
     "set", "/set [key [value]]", "Show or change a setting, e.g. /set appearance.font_size 14.";
@@ -776,6 +777,26 @@ impl App {
                     Some(id) => self.switch_to(id),
                     None => self.status(buffer, LineKind::Error, format!("No buffer matching \"{args}\"")),
                 }
+            }
+            "secret" => {
+                use crate::secrets::{SecretKind, set};
+                let mut it = args.splitn(3, ' ');
+                let (net, kind, value) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
+                let kind = match kind {
+                    "sasl" => SecretKind::Sasl,
+                    "pass" => SecretKind::ServerPassword,
+                    "twitch" => SecretKind::TwitchToken,
+                    _ => return self.usage(buffer, "secret"),
+                };
+                if net.is_empty() || value.is_empty() {
+                    return self.usage(buffer, "secret");
+                }
+                let text = if set(net, kind, value) {
+                    format!("Stored {kind:?} secret for {net} in Windows Credential Manager (used on next connect).")
+                } else {
+                    "Could not store the secret.".to_owned()
+                };
+                self.status(buffer, LineKind::Status, text);
             }
             "rawlog" => {
                 self.rawlog = !self.rawlog;
