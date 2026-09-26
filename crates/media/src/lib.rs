@@ -6,6 +6,7 @@ mod og;
 mod wic;
 
 pub use og::PageMeta;
+pub use wic::Frame;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -22,9 +23,21 @@ pub enum Kind {
 
 #[derive(Debug)]
 pub enum MediaResult {
-    Image { url: String, width: u32, height: u32, bgra: Vec<u8> },
-    Page { url: String, meta: PageMeta },
-    Failed { url: String, error: String },
+    /// Decoded image; animated images have several frames.
+    Image {
+        url: String,
+        width: u32,
+        height: u32,
+        frames: Vec<Frame>,
+    },
+    Page {
+        url: String,
+        meta: PageMeta,
+    },
+    Failed {
+        url: String,
+        error: String,
+    },
 }
 
 pub struct Limits {
@@ -206,8 +219,8 @@ fn process(job: &Job, cache: Option<&PathBuf>, limits: &Limits) -> MediaResult {
     if !ct.is_empty() && !ct.starts_with("image/") && !ct.starts_with("application/octet-stream") {
         return fail(format!("not an image ({ct})"));
     }
-    match wic::decode(&body, max_dim) {
-        Ok((width, height, bgra)) => MediaResult::Image { url, width, height, bgra },
+    match wic::decode_frames(&body, max_dim) {
+        Ok((width, height, frames)) => MediaResult::Image { url, width, height, frames },
         Err(e) => fail(e),
     }
 }
@@ -216,4 +229,10 @@ fn process(job: &Job, cache: Option<&PathBuf>, limits: &Limits) -> MediaResult {
 pub fn decode(bytes: &[u8], max_dim: u32) -> Result<(u32, u32, Vec<u8>), String> {
     wic::init_thread();
     wic::decode(bytes, max_dim)
+}
+
+/// Decodes all frames of image bytes (used by tests).
+pub fn decode_frames(bytes: &[u8], max_dim: u32) -> Result<(u32, u32, Vec<Frame>), String> {
+    wic::init_thread();
+    wic::decode_frames(bytes, max_dim)
 }

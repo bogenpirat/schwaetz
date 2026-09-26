@@ -36,6 +36,7 @@ pub const COPYDATA_MAGIC: usize = 0x5357_4158;
 const TIMER_TICK: usize = 1;
 const TIMER_CARET: usize = 2;
 const TIMER_PAINT: usize = 3;
+const TIMER_ANIM: usize = 4;
 const SIDEBAR_MIN: f32 = 160.0;
 const TOPIC_H: f32 = 56.0;
 const NICKLIST_W: f32 = 210.0;
@@ -95,6 +96,7 @@ pub struct Ui {
     form: Option<Box<crate::form::Form>>,
     background_update: bool,
     paint_pending: bool,
+    anim_start: std::time::Instant,
 }
 
 thread_local! {
@@ -221,6 +223,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         form: None,
         background_update: false,
         paint_pending: false,
+        anim_start: std::time::Instant::now(),
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -231,6 +234,10 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
     ui.apply_appearance();
     ui.tray.add();
     ui.welcome();
+    // Load scripts before connecting so they see the first events of every network.
+    if let Some(h) = ui.services.scripts.as_mut() {
+        h.tick(&mut ui.app, now());
+    }
     ui.app.connect_auto();
     ui.after_update();
     UI.with(|c| *c.borrow_mut() = Some(ui));
@@ -415,6 +422,12 @@ impl Ui {
         let dgen = gfx.generation;
         let r = gfx.frame(pw, ph, |dc| self.draw(dc, dgen));
         self.gfx = Some(gfx);
+        if self.active_window && self.images.borrow().animating.get() {
+            // Keep animated emotes moving (~25 fps) while visible and focused.
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_ANIM, 40, None);
+            }
+        }
         self.dispatch_media();
         if let Err(e) = r {
             tracing::error!("render failed: {e}");
@@ -472,7 +485,14 @@ impl Ui {
         } else {
             p.clear(th.backdrop_opaque);
         }
-        self.images.borrow_mut().realize(dc, dgen);
+        {
+            let mut store = self.images.borrow_mut();
+            if self.active_window {
+                store.clock = self.anim_start.elapsed().as_millis() as u64;
+            }
+            store.animating.set(false);
+            store.realize(dc, dgen);
+        }
         self.sidebar.render(&p, &self.text, &th, &self.app);
 
         // Topic bar.
@@ -833,28 +853,37 @@ impl Ui {
         if results.is_empty() {
             return;
         }
+        let mut failures = Vec::new();
         {
             let mut store = self.images.borrow_mut();
             for r in results {
                 match r {
-                    schwaetz_media::MediaResult::Image { url, width, height, bgra } => {
+                    schwaetz_media::MediaResult::Image { url, width, height, frames } => {
                         if self.preview_pending.remove(&url) {
                             store.previews.insert(url.clone(), crate::images::Preview::Image);
                         }
-                        store.insert_pixels(url, width, height, bgra);
+                        store.insert_frames(url, width, height, frames);
                     }
                     schwaetz_media::MediaResult::Page { url, meta } => {
                         self.preview_pending.remove(&url);
                         store.previews.insert(url, crate::images::Preview::Page(meta));
                     }
                     schwaetz_media::MediaResult::Failed { url, error } => {
-                        tracing::debug!("media {url}: {error}");
+                        if self.app.rawlog {
+                            failures.push(format!("media: {url}: {error}"));
+                        }
                         if self.preview_pending.remove(&url) {
                             store.previews.insert(url.clone(), crate::images::Preview::Failed);
                         }
                         store.insert_failed(url);
                     }
                 }
+            }
+        }
+        if !failures.is_empty() {
+            let b = self.app.ensure_special("raw log");
+            for f in failures {
+                self.app.print(b, LineKind::Error, "", &f);
             }
         }
         // Image sizes change line heights: re-layout.
@@ -1889,6 +1918,12 @@ impl Ui {
                         if matches!(self.app.active_buffer().kind, BufferKind::Server) {
                             self.invalidate();
                         }
+                    }
+                    TIMER_ANIM => {
+                        unsafe {
+                            let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
+                        }
+                        self.invalidate();
                     }
                     TIMER_PAINT => {
                         unsafe {

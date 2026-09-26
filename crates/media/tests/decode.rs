@@ -75,3 +75,55 @@ fn scales_to_fit() {
 fn rejects_garbage() {
     assert!(schwaetz_media::decode(b"definitely not an image", 64).is_err());
 }
+
+/// A GIF89a with 128-color palette and "uncompressed" LZW (8-bit codes, clear every 126 pixels).
+/// frames: (left, top, w, h, disposal, delay_cs, palette indices)
+fn gif(w: u16, h: u16, palette: &[[u8; 3]], frames: &[(u16, u16, u16, u16, u8, u16, Vec<u8>)]) -> Vec<u8> {
+    let mut out = b"GIF89a".to_vec();
+    out.extend_from_slice(&w.to_le_bytes());
+    out.extend_from_slice(&h.to_le_bytes());
+    out.extend_from_slice(&[0xF6, 0, 0]); // global table, 128 entries
+    for i in 0..128 {
+        out.extend_from_slice(palette.get(i).unwrap_or(&[0, 0, 0]));
+    }
+    for (l, t, fw, fh, disposal, delay, px) in frames {
+        out.extend_from_slice(&[0x21, 0xF9, 4, disposal << 2]);
+        out.extend_from_slice(&delay.to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out.push(0x2C);
+        for v in [l, t, fw, fh] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.push(0);
+        out.push(7); // LZW minimum code size
+        let mut codes = Vec::new();
+        for (i, p) in px.iter().enumerate() {
+            if i % 126 == 0 {
+                codes.push(128);
+            }
+            codes.push(*p);
+        }
+        codes.push(129);
+        for chunk in codes.chunks(255) {
+            out.push(chunk.len() as u8);
+            out.extend_from_slice(chunk);
+        }
+        out.push(0);
+    }
+    out.push(0x3B);
+    out
+}
+
+#[test]
+fn animated_gif_frames_are_composited() {
+    let palette = [[255, 0, 0], [0, 0, 255]];
+    let bytes = gif(4, 4, &palette, &[(0, 0, 4, 4, 1, 5, vec![0; 16]), (2, 2, 2, 2, 1, 7, vec![1; 4])]);
+    let (w, h, frames) = schwaetz_media::decode_frames(&bytes, 64).unwrap();
+    assert_eq!((w, h), (4, 4));
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0].delay_ms, 50);
+    assert_eq!(frames[1].delay_ms, 70);
+    let px = |f: &schwaetz_media::Frame, x: usize, y: usize| f.bgra[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4].to_vec();
+    assert_eq!(px(&frames[1], 0, 0), vec![0, 0, 255, 255], "untouched area keeps frame 1 (red)");
+    assert_eq!(px(&frames[1], 3, 3), vec![255, 0, 0, 255], "patched area is blue");
+}

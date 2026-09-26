@@ -12,14 +12,15 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_core::{BOOL, IUnknown, Ref, implement};
 
 enum Img {
-    /// Decoded pixels waiting for a device context.
+    /// Decoded frames waiting for a device context.
     Pixels {
         w: u32,
         h: u32,
-        bgra: Vec<u8>,
+        frames: Vec<schwaetz_media::Frame>,
     },
+    /// Bitmaps with their display times; one entry for still images.
     Ready {
-        bmp: ID2D1Bitmap1,
+        frames: Vec<(ID2D1Bitmap1, u32)>,
         w: u32,
         h: u32,
     },
@@ -47,15 +48,22 @@ pub struct ImageStore {
     pub previews: HashMap<String, Preview>,
     /// Link previews the user asked for (click-to-load).
     pub requested: std::collections::HashSet<String>,
+    /// Animation clock (ms), advanced by the shell while the window is focused.
+    pub clock: u64,
+    /// Set when an animated image was drawn (the shell then keeps repainting).
+    pub animating: std::cell::Cell<bool>,
 }
 
 const BUDGET: usize = 48 << 20;
 
 impl ImageStore {
-    pub fn insert_pixels(&mut self, url: String, w: u32, h: u32, bgra: Vec<u8>) {
-        self.bytes += bgra.len();
+    pub fn insert_frames(&mut self, url: String, w: u32, h: u32, frames: Vec<schwaetz_media::Frame>) {
+        if frames.is_empty() {
+            return self.insert_failed(url);
+        }
+        self.bytes += frames.iter().map(|f| f.bgra.len()).sum::<usize>();
         self.touch(&url);
-        self.images.insert(url, Img::Pixels { w, h, bgra });
+        self.images.insert(url, Img::Pixels { w, h, frames });
         self.evict();
     }
 
@@ -77,8 +85,8 @@ impl ImageStore {
             let url = self.order.remove(0);
             if let Some(img) = self.images.remove(&url) {
                 self.bytes -= match img {
-                    Img::Pixels { bgra, .. } => bgra.len(),
-                    Img::Ready { w, h, .. } => (w * h * 4) as usize,
+                    Img::Pixels { frames, .. } => frames.iter().map(|f| f.bgra.len()).sum(),
+                    Img::Ready { w, h, frames } => (w * h * 4) as usize * frames.len(),
                     Img::Failed => 0,
                 };
             }
@@ -109,12 +117,15 @@ impl ImageStore {
         if generation != self.generation {
             self.generation = generation;
             self.images.retain(|_, i| !matches!(i, Img::Ready { .. }));
-            self.bytes =
-                self.images.values().map(|i| if let Img::Pixels { bgra, .. } = i { bgra.len() } else { 0 }).sum();
+            self.bytes = self
+                .images
+                .values()
+                .map(|i| if let Img::Pixels { frames, .. } = i { frames.iter().map(|f| f.bgra.len()).sum() } else { 0 })
+                .sum();
             self.order.retain(|u| self.images.contains_key(u));
         }
         for img in self.images.values_mut() {
-            if let Img::Pixels { w, h, bgra } = img {
+            if let Img::Pixels { w, h, frames } = img {
                 let props = D2D1_BITMAP_PROPERTIES1 {
                     pixelFormat: D2D1_PIXEL_FORMAT {
                         format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -126,19 +137,37 @@ impl ImageStore {
                     colorContext: std::mem::ManuallyDrop::new(None),
                 };
                 let size = D2D_SIZE_U { width: *w, height: *h };
-                *img = match unsafe { dc.CreateBitmap(size, Some(bgra.as_ptr() as *const _), *w * 4, &props) } {
-                    Ok(bmp) => Img::Ready { bmp, w: *w, h: *h },
+                let bitmaps: Result<Vec<(ID2D1Bitmap1, u32)>, _> = frames
+                    .iter()
+                    .map(|f| unsafe {
+                        dc.CreateBitmap(size, Some(f.bgra.as_ptr() as *const _), *w * 4, &props)
+                            .map(|b| (b, f.delay_ms.max(20)))
+                    })
+                    .collect();
+                *img = match bitmaps {
+                    Ok(frames) => Img::Ready { frames, w: *w, h: *h },
                     Err(_) => Img::Failed,
                 };
             }
         }
     }
 
+    /// The bitmap to show now (animated images follow `clock`).
     pub fn bitmap(&self, url: &str) -> Option<ID2D1Bitmap1> {
-        match self.images.get(url) {
-            Some(Img::Ready { bmp, .. }) => Some(bmp.clone()),
-            _ => None,
+        let Some(Img::Ready { frames, .. }) = self.images.get(url) else { return None };
+        if frames.len() == 1 {
+            return Some(frames[0].0.clone());
         }
+        self.animating.set(true);
+        let total: u64 = frames.iter().map(|f| f.1 as u64).sum();
+        let mut t = self.clock % total.max(1);
+        for (bmp, d) in frames {
+            if t < *d as u64 {
+                return Some(bmp.clone());
+            }
+            t -= *d as u64;
+        }
+        frames.last().map(|f| f.0.clone())
     }
 }
 
