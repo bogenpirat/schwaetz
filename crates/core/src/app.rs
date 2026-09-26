@@ -151,6 +151,11 @@ pub struct App {
     pub dirty: Dirty,
     /// Line ids of the per-buffer "last read" separator, for the UI.
     pub now: i64,
+    /// Lines added since the last `take_new_lines` (for scripts).
+    new_lines: Vec<(BufferId, u64)>,
+    pub track_new_lines: bool,
+    /// Mirror raw protocol traffic into per-network "raw log" buffers.
+    pub rawlog: bool,
 }
 
 impl App {
@@ -174,6 +179,9 @@ impl App {
             completer: Completer::default(),
             dirty: Dirty { sidebar: true, lines: true, nicklist: true, topic: true, input: true },
             now: time::now_ms(),
+            new_lines: Vec::new(),
+            track_new_lines: false,
+            rawlog: false,
             config,
         };
         app.status_buffer = app.create_buffer(None, BufferKind::Special, "schwätz");
@@ -256,6 +264,27 @@ impl App {
 
     pub fn take_dirty(&mut self) -> Dirty {
         std::mem::take(&mut self.dirty)
+    }
+
+    pub fn take_new_lines(&mut self) -> Vec<(BufferId, u64)> {
+        std::mem::take(&mut self.new_lines)
+    }
+
+    /// Removes a line (scripts hiding messages).
+    pub fn remove_line(&mut self, buffer: BufferId, line: u64) {
+        if let Some(b) = self.buffer_mut(buffer) {
+            b.lines.retain(|l| l.id != line);
+            b.generation += 1;
+        }
+        self.dirty.lines = true;
+    }
+
+    /// Prints a client-side line into a buffer (scripts, /echo).
+    pub fn print(&mut self, buffer: BufferId, kind: LineKind, nick: &str, text: &str) -> u64 {
+        let line = self.new_line(self.now, kind, nick, text);
+        let id = line.id;
+        self.add_line(buffer, line, Activity::Events);
+        id
     }
 
     pub(crate) fn effect(&mut self, e: Effect) {
@@ -381,7 +410,11 @@ impl App {
         } else {
             None
         };
+        let (bid, lid) = (b.id, line.id);
         b.push(line);
+        if self.track_new_lines {
+            self.new_lines.push((bid, lid));
+        }
         if is_active {
             self.dirty.lines = true;
         }
@@ -593,20 +626,44 @@ impl App {
 
     /// Moves queued session output to the network thread.
     pub(crate) fn flush(&mut self, id: NetworkId) {
+        self.flush_outgoing(id);
         let Some(net) = self.networks.get_mut(&id) else { return };
-        for m in net.session.drain_outgoing() {
-            self.net_out.push(NetCommand::Send(id, m));
-        }
         let events: Vec<SessionEvent> = net.session.drain_events().collect();
         for ev in events {
             self.on_session_event(id, ev);
         }
         // Handling events may queue more output.
-        if let Some(net) = self.networks.get_mut(&id) {
-            for m in net.session.drain_outgoing() {
-                self.net_out.push(NetCommand::Send(id, m));
+        self.flush_outgoing(id);
+    }
+
+    fn flush_outgoing(&mut self, id: NetworkId) {
+        let Some(net) = self.networks.get_mut(&id) else { return };
+        let out: Vec<Message> = net.session.drain_outgoing().collect();
+        for m in out {
+            if self.rawlog {
+                self.raw_log(id, "»", &m);
+            }
+            self.net_out.push(NetCommand::Send(id, m));
+        }
+    }
+
+    /// Appends a line to the network's raw log buffer, masking secrets.
+    fn raw_log(&mut self, id: NetworkId, dir: &str, m: &Message) {
+        let mut shown = m.clone();
+        let secret = shown.is("PASS")
+            || shown.is("OPER")
+            || (shown.is("AUTHENTICATE")
+                && shown.arg(0).len() > 1
+                && !shown.arg(0).chars().all(|c| c.is_ascii_uppercase() || c == '-'));
+        if secret {
+            let skip = usize::from(shown.is("OPER"));
+            for p in shown.params.iter_mut().skip(skip) {
+                *p = "********".into();
             }
         }
+        let bid = self.ensure_buffer(id, BufferKind::Special, "raw log");
+        let line = self.new_line(self.now, LineKind::Server, dir, shown.to_line());
+        self.add_line(bid, line, Activity::None);
     }
 
     // ----- network events ------------------------------------------------------------------------
@@ -650,6 +707,9 @@ impl App {
                 self.dirty.sidebar = true;
             }
             NetEvent::Line { id, msg } => {
+                if self.rawlog && self.networks.contains_key(&id) {
+                    self.raw_log(id, "«", &msg);
+                }
                 if let Some(net) = self.networks.get_mut(&id) {
                     net.session.on_message(msg, now);
                     self.flush(id);
@@ -1192,7 +1252,7 @@ impl App {
         let perform = net.cfg.perform.clone();
         let last_seen = net.last_seen;
         let kind = net.cfg.kind;
-        if net.session.has_cap("znc.in/playback") {
+        if net.session.has_cap("znc.in/playback") && !net.session.supports_chathistory() {
             // Only replay what we haven't seen; on first connect, everything the bouncer buffered.
             net.session.znc_playback(last_seen);
         }
@@ -1295,6 +1355,10 @@ impl App {
             Target::Channel { name, .. } => self.ensure_buffer(net_id, BufferKind::Channel, name),
             Target::Query { peer } => {
                 let existing = self.find_buffer(net_id, peer);
+                if own && existing.is_none() && peer.starts_with('*') && kind != ChatKind::Tagmsg {
+                    // Our own commands to bouncer modules (*playback, *status …) echoed back.
+                    return;
+                }
                 if kind == ChatKind::Notice && existing.is_none() && !own {
                     // Private notices (services, bots) go to the current context instead of opening queries.
                     self.contextual_buffer(net_id)
@@ -1588,6 +1652,10 @@ impl App {
                             .is_none_or(|t| time - *t > window)
                 }
             };
+        if history && self.buffer(bid).is_some_and(|b| b.has_equivalent(time, &user.nick, &text)) {
+            // Replayed by the server (event-playback) and already shown live.
+            return;
+        }
         let mut line = self.new_line(time, kind, &user.nick, text);
         line.flags.set(LineFlags::FILTERED, filtered);
         line.flags.set(LineFlags::OWN, own);

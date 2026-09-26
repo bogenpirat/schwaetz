@@ -1078,6 +1078,8 @@ impl Session {
                 "znc.in/server-time-iso" => !all_offered("server-time"),
                 "znc.in/batch" => !all_offered("batch"),
                 "draft/extended-monitor" => !all_offered("extended-monitor"),
+                // CHATHISTORY is more precise than ZNC-style playback when both exist.
+                "znc.in/playback" => !all_offered("draft/chathistory"),
                 _ => true,
             })
             .map(|c| (*c).to_owned())

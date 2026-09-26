@@ -86,14 +86,17 @@ pub struct Appearance {
     pub colored_nicks: bool,
     pub show_mirc_colors: bool,
     pub mica: bool,
+    /// Render on the GPU. Off by default: the CPU rasterizer (WARP) is fast enough for text and
+    /// avoids the GPU driver's large memory footprint.
+    pub gpu_acceleration: bool,
 }
 
 impl Default for Appearance {
     fn default() -> Self {
         Appearance {
             theme: "system".into(),
-            font: "Cascadia Mono".into(),
-            font_size: 13.0,
+            font: "Segoe UI Variable Text".into(),
+            font_size: 14.0,
             ui_font: "Segoe UI Variable Text".into(),
             timestamp_format: "%H:%M".into(),
             nick_column: true,
@@ -102,6 +105,7 @@ impl Default for Appearance {
             colored_nicks: true,
             show_mirc_colors: true,
             mica: true,
+            gpu_acceleration: false,
         }
     }
 }

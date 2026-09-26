@@ -25,6 +25,7 @@ cmds! {
     "away", "/away [message]", "Mark yourself away (remembered across reconnects). Without a message, same as /back.";
     "back", "/back", "Clear away status.";
     "ban", "/ban <nick|mask>", "Ban a user from the current channel.";
+    "buffer", "/buffer <name|number>", "Switch to a buffer by (partial) name or sidebar position.";
     "clear", "/clear", "Clear the current buffer.";
     "close", "/close", "Close the current buffer (parts channels).";
     "connect", "/connect <network|host[:[+]port]> [nick]", "Connect to a configured network or an ad-hoc server.";
@@ -61,6 +62,7 @@ cmds! {
     "quit", "/quit [message]", "Disconnect from all networks and exit.";
     "quote", "/quote <raw line>", "Send a raw line to the server.";
     "raw", "/raw <raw line>", "Send a raw line to the server.";
+    "rawlog", "/rawlog", "Toggle a per-network buffer showing raw protocol traffic (passwords masked).";
     "reconnect", "/reconnect", "Reconnect to the current network now.";
     "reload", "/reload", "Reload scripts.";
     "say", "/say <text>", "Send text as a message (even if it starts with /).";
@@ -613,7 +615,7 @@ impl App {
                     self.raw(net, Message::new("PRIVMSG", ["*status", args]), buffer);
                 }
             }
-            "connect" | "server" => self.cmd_connect(buffer, arg1, rest_after1),
+            "connect" | "server" => self.cmd_connect(buffer, args.trim(), arg1, rest_after1),
             "disconnect" => {
                 let Some(net) = self.require_net(buffer) else { return };
                 self.disconnect(net, if args.is_empty() { None } else { Some(args.to_owned()) });
@@ -742,6 +744,37 @@ impl App {
                 self.effect(Effect::Search { query: args.to_owned(), network: net, buffer: None });
             }
             "reload" => self.effect(Effect::ReloadScripts),
+            "buffer" | "b" | "goto" => {
+                if args.is_empty() {
+                    return self.usage(buffer, "buffer");
+                }
+                let order = self.sidebar_order();
+                let target = if let Ok(n) = args.parse::<usize>() {
+                    order.get(n.saturating_sub(1)).copied()
+                } else {
+                    let want = args.to_lowercase();
+                    let name_of = |id: &BufferId| self.buffer(*id).map(|b| b.name.to_lowercase()).unwrap_or_default();
+                    order
+                        .iter()
+                        .find(|id| name_of(id) == want)
+                        .or_else(|| {
+                            order.iter().find(|id| {
+                                name_of(id).trim_start_matches(['#', '&']) == want.trim_start_matches(['#', '&'])
+                            })
+                        })
+                        .or_else(|| order.iter().find(|id| name_of(id).contains(&want)))
+                        .copied()
+                };
+                match target {
+                    Some(id) => self.switch_to(id),
+                    None => self.status(buffer, LineKind::Error, format!("No buffer matching \"{args}\"")),
+                }
+            }
+            "rawlog" => {
+                self.rawlog = !self.rawlog;
+                let state = if self.rawlog { "on — see the \"raw log\" buffer of each network" } else { "off" };
+                self.status(buffer, LineKind::Status, format!("Raw protocol log {state}"));
+            }
             _ => {
                 // Unknown commands go to the server verbatim (e.g. /knock, /oper, /stats, /cs …).
                 if let Some(net) = self.net_of(buffer) {
@@ -810,7 +843,7 @@ impl App {
         out
     }
 
-    fn cmd_connect(&mut self, buffer: BufferId, target: &str, nick: &str) {
+    fn cmd_connect(&mut self, buffer: BufferId, full: &str, target: &str, nick: &str) {
         if target.is_empty() {
             match self.net_of(buffer) {
                 Some(net) => self.connect(net),
@@ -818,14 +851,28 @@ impl App {
             }
             return;
         }
-        // A configured network by name?
-        if let Some(net) = self.networks.values().find(|n| n.cfg.name.eq_ignore_ascii_case(target)).map(|n| n.id) {
+        // A configured network by (possibly multi-word) name?
+        if let Some(net) = self
+            .networks
+            .values()
+            .find(|n| n.cfg.name.eq_ignore_ascii_case(full) || n.cfg.name.eq_ignore_ascii_case(target))
+            .map(|n| n.id)
+        {
             self.connect(net);
             self.switch_to(self.networks[&net].server_buffer);
             return;
         }
-        let Some((host, _, _)) = NetworkConfig::parse_server(target) else {
-            return self.status(buffer, LineKind::Error, format!("Invalid server address: {target}"));
+        let host = NetworkConfig::parse_server(target)
+            .map(|(h, _, _)| h)
+            .filter(|h| h.contains(['.', ':']) || h.eq_ignore_ascii_case("localhost"));
+        let Some(host) = host else {
+            return self.status(
+                buffer,
+                LineKind::Error,
+                format!(
+                    "No network named \"{full}\" and not a server address. Use /connect host[:port] or a network name."
+                ),
+            );
         };
         if let Some(net) = self
             .networks

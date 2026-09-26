@@ -1,0 +1,19 @@
+[package]
+name = "schwaetz"
+description = "A fast, native IRC client for Windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "schwaetz"
+path = "src/main.rs"
+
+[dependencies]
+schwaetz-core.workspace = true
+schwaetz-ui.workspace = true
+
+[build-dependencies]
+embed-resource = "3"

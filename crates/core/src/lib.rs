@@ -11,6 +11,7 @@ pub mod config;
 pub mod filter;
 pub mod paths;
 pub mod secrets;
+pub mod services;
 pub mod time;
 pub mod twitch;
 pub mod znc;

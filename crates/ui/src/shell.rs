@@ -1,0 +1,1775 @@
+//! The main window: owns the model, services and widgets, and routes Win32 messages.
+
+use crate::chat::{ChatView, Ctx, Hit, LinkTarget};
+use crate::editor::Editor;
+use crate::gfx::{Gfx, Painter, Rect, rgba, with_alpha};
+use crate::lists::{NickList, Sidebar};
+use crate::overlay::{ConfirmAction, Overlay, OverlayClick, draw_field};
+use crate::text::{self, Brushes, Text};
+use crate::theme::Theme;
+use crate::win::{self, MenuItem, Tray};
+use schwaetz_core::services::{HistoryStore, ScriptHost};
+use schwaetz_core::{
+    App, BufferId, BufferKind, Config, ConnState, Effect, LineKind, NetworkConfig, NetworkKind, NotifyLevel, Paths,
+};
+use schwaetz_net::{NetCommand, NetEvent, NetHandle};
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicIsize, Ordering};
+use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT, ScreenToClient};
+const PBT_APMRESUMEAUTOMATIC: u32 = 0x12;
+const PBT_APMRESUMESUSPEND: u32 = 0x07;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::Ime::{
+    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, ImmGetContext, ImmReleaseContext,
+    ImmSetCandidateWindow, ImmSetCompositionWindow,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::{HSTRING, PCWSTR, w};
+
+pub const WM_APP_NET: u32 = WM_APP + 1;
+/// `dwData` tag for WM_COPYDATA messages carrying input for the running instance.
+pub const COPYDATA_MAGIC: usize = 0x5357_4158;
+const TIMER_TICK: usize = 1;
+const TIMER_CARET: usize = 2;
+const SIDEBAR_MIN: f32 = 160.0;
+const TOPIC_H: f32 = 56.0;
+const NICKLIST_W: f32 = 210.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Drag {
+    None,
+    Chat,
+    Input,
+    Splitter,
+}
+
+pub struct Services {
+    pub history: Option<Box<dyn HistoryStore>>,
+    pub scripts: Option<Box<dyn ScriptHost>>,
+}
+
+pub struct Ui {
+    hwnd: HWND,
+    gfx: Option<Gfx>,
+    text: Text,
+    theme: Theme,
+    brushes: Brushes,
+    pub app: App,
+    net: NetHandle,
+    services: Services,
+    paths: Paths,
+    sidebar: Sidebar,
+    chat: ChatView,
+    nicklist: NickList,
+    input: Editor,
+    overlay: Option<Overlay>,
+    sidebar_w: f32,
+    show_nicklist: bool,
+    topic_rect: Rect,
+    input_rect: Rect,
+    typing_rect: Rect,
+    win_rect: Rect,
+    scale: f32,
+    mica: bool,
+    drag: Drag,
+    caret_on: bool,
+    last_click: (u32, f32, f32, u32),
+    tray: Tray,
+    notify_buffer: Option<BufferId>,
+    high_surrogate: Option<u16>,
+    last_typing_sent: i64,
+    shown_buffer: Option<BufferId>,
+    nicklist_gen: (Option<BufferId>, u64),
+    quitting: bool,
+    active_window: bool,
+}
+
+thread_local! {
+    static UI: RefCell<Option<Box<Ui>>> = const { RefCell::new(None) };
+}
+
+/// Creates the window and runs the message loop until the app exits.
+pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<String>) -> windows::core::Result<()> {
+    unsafe {
+        let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
+    }
+    let hinst: HINSTANCE = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?.into() };
+    let class = w!("schwaetz.main");
+    let wc = WNDCLASSEXW {
+        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+        style: CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW,
+        lpfnWndProc: Some(wndproc),
+        hInstance: hinst,
+        hIcon: win::app_icon(false),
+        hIconSm: win::app_icon(true),
+        hCursor: unsafe { LoadCursorW(None, IDC_ARROW)? },
+        lpszClassName: class,
+        ..Default::default()
+    };
+    unsafe { RegisterClassExW(&wc) };
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WS_EX_NOREDIRECTIONBITMAP,
+            class,
+            w!("schwätz"),
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            None,
+            None,
+            Some(hinst),
+            None,
+        )?
+    };
+    let dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
+    let scale = dpi / 96.0;
+    unsafe {
+        let _ =
+            SetWindowPos(hwnd, None, 0, 0, (1180.0 * scale) as i32, (760.0 * scale) as i32, SWP_NOMOVE | SWP_NOZORDER);
+    }
+
+    let hwnd_shared = Arc::new(AtomicIsize::new(hwnd.0 as isize));
+    let wake_target = hwnd_shared.clone();
+    let net = NetHandle::start(move || {
+        let h = HWND(wake_target.load(Ordering::Relaxed) as *mut _);
+        unsafe {
+            let _ = PostMessageW(Some(h), WM_APP_NET, WPARAM(0), LPARAM(0));
+        }
+    })
+    .map_err(|e| windows::core::Error::new(E_FAIL, e.to_string()))?;
+
+    let mut gfx = Gfx::new(hwnd)?;
+    gfx.set_dpi(dpi);
+    let text = Text::new(
+        gfx.dwrite.clone(),
+        &config.appearance.font,
+        config.appearance.font_size,
+        &config.appearance.ui_font,
+    )?;
+    let mut app = App::new(config);
+    app.track_new_lines = services.scripts.is_some();
+    for note in startup_notes {
+        let sb = app.status_buffer;
+        app.print(sb, LineKind::Status, "", &note);
+    }
+    let mut ui = Box::new(Ui {
+        hwnd,
+        gfx: Some(gfx),
+        text,
+        theme: Theme::dark(),
+        brushes: Brushes::default(),
+        app,
+        net,
+        services,
+        paths,
+        sidebar: Sidebar::default(),
+        chat: ChatView::default(),
+        nicklist: NickList::default(),
+        input: Editor::default(),
+        overlay: None,
+        sidebar_w: 230.0,
+        show_nicklist: false,
+        topic_rect: Rect::default(),
+        input_rect: Rect::default(),
+        typing_rect: Rect::default(),
+        win_rect: Rect::default(),
+        scale,
+        mica: false,
+        drag: Drag::None,
+        caret_on: true,
+        last_click: (0, 0.0, 0.0, 0),
+        tray: Tray::new(hwnd),
+        notify_buffer: None,
+        high_surrogate: None,
+        last_typing_sent: 0,
+        shown_buffer: None,
+        nicklist_gen: (None, 0),
+        quitting: false,
+        active_window: true,
+    });
+    ui.apply_appearance();
+    ui.tray.add();
+    ui.welcome();
+    ui.app.connect_auto();
+    ui.after_update();
+    UI.with(|c| *c.borrow_mut() = Some(ui));
+    unsafe {
+        SetTimer(Some(hwnd), TIMER_TICK, 1000, None);
+        SetTimer(Some(hwnd), TIMER_CARET, GetCaretBlinkTime().max(300), None);
+        let _ = ShowWindow(hwnd, SW_SHOWDEFAULT);
+    }
+
+    let mut msg = MSG::default();
+    unsafe {
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    // Drop the UI (and with it the network thread, which sends QUITs) after the loop.
+    let ui = UI.with(|c| c.borrow_mut().take());
+    if let Some(mut ui) = ui {
+        if let Some(h) = ui.services.history.as_mut() {
+            h.flush();
+        }
+        drop(ui);
+    }
+    Ok(())
+}
+
+extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let handled = UI.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut guard) => guard.as_mut().and_then(|ui| ui.handle(msg, wp, lp)),
+        // Re-entered from a nested modal loop (context menu): default processing.
+        Err(_) => None,
+    });
+    match handled {
+        Some(r) => r,
+        None => {
+            if msg == WM_DESTROY {
+                unsafe { PostQuitMessage(0) };
+                return LRESULT(0);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+        }
+    }
+}
+
+fn now() -> i64 {
+    schwaetz_core::time::now_ms()
+}
+
+impl Ui {
+    fn invalidate(&self) {
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
+    }
+
+    fn welcome(&mut self) {
+        let sb = self.app.status_buffer;
+        let lines = [
+            format!("Welcome to schwätz {}.", env!("CARGO_PKG_VERSION")),
+            "Connect with /connect irc.libera.chat (or a configured network name), then /join #channel.".to_owned(),
+            "Ctrl+J quick switcher · Alt+1…9 switch buffers · Alt+A next activity · Ctrl+W close · /help lists commands.".to_owned(),
+            format!("Settings live in {} — edit with /set section.key value.", self.paths.config_file().display()),
+        ];
+        if self.app.networks.is_empty() {
+            for l in lines {
+                self.app.print(sb, LineKind::Status, "", &l);
+            }
+        } else {
+            self.app.print(sb, LineKind::Status, "", &lines[0]);
+        }
+    }
+
+    /// Re-reads theme, fonts and window chrome from the config.
+    fn apply_appearance(&mut self) {
+        let a = &self.app.config.appearance;
+        let dark = match a.theme.as_str() {
+            "light" => false,
+            "dark" => true,
+            "system" => win::is_system_dark(),
+            name => {
+                let path = self.paths.themes_dir().join(format!("{name}.toml"));
+                match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| Theme::from_toml(&t)) {
+                    Ok(t) => {
+                        self.theme = t;
+                        self.finish_appearance();
+                        return;
+                    }
+                    Err(e) => {
+                        let sb = self.app.status_buffer;
+                        self.app.print(sb, LineKind::Error, "", &format!("Theme {name}: {e}"));
+                        win::is_system_dark()
+                    }
+                }
+            }
+        };
+        self.theme = if dark { Theme::dark() } else { Theme::light() };
+        self.finish_appearance();
+    }
+
+    fn finish_appearance(&mut self) {
+        let a = &self.app.config.appearance;
+        let _ = self.text.reconfigure(&a.font, a.font_size, &a.ui_font);
+        if let Some(g) = self.gfx.as_mut() {
+            g.set_gpu(a.gpu_acceleration);
+        }
+        self.app.dark_theme = self.theme.dark;
+        win::set_dark_titlebar(self.hwnd, self.theme.dark);
+        win::allow_dark_menus(self.theme.dark);
+        self.mica = win::enable_mica(self.hwnd, a.mica);
+        self.chat.style_gen += 1;
+        self.invalidate();
+    }
+
+    fn client_size(&self) -> (u32, u32) {
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut r);
+        }
+        ((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32)
+    }
+
+    fn layout(&mut self) {
+        let (pw, ph) = self.client_size();
+        let (w, h) = (pw as f32 / self.scale, ph as f32 / self.scale);
+        self.win_rect = Rect::new(0.0, 0.0, w, h);
+        self.sidebar_w = self.sidebar_w.clamp(SIDEBAR_MIN, (w * 0.4).max(SIDEBAR_MIN));
+        let sw = self.sidebar_w;
+        self.sidebar.rect = Rect::new(0.0, 0.0, sw, h);
+        let active = self.app.active_buffer();
+        let is_channel = active.kind == BufferKind::Channel;
+        self.show_nicklist = is_channel && self.app.config.appearance.show_nicklist && w - sw > 640.0;
+        let nick_w = if self.show_nicklist { NICKLIST_W } else { 0.0 };
+        let main_w = w - sw;
+        self.topic_rect = Rect::new(sw, 0.0, main_w, TOPIC_H);
+        // Input grows with its content (up to ~8 lines).
+        let lh = self.text.fonts.line_height;
+        let content = self.input.content_height().max(lh);
+        let input_h = (content + 22.0).clamp(lh + 22.0, lh * 8.0 + 22.0);
+        let typing_h = 20.0;
+        let chat_w = main_w - nick_w;
+        self.input_rect = Rect::new(sw + 14.0, h - input_h - 14.0, chat_w - 28.0, input_h);
+        self.typing_rect = Rect::new(sw + 16.0, self.input_rect.y - typing_h, chat_w - 32.0, typing_h);
+        let chat_top = TOPIC_H;
+        self.chat.rect = Rect::new(sw, chat_top, chat_w, self.typing_rect.y - chat_top);
+        self.nicklist.rect = Rect::new(w - nick_w, chat_top, nick_w, h - chat_top);
+    }
+
+    fn chat_ctx<'a>(
+        text: &'a Text,
+        theme: &'a Theme,
+        brushes: &'a mut Brushes,
+        dc: &'a windows::Win32::Graphics::Direct2D::ID2D1DeviceContext,
+        dgen: u64,
+        cfg: &'a Config,
+    ) -> Ctx<'a> {
+        let a = &cfg.appearance;
+        Ctx {
+            text,
+            theme,
+            brushes,
+            dc,
+            gfx_gen: dgen,
+            ts_format: &a.timestamp_format,
+            nick_column: a.nick_column,
+            nick_column_chars: a.nick_column_width,
+            colors: a.show_mirc_colors,
+            colored_nicks: a.colored_nicks,
+        }
+    }
+
+    fn paint(&mut self) {
+        self.layout();
+        self.sync_active();
+        let (pw, ph) = self.client_size();
+        let Some(mut gfx) = self.gfx.take() else { return };
+        let dgen = gfx.generation;
+        let r = gfx.frame(pw, ph, |dc| self.draw(dc, dgen));
+        self.gfx = Some(gfx);
+        if let Err(e) = r {
+            tracing::error!("render failed: {e}");
+        }
+        if self.chat.wants_older {
+            self.chat.wants_older = false;
+            let id = self.app.active;
+            self.app.request_older(id);
+            self.after_update();
+        }
+    }
+
+    /// Keeps widgets in sync with the active buffer.
+    fn sync_active(&mut self) {
+        let id = self.app.active;
+        if self.shown_buffer != Some(id) {
+            // Save the draft of the buffer we're leaving and restore the new one's.
+            if let Some(prev) = self.shown_buffer {
+                let draft = self.input.text().to_owned();
+                if let Some(b) = self.app.buffer_mut(prev) {
+                    b.input.draft = draft;
+                    b.input.pos = None;
+                }
+            }
+            let (marker, draft) =
+                self.app.buffer(id).map(|b| (b.read_marker, b.input.draft.clone())).unwrap_or_default();
+            self.chat.set_buffer(id, marker);
+            self.input.set_text(&draft, None);
+            self.shown_buffer = Some(id);
+            self.nicklist_gen = (None, 0);
+            self.nicklist.scroll = 0.0;
+            self.update_title();
+        }
+        let dgen = self.app.buffer(id).map_or(0, |b| b.generation);
+        if self.nicklist_gen != (Some(id), dgen) && self.show_nicklist {
+            self.nicklist.refresh(&self.app, id);
+            self.nicklist_gen = (Some(id), dgen);
+        }
+    }
+
+    fn update_title(&self) {
+        let (t, _) = self.app.topic_for(self.app.active);
+        let title = HSTRING::from(format!("{t} — schwätz"));
+        unsafe {
+            let _ = SetWindowTextW(self.hwnd, &title);
+        }
+    }
+
+    fn draw(&mut self, dc: &windows::Win32::Graphics::Direct2D::ID2D1DeviceContext, dgen: u64) {
+        let p = Painter::new(dc);
+        let th = self.theme.clone();
+        if self.mica {
+            p.clear(rgba(0, 0, 0, 0.0));
+            p.fill(self.sidebar.rect, th.backdrop);
+        } else {
+            p.clear(th.backdrop_opaque);
+        }
+        self.sidebar.render(&p, &self.text, &th, &self.app);
+
+        // Topic bar.
+        let tr = self.topic_rect;
+        p.fill(tr, th.topic_bg);
+        p.line(tr.x, tr.bottom() - 0.5, tr.right(), tr.bottom() - 0.5, th.border, 1.0);
+        let (title, sub) = self.app.topic_for(self.app.active);
+        let f = &self.text.fonts;
+        let tl = self.text.layout(&title, &f.title, tr.w - 40.0, 30.0);
+        p.text(&tl, tr.x + 18.0, tr.y + 9.0, th.text);
+        let sub = schwaetz_proto::format::strip(&sub).replace(['\n', '\r'], " ");
+        let sl = self.text.layout(&sub, &f.ui, tr.w - 40.0, 20.0);
+        p.text(&sl, tr.x + 18.0, tr.y + 32.0, th.text_dim);
+
+        // Chat.
+        let id = self.app.active;
+        {
+            let Ui { ref mut chat, ref text, ref mut brushes, ref app, .. } = *self;
+            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, &app.config);
+            if let Some(b) = app.buffer(id) {
+                chat.render(&p, &mut ctx, b);
+            }
+        }
+
+        // Typing indicator.
+        let typing = self.app.buffer(id).map(|b| b.typing_nicks(now()).join(", ")).unwrap_or_default();
+        let chat_bottom = Rect::new(
+            self.chat.rect.x,
+            self.chat.rect.bottom(),
+            self.chat.rect.w,
+            self.win_rect.h - self.chat.rect.bottom(),
+        );
+        p.fill(chat_bottom, th.chat_bg);
+        if !typing.is_empty() {
+            let verb = if typing.contains(',') { "are" } else { "is" };
+            let l = self.text.layout(&format!("{typing} {verb} typing…"), &f.ui_small, self.typing_rect.w, 20.0);
+            p.text(&l, self.typing_rect.x, self.typing_rect.y + 2.0, th.text_dim);
+        }
+
+        // Input box.
+        let ir = self.input_rect;
+        p.fill_round(ir, 10.0, th.input_bg);
+        p.stroke_round(ir, 10.0, th.border, 1.0);
+        let inner = ir.inset(14.0, 11.0);
+        let layout = self.input.layout(&self.text, &f.chat, inner.w).clone();
+        let content_h = text::metrics(&layout).height;
+        let (cx, cy, ch) = self.input.caret();
+        let scroll_y = (cy + ch - inner.h).max(0.0).min((content_h - inner.h).max(0.0));
+        p.clip(inner.inset(-2.0, 0.0));
+        if self.input.is_empty() {
+            let b = self.app.active_buffer();
+            let ph = match b.kind {
+                BufferKind::Channel | BufferKind::Query => format!("Message {}", b.name),
+                _ => "Type a command, e.g. /connect irc.libera.chat".to_owned(),
+            };
+            let l = self.text.layout(&ph, &f.chat, inner.w, 40.0);
+            p.text(&l, inner.x, inner.y, th.text_dim);
+        }
+        for (sx, sy, sw, sh) in self.input.selection_rects() {
+            p.fill(Rect::new(inner.x + sx, inner.y + sy - scroll_y, sw, sh), th.selection);
+        }
+        p.text(&layout, inner.x, inner.y - scroll_y, th.text);
+        if self.caret_on && self.overlay.is_none() && self.active_window {
+            p.fill(Rect::new(inner.x + cx, inner.y + cy - scroll_y, 1.5, ch), th.accent);
+        }
+        p.unclip();
+        self.set_ime_pos(inner.x + cx, inner.y + cy - scroll_y + ch);
+
+        if self.show_nicklist {
+            self.nicklist.render(&p, &self.text, &th);
+        }
+        // Sidebar edge.
+        p.line(self.sidebar_w - 0.5, 0.0, self.sidebar_w - 0.5, self.win_rect.h, th.border, 1.0);
+
+        if let Some(o) = self.overlay.as_mut() {
+            o.render(&p, &self.text, &th, &self.app, self.win_rect, self.caret_on);
+        }
+        let _ = draw_field;
+        let _ = with_alpha;
+    }
+
+    fn set_ime_pos(&self, x: f32, y: f32) {
+        unsafe {
+            let himc = ImmGetContext(self.hwnd);
+            if himc.is_invalid() {
+                return;
+            }
+            let pt = POINT { x: (x * self.scale) as i32, y: (y * self.scale) as i32 };
+            let cf = COMPOSITIONFORM {
+                dwStyle: CFS_POINT,
+                ptCurrentPos: POINT { x: pt.x, y: pt.y - (self.text.fonts.line_height * self.scale) as i32 },
+                ..Default::default()
+            };
+            let _ = ImmSetCompositionWindow(himc, &cf);
+            let cand = CANDIDATEFORM { dwIndex: 0, dwStyle: CFS_CANDIDATEPOS, ptCurrentPos: pt, ..Default::default() };
+            let _ = ImmSetCandidateWindow(himc, &cand);
+            let _ = ImmReleaseContext(self.hwnd, himc);
+        }
+    }
+
+    // ----- model plumbing ------------------------------------------------------------------------
+
+    fn process_net(&mut self) {
+        let events: Vec<NetEvent> = self.net.drain().collect();
+        if events.is_empty() {
+            return;
+        }
+        let t = now();
+        for ev in events {
+            if let (Some(host), NetEvent::Line { id, msg }) = (self.services.scripts.as_mut(), &ev) {
+                let name = self.app.network(*id).map(|n| n.display_name().to_owned()).unwrap_or_default();
+                host.on_raw(&mut self.app, &name, msg);
+            }
+            self.app.on_net_event(ev, t);
+        }
+        self.after_update();
+    }
+
+    /// Forwards network commands, runs effects and schedules a repaint.
+    fn after_update(&mut self) {
+        for _ in 0..4 {
+            if let Some(host) = self.services.scripts.as_mut() {
+                let lines = self.app.take_new_lines();
+                if !lines.is_empty() {
+                    host.on_lines(&mut self.app, &lines);
+                }
+            }
+            for cmd in self.app.take_net_commands() {
+                self.net.send(cmd);
+            }
+            let effects = self.app.take_effects();
+            if effects.is_empty() {
+                break;
+            }
+            for e in effects {
+                self.effect(e);
+            }
+        }
+        let d = self.app.take_dirty();
+        if d.sidebar || d.topic {
+            self.update_title();
+        }
+        if d.lines || d.sidebar || d.nicklist || d.topic || d.input {
+            if d.nicklist {
+                self.nicklist_gen = (None, 0);
+            }
+            self.invalidate();
+        }
+    }
+
+    fn effect(&mut self, e: Effect) {
+        match e {
+            Effect::Notify { title, body, buffer } => {
+                self.notify_buffer = Some(buffer);
+                self.tray.notify(&title, &body);
+            }
+            Effect::FlashTaskbar => unsafe {
+                let fi = FLASHWINFO {
+                    cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+                    hwnd: self.hwnd,
+                    dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+                    uCount: 3,
+                    dwTimeout: 0,
+                };
+                let _ = FlashWindowEx(&fi);
+            },
+            Effect::ChannelList(net) => {
+                match self.overlay.as_mut() {
+                    Some(o @ Overlay::ChannelList { .. }) => o.refresh(&self.app),
+                    _ => {
+                        let mut o = Overlay::channel_list(net);
+                        o.refresh(&self.app);
+                        self.overlay = Some(o);
+                    }
+                }
+                self.invalidate();
+            }
+            Effect::ZncNetworks { network, names } => {
+                let existing: Vec<String> =
+                    self.app.networks.values().filter_map(|n| n.cfg.znc_network.clone()).collect();
+                let names: Vec<String> = names.into_iter().filter(|n| !existing.contains(n)).collect();
+                if names.is_empty() {
+                    let sb = self.app.networks[&network].server_buffer;
+                    self.app.print(sb, LineKind::Status, "", "All ZNC networks are already configured.");
+                } else {
+                    self.overlay = Some(Overlay::Confirm {
+                        title: "Add ZNC networks?".into(),
+                        body: format!(
+                            "Your bouncer has {} more network(s): {}. Add them as connections using the same login?",
+                            names.len(),
+                            names.join(", ")
+                        ),
+                        yes: "Add networks".into(),
+                        action: ConfirmAction::AddZncNetworks { net: network, names },
+                    });
+                }
+            }
+            Effect::BouncerNetworks(net) => {
+                let Some(n) = self.app.network(net) else { return };
+                let sb = n.server_buffer;
+                let list: Vec<String> = n
+                    .bouncer_networks
+                    .iter()
+                    .map(|(id, attrs)| {
+                        let name = attrs.iter().find(|(k, _)| k == "name").map(|(_, v)| v.as_str()).unwrap_or("?");
+                        let state = attrs.iter().find(|(k, _)| k == "state").map(|(_, v)| v.as_str()).unwrap_or("?");
+                        format!("{name} (id {id}, {state})")
+                    })
+                    .collect();
+                self.app.print(sb, LineKind::Status, "", &format!("Bouncer networks: {}", list.join(", ")));
+            }
+            Effect::ConfirmPaste { buffer, text, lines } => {
+                let preview: String = text.lines().take(3).collect::<Vec<_>>().join(" ⏎ ");
+                self.overlay = Some(Overlay::Confirm {
+                    title: format!("Send {lines} lines?"),
+                    body: format!(
+                        "You are about to send {lines} lines: “{}…”",
+                        preview.chars().take(160).collect::<String>()
+                    ),
+                    yes: "Send".into(),
+                    action: ConfirmAction::Paste { buffer, text },
+                });
+                self.invalidate();
+            }
+            Effect::Log { network, buffer, line } => {
+                if let Some(h) = self.services.history.as_mut() {
+                    h.log(&network, &buffer, &line);
+                }
+            }
+            Effect::LoadHistory { buffer, network, name, before } => {
+                let lines = match self.services.history.as_mut() {
+                    Some(h) => h.load_before(&network, &name, before, 200),
+                    None => Vec::new(),
+                };
+                self.app.insert_history(buffer, lines);
+            }
+            Effect::Search { query, network, buffer } => {
+                let results = match self.services.history.as_mut() {
+                    Some(h) => h.search(&query, network.as_deref(), buffer.as_deref(), 200),
+                    None => Vec::new(),
+                };
+                let id = self.app.active;
+                self.app.print(id, LineKind::Status, "", &format!("Search results for \"{query}\": {}", results.len()));
+                for (net, buf, line) in results.into_iter().rev() {
+                    let t = schwaetz_core::time::format("%Y-%m-%d %H:%M", schwaetz_core::time::local(line.time));
+                    let txt = format!(
+                        "[{t}] {net}/{buf} <{}> {}",
+                        line.display_nick(),
+                        schwaetz_proto::format::strip(&line.text)
+                    );
+                    self.app.print(id, LineKind::Server, "", &txt);
+                }
+            }
+            Effect::SaveConfig => {
+                if let Err(e) = self.app.config.save(&self.paths.config_file()) {
+                    let sb = self.app.status_buffer;
+                    self.app.print(sb, LineKind::Error, "", &format!("Could not save settings: {e}"));
+                }
+            }
+            Effect::ConfigChanged => self.apply_appearance(),
+            Effect::OpenUrl(u) => win::open_url(&u),
+            Effect::ReloadScripts => {
+                if let Some(h) = self.services.scripts.as_mut() {
+                    h.reload(&mut self.app);
+                } else {
+                    let id = self.app.active;
+                    self.app.print(id, LineKind::Error, "", "Scripting is not available in this build.");
+                }
+            }
+            Effect::Quit => self.begin_quit(),
+        }
+    }
+
+    fn begin_quit(&mut self) {
+        if self.quitting {
+            return;
+        }
+        self.quitting = true;
+        self.app.quit_all(None);
+        for cmd in self.app.take_net_commands() {
+            self.net.send(cmd);
+        }
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
+        }
+    }
+
+    // ----- input ---------------------------------------------------------------------------------
+
+    fn submit(&mut self) {
+        let text = self.input.text().to_owned();
+        if text.trim().is_empty() {
+            return;
+        }
+        let id = self.app.active;
+        self.input.clear();
+        if let Some(b) = self.app.buffer_mut(id) {
+            b.input.draft.clear();
+        }
+        let consumed = match self.services.scripts.as_mut() {
+            Some(h) => h.on_input(&mut self.app, id, &text),
+            None => false,
+        };
+        if !consumed {
+            self.app.input(id, &text);
+        }
+        if self.last_typing_sent > 0 {
+            self.last_typing_sent = 0;
+        }
+        self.chat.scroll_to_bottom();
+        self.after_update();
+    }
+
+    fn typed(&mut self) {
+        let t = now();
+        let text = self.input.text();
+        if text.is_empty() || text.starts_with('/') {
+            if self.last_typing_sent > 0 {
+                self.last_typing_sent = 0;
+                let id = self.app.active;
+                self.app.typing(id, "done");
+                self.after_update();
+            }
+            return;
+        }
+        if t - self.last_typing_sent > 3000 {
+            self.last_typing_sent = t;
+            let id = self.app.active;
+            self.app.typing(id, "active");
+            self.after_update();
+        }
+    }
+
+    fn switch_relative(&mut self, delta: i32) {
+        let order = self.app.sidebar_order();
+        if order.is_empty() {
+            return;
+        }
+        let pos = order.iter().position(|b| *b == self.app.active).unwrap_or(0) as i32;
+        let next = order[((pos + delta).rem_euclid(order.len() as i32)) as usize];
+        self.switch_to(next);
+    }
+
+    fn switch_to(&mut self, id: BufferId) {
+        self.app.switch_to(id);
+        self.after_update();
+    }
+
+    fn next_activity(&mut self) {
+        let order = self.app.sidebar_order();
+        let best = order
+            .iter()
+            .filter(|id| **id != self.app.active)
+            .filter_map(|id| self.app.buffer(*id).map(|b| (b.activity, *id)))
+            .filter(|(a, _)| *a > schwaetz_core::Activity::Events)
+            .max_by_key(|(a, _)| *a);
+        if let Some((_, id)) = best {
+            self.switch_to(id);
+        }
+    }
+
+    fn copy(&mut self) -> bool {
+        if self.input.has_selection() {
+            win::set_clipboard(self.hwnd, self.input.selected_text());
+            return true;
+        }
+        let b = self.app.active_buffer();
+        if let Some(t) = self.chat.selected_text(b, &self.app.config.appearance.timestamp_format) {
+            win::set_clipboard(self.hwnd, &t);
+            return true;
+        }
+        false
+    }
+
+    fn chat_scroll(&mut self, dy: f32) {
+        let Some(mut gfx) = self.gfx.take() else { return };
+        // Scrolling needs line heights, which need a device context for brushes.
+        let dgen = gfx.generation;
+        let (pw, ph) = self.client_size();
+        let _ = gfx.frame(pw, ph, |dc| {
+            let id = self.app.active;
+            let Ui { ref mut chat, ref text, ref mut brushes, ref app, ref theme, .. } = *self;
+            let th = theme.clone();
+            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, &app.config);
+            if let Some(b) = app.buffer(id) {
+                chat.scroll(&mut ctx, b, dy);
+            }
+            self.draw(dc, dgen);
+        });
+        self.gfx = Some(gfx);
+        if self.chat.wants_older {
+            self.chat.wants_older = false;
+            let id = self.app.active;
+            self.app.request_older(id);
+            self.after_update();
+        }
+    }
+
+    fn key_down(&mut self, vk: u16) -> bool {
+        let ctrl = win::key_down(VK_CONTROL.0);
+        let shift = win::key_down(VK_SHIFT.0);
+        let alt = win::key_down(VK_MENU.0);
+        let v = VIRTUAL_KEY(vk);
+
+        if self.overlay.is_some() {
+            return self.overlay_key(v, ctrl, shift);
+        }
+        let lh = self.text.fonts.line_height;
+        match v {
+            VK_RETURN if shift => self.input.insert("\n"),
+            VK_RETURN => self.submit(),
+            VK_TAB if ctrl => self.switch_relative(if shift { -1 } else { 1 }),
+            VK_TAB => {
+                let id = self.app.active;
+                let (t, c) = (self.input.text().to_owned(), self.input.cursor);
+                if let Some((nt, nc)) = self.app.complete(id, &t, c, shift) {
+                    self.input.set_text(&nt, Some(nc));
+                }
+            }
+            VK_UP if alt => self.switch_relative(-1),
+            VK_DOWN if alt => self.switch_relative(1),
+            VK_UP | VK_DOWN => {
+                let down = v == VK_DOWN;
+                if ctrl {
+                    self.chat_scroll(if down { -lh } else { lh });
+                } else if !self.input.move_v(down, shift) && !shift {
+                    let id = self.app.active;
+                    let cur = self.input.text().to_owned();
+                    let entry = self.app.buffer_mut(id).and_then(|b| {
+                        if down { b.input.newer().map(str::to_owned) } else { b.input.older(&cur).map(str::to_owned) }
+                    });
+                    if let Some(e) = entry {
+                        self.input.set_text(&e, None);
+                    }
+                }
+            }
+            VK_PRIOR if ctrl => self.switch_relative(-1),
+            VK_NEXT if ctrl => self.switch_relative(1),
+            VK_PRIOR => self.chat_scroll(self.chat.rect.h * 0.85),
+            VK_NEXT => self.chat_scroll(-self.chat.rect.h * 0.85),
+            VK_END if ctrl && self.input.is_empty() => self.chat.scroll_to_bottom(),
+            VK_LEFT => self.input.move_h(false, ctrl, shift),
+            VK_RIGHT => self.input.move_h(true, ctrl, shift),
+            VK_HOME => self.input.home(shift, ctrl),
+            VK_END => self.input.end(shift, ctrl),
+            VK_BACK => self.input.backspace(ctrl),
+            VK_DELETE => self.input.delete(ctrl),
+            VK_ESCAPE => {
+                if self.chat.selection.take().is_none() {
+                    self.chat.scroll_to_bottom();
+                }
+            }
+            VK_F6 => self.next_activity(),
+            _ if alt && (0x30..=0x39).contains(&vk) => {
+                let n = if vk == 0x30 { 9 } else { (vk - 0x31) as usize };
+                if let Some(id) = self.app.sidebar_order().get(n) {
+                    self.switch_to(*id);
+                }
+            }
+            _ if alt && vk == b'A' as u16 => self.next_activity(),
+            _ if ctrl => match vk as u8 {
+                b'A' => self.input.select_all(),
+                b'C' => {
+                    self.copy();
+                }
+                b'X' => {
+                    if self.copy() && self.input.has_selection() {
+                        self.input.backspace(false);
+                    }
+                }
+                b'V' => {
+                    if let Some(t) = win::get_clipboard(self.hwnd) {
+                        self.input.insert(&t);
+                    }
+                }
+                b'Z' if shift => self.input.redo(),
+                b'Z' => self.input.undo(),
+                b'Y' => self.input.redo(),
+                b'B' => self.input.toggle_format('\x02'),
+                b'I' => self.input.toggle_format('\x1d'),
+                b'U' => self.input.toggle_format('\x1f'),
+                b'K' => self.input.toggle_format('\x03'),
+                b'R' => self.input.toggle_format('\x16'),
+                b'O' => self.input.toggle_format('\x0f'),
+                b'J' | b'P' => {
+                    self.overlay = Some(Overlay::quick_switch(&self.app));
+                }
+                b'W' => {
+                    let id = self.app.active;
+                    self.app.input(id, "/close");
+                    self.after_update();
+                }
+                b'L' => {
+                    let id = self.app.active;
+                    if let Some(b) = self.app.buffer_mut(id) {
+                        b.clear();
+                    }
+                }
+                _ => return false,
+            },
+            _ => return false,
+        }
+        self.caret_on = true;
+        self.invalidate();
+        true
+    }
+
+    fn overlay_key(&mut self, v: VIRTUAL_KEY, ctrl: bool, shift: bool) -> bool {
+        let Some(o) = self.overlay.as_mut() else { return false };
+        match v {
+            VK_ESCAPE => self.overlay = None,
+            VK_RETURN => self.overlay_accept(),
+            VK_UP => o.move_selection(-1),
+            VK_DOWN => o.move_selection(1),
+            VK_PRIOR => o.move_selection(-10),
+            VK_NEXT => o.move_selection(10),
+            VK_TAB => {
+                if let Overlay::ChannelList { by_users, .. } = o {
+                    *by_users = !*by_users;
+                    o.refresh(&self.app);
+                } else {
+                    o.move_selection(if shift { -1 } else { 1 });
+                }
+            }
+            _ => {
+                let Some(ed) = o.editor() else { return false };
+                match v {
+                    VK_LEFT => ed.move_h(false, ctrl, shift),
+                    VK_RIGHT => ed.move_h(true, ctrl, shift),
+                    VK_HOME => ed.home(shift, true),
+                    VK_END => ed.end(shift, true),
+                    VK_BACK => ed.backspace(ctrl),
+                    VK_DELETE => ed.delete(ctrl),
+                    _ if ctrl && v.0 == b'V' as u16 => {
+                        if let Some(t) = win::get_clipboard(self.hwnd) {
+                            ed.insert(&t);
+                        }
+                    }
+                    _ if ctrl && v.0 == b'A' as u16 => ed.select_all(),
+                    _ => return false,
+                }
+                o.refresh(&self.app);
+            }
+        }
+        self.invalidate();
+        true
+    }
+
+    fn overlay_accept(&mut self) {
+        let Some(o) = self.overlay.take() else { return };
+        match o {
+            Overlay::QuickSwitch { results, selected, .. } => {
+                if let Some(id) = results.get(selected) {
+                    self.switch_to(*id);
+                }
+            }
+            Overlay::Confirm { action, .. } => match action {
+                ConfirmAction::Paste { buffer, text } => {
+                    self.app.input_confirmed(buffer, &text);
+                    self.after_update();
+                }
+                ConfirmAction::AddZncNetworks { net, names } => self.add_znc_networks(net, names),
+            },
+            Overlay::ChannelList { net, rows, selected, .. } => {
+                let name = self.app.network(net).and_then(|n| rows.get(selected).map(|&i| n.channel_list[i].0.clone()));
+                if let Some(name) = name {
+                    let sb = self.app.networks[&net].server_buffer;
+                    self.app.input(sb, &format!("/join {name}"));
+                    self.after_update();
+                } else {
+                    self.overlay = Some(Overlay::ChannelList {
+                        net,
+                        rows,
+                        selected,
+                        filter: Editor::single_line(),
+                        scroll: 0.0,
+                        by_users: true,
+                    });
+                }
+            }
+        }
+        self.invalidate();
+    }
+
+    fn add_znc_networks(&mut self, net: schwaetz_net::NetworkId, names: Vec<String>) {
+        let Some(base) = self.app.network(net).map(|n| n.cfg.clone()) else { return };
+        let password = schwaetz_core::secrets::get(&base.name, schwaetz_core::secrets::SecretKind::ServerPassword);
+        for name in names {
+            let cfg = NetworkConfig {
+                name: format!("{} ({name})", base.name),
+                kind: NetworkKind::Znc,
+                znc_network: Some(name),
+                perform: Vec::new(),
+                autojoin: Vec::new(),
+                ..base.clone()
+            };
+            if let Some(p) = &password {
+                schwaetz_core::secrets::set(&cfg.name, schwaetz_core::secrets::SecretKind::ServerPassword, p);
+            }
+            self.app.config.networks.push(cfg.clone());
+            let id = self.app.add_network(cfg);
+            self.app.connect(id);
+        }
+        let _ = self.app.config.save(&self.paths.config_file());
+        self.after_update();
+    }
+
+    fn char_input(&mut self, unit: u16) {
+        let c = if (0xD800..0xDC00).contains(&unit) {
+            self.high_surrogate = Some(unit);
+            return;
+        } else if (0xDC00..0xE000).contains(&unit) {
+            let Some(hi) = self.high_surrogate.take() else { return };
+            char::decode_utf16([hi, unit]).next().and_then(|r| r.ok())
+        } else {
+            char::from_u32(unit as u32)
+        };
+        let Some(c) = c else { return };
+        if (c as u32) < 0x20 || c == '\x7f' {
+            return;
+        }
+        let mut buf = [0u8; 4];
+        let s = c.encode_utf8(&mut buf);
+        if let Some(o) = self.overlay.as_mut() {
+            if let Some(ed) = o.editor() {
+                ed.insert(s);
+                o.refresh(&self.app);
+            }
+        } else {
+            self.input.insert(s);
+            self.typed();
+        }
+        self.caret_on = true;
+        self.invalidate();
+    }
+
+    // ----- mouse ---------------------------------------------------------------------------------
+
+    fn pt(&self, lp: LPARAM) -> (f32, f32) {
+        let (x, y) = win::lparam_point(lp);
+        (x as f32 / self.scale, y as f32 / self.scale)
+    }
+
+    fn on_splitter(&self, x: f32) -> bool {
+        (x - self.sidebar_w).abs() <= 4.0
+    }
+
+    fn mouse_down(&mut self, x: f32, y: f32, double: bool) {
+        unsafe {
+            SetCapture(self.hwnd);
+        }
+        if let Some(o) = self.overlay.as_mut() {
+            match o.click(self.win_rect, x, y) {
+                OverlayClick::Accept => self.overlay_accept(),
+                OverlayClick::Dismiss => self.overlay = None,
+                OverlayClick::None => {}
+            }
+            self.invalidate();
+            return;
+        }
+        if self.on_splitter(x) {
+            self.drag = Drag::Splitter;
+            return;
+        }
+        if let Some(id) = self.sidebar.hit(x, y) {
+            self.switch_to(id);
+            return;
+        }
+        if self.show_nicklist && self.nicklist.rect.contains(x, y) {
+            if double
+                && let Some(i) = self.nicklist.hit(x, y)
+                && let Some(n) = self.nicklist.nick(i).map(str::to_owned)
+            {
+                let id = self.app.active;
+                self.app.input(id, &format!("/query {n}"));
+                self.after_update();
+            }
+            return;
+        }
+        if self.input_rect.contains(x, y) {
+            let inner = self.input_rect.inset(14.0, 11.0);
+            let shift = win::key_down(VK_SHIFT.0);
+            self.input.click(x - inner.x, y - inner.y, shift);
+            if double {
+                self.input.select_word_at_cursor();
+            }
+            self.drag = Drag::Input;
+            self.invalidate();
+            return;
+        }
+        if self.chat.rect.contains(x, y) {
+            if self.chat.jump_pill(x, y) {
+                self.chat.scroll_to_bottom();
+                self.invalidate();
+                return;
+            }
+            match self.chat.hit(x, y) {
+                Hit::Text(pos) => {
+                    let t = unsafe { GetMessageTime() } as u32;
+                    let triple = self.last_click.0 != 0
+                        && t.wrapping_sub(self.last_click.3) < unsafe { GetDoubleClickTime() } * 2
+                        && double;
+                    if double {
+                        self.chat.select_word(pos);
+                        self.last_click = (2, x, y, t);
+                    } else if self.last_click.0 == 2
+                        && t.wrapping_sub(self.last_click.3) < unsafe { GetDoubleClickTime() }
+                        && !triple
+                    {
+                        self.chat.select_line(pos);
+                        self.last_click = (0, x, y, t);
+                    } else {
+                        self.chat.selection = Some((pos, pos));
+                        self.chat.selecting = true;
+                        self.drag = Drag::Chat;
+                        self.last_click = (1, x, y, t);
+                    }
+                }
+                Hit::Link(target) => {
+                    self.last_click = (3, x, y, 0);
+                    self.open_link(target);
+                }
+                Hit::Nick(nick) => self.nick_menu(&nick),
+                Hit::Nothing => self.chat.selection = None,
+            }
+            self.invalidate();
+        }
+    }
+
+    fn open_link(&mut self, target: LinkTarget) {
+        match target {
+            LinkTarget::Url(u) => win::open_url(&u),
+            LinkTarget::Channel(c) => {
+                let id = self.app.active;
+                if let Some(net) = self.app.buffer(id).and_then(|b| b.network)
+                    && let Some(existing) = self.app.find_buffer(net, &c)
+                {
+                    self.switch_to(existing);
+                } else {
+                    self.app.input(id, &format!("/join {c}"));
+                    self.after_update();
+                }
+            }
+        }
+    }
+
+    fn mouse_move(&mut self, x: f32, y: f32) {
+        match self.drag {
+            Drag::Splitter => {
+                self.sidebar_w = x.clamp(SIDEBAR_MIN, self.win_rect.w * 0.4);
+                self.chat.invalidate_styles();
+                self.invalidate();
+            }
+            Drag::Chat => {
+                if let Hit::Text(pos) = self.chat.hit(x, y.clamp(self.chat.rect.y, self.chat.rect.bottom() - 1.0))
+                    && let Some((a, _)) = self.chat.selection
+                {
+                    self.chat.selection = Some((a, pos));
+                    self.invalidate();
+                }
+            }
+            Drag::Input => {
+                let inner = self.input_rect.inset(14.0, 11.0);
+                self.input.click(x - inner.x, y - inner.y, true);
+                self.invalidate();
+            }
+            Drag::None => {
+                let hover = self.sidebar.hit(x, y);
+                if hover != self.sidebar.hover {
+                    self.sidebar.hover = hover;
+                    self.invalidate();
+                }
+                let nh = if self.show_nicklist { self.nicklist.hit(x, y) } else { None };
+                if nh != self.nicklist.hover {
+                    self.nicklist.hover = nh;
+                    self.invalidate();
+                }
+            }
+        }
+    }
+
+    fn mouse_up(&mut self) {
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        if self.drag == Drag::Chat {
+            self.chat.selecting = false;
+            if let Some((a, b)) = self.chat.selection
+                && a == b
+            {
+                self.chat.selection = None;
+            }
+        }
+        self.drag = Drag::None;
+        self.invalidate();
+    }
+
+    fn cursor_for(&self, x: f32, y: f32) -> PCWSTR {
+        if self.overlay.is_some() {
+            return IDC_ARROW;
+        }
+        if self.on_splitter(x) || self.drag == Drag::Splitter {
+            return IDC_SIZEWE;
+        }
+        if self.input_rect.contains(x, y) {
+            return IDC_IBEAM;
+        }
+        if self.chat.rect.contains(x, y) {
+            if self.chat.jump_pill(x, y) {
+                return IDC_HAND;
+            }
+            return match self.chat.hit(x, y) {
+                Hit::Link(_) | Hit::Nick(_) => IDC_HAND,
+                _ => IDC_IBEAM,
+            };
+        }
+        if self.sidebar.hit(x, y).is_some() {
+            return IDC_HAND;
+        }
+        IDC_ARROW
+    }
+
+    fn wheel(&mut self, x: f32, y: f32, delta: i16) {
+        let mut lines = 3u32;
+        unsafe {
+            let _ = SystemParametersInfoW(
+                SPI_GETWHEELSCROLLLINES,
+                0,
+                Some(&mut lines as *mut u32 as *mut _),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            );
+        }
+        let lh = self.text.fonts.line_height + 3.0;
+        let dy = delta as f32 / 120.0 * lines.clamp(1, 20) as f32 * lh;
+        if let Some(o) = self.overlay.as_mut() {
+            o.scroll(dy);
+        } else if self.sidebar.rect.contains(x, y) {
+            self.sidebar.scroll_by(dy);
+        } else if self.show_nicklist && self.nicklist.rect.contains(x, y) {
+            self.nicklist.scroll_by(dy);
+        } else {
+            self.chat_scroll(dy);
+            return;
+        }
+        self.invalidate();
+    }
+
+    fn right_click(&mut self, x: f32, y: f32) {
+        if self.overlay.is_some() {
+            return;
+        }
+        if let Some(id) = self.sidebar.hit(x, y) {
+            self.buffer_menu(id);
+        } else if self.show_nicklist
+            && let Some(n) = self.nicklist.hit(x, y).and_then(|i| self.nicklist.nick(i)).map(str::to_owned)
+        {
+            self.nick_menu(&n);
+        } else if self.chat.rect.contains(x, y) {
+            match self.chat.hit(x, y) {
+                Hit::Nick(n) => self.nick_menu(&n),
+                Hit::Link(LinkTarget::Url(u)) => {
+                    let r =
+                        win::popup_menu(self.hwnd, &[MenuItem::Item(1, "Open link"), MenuItem::Item(2, "Copy link")]);
+                    match r {
+                        1 => win::open_url(&u),
+                        2 => win::set_clipboard(self.hwnd, &u),
+                        _ => {}
+                    }
+                }
+                _ => {
+                    let has_sel = self.chat.selection.is_some();
+                    let filtered = self.chat.show_filtered;
+                    let mut items = vec![];
+                    if has_sel {
+                        items.push(MenuItem::Item(1, "Copy"));
+                        items.push(MenuItem::Separator);
+                    }
+                    items.push(MenuItem::Check(2, "Show hidden joins/parts", filtered));
+                    items.push(MenuItem::Item(3, "Clear buffer"));
+                    match win::popup_menu(self.hwnd, &items) {
+                        1 => {
+                            self.copy();
+                        }
+                        2 => {
+                            self.chat.show_filtered = !filtered;
+                            self.chat.invalidate_styles();
+                        }
+                        3 => {
+                            let id = self.app.active;
+                            if let Some(b) = self.app.buffer_mut(id) {
+                                b.clear();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        self.process_net();
+        self.invalidate();
+    }
+
+    fn buffer_menu(&mut self, id: BufferId) {
+        let Some(b) = self.app.buffer(id) else { return };
+        let kind = b.kind;
+        let notify = b.notify;
+        let net = b.network;
+        let conn = net.and_then(|n| self.app.network(n)).map(|n| n.conn);
+        let mut items = Vec::new();
+        match kind {
+            BufferKind::Server => {
+                if conn == Some(ConnState::Disconnected) {
+                    items.push(MenuItem::Item(10, "Connect"));
+                } else {
+                    items.push(MenuItem::Item(11, "Disconnect"));
+                    items.push(MenuItem::Item(12, "Reconnect now"));
+                }
+                items.push(MenuItem::Item(13, "Channel list…"));
+                items.push(MenuItem::Separator);
+                items.push(MenuItem::Item(14, "Remove network"));
+            }
+            BufferKind::Channel => {
+                let joined = b.joined;
+                items.push(if joined { MenuItem::Item(20, "Leave channel") } else { MenuItem::Item(21, "Rejoin") });
+                items.push(MenuItem::Item(22, "Close"));
+            }
+            BufferKind::Query => {
+                items.push(MenuItem::Item(30, "Whois"));
+                items.push(MenuItem::Item(22, "Close"));
+            }
+            BufferKind::Special => {}
+        }
+        if kind != BufferKind::Special {
+            items.push(MenuItem::Separator);
+            items.push(MenuItem::Sub(
+                "Notifications",
+                vec![
+                    MenuItem::Check(40, "Default", notify == NotifyLevel::Default),
+                    MenuItem::Check(41, "All messages", notify == NotifyLevel::All),
+                    MenuItem::Check(42, "Highlights only", notify == NotifyLevel::HighlightsOnly),
+                    MenuItem::Check(43, "Mute", notify == NotifyLevel::Mute),
+                ],
+            ));
+        }
+        items.push(MenuItem::Item(50, "Mark as read"));
+        let choice = win::popup_menu(self.hwnd, &items);
+        let cmd = |s: &str| s.to_owned();
+        let command = match choice {
+            10 => Some(cmd("/connect")),
+            11 => Some(cmd("/disconnect")),
+            12 => Some(cmd("/reconnect")),
+            13 => Some(cmd("/list")),
+            20 => Some(cmd("/part")),
+            21 => Some(cmd("/cycle")),
+            22 => Some(cmd("/close")),
+            30 => Some(cmd("/whois")),
+            40 => Some(cmd("/notify default")),
+            41 => Some(cmd("/notify all")),
+            42 => Some(cmd("/notify highlights")),
+            43 => Some(cmd("/notify mute")),
+            _ => None,
+        };
+        if choice == 14
+            && let Some(n) = net
+        {
+            let name = self.app.network(n).map(|n| n.cfg.name.clone()).unwrap_or_default();
+            self.app.config.networks.retain(|c| c.name != name);
+            self.app.remove_network(n);
+            let _ = self.app.config.save(&self.paths.config_file());
+        }
+        if choice == 50
+            && let Some(b) = self.app.buffer_mut(id)
+        {
+            b.mark_read();
+        }
+        if let Some(c) = command {
+            self.app.input(id, &c);
+        }
+        self.after_update();
+    }
+
+    fn nick_menu(&mut self, nick: &str) {
+        let id = self.app.active;
+        let is_chan = self.app.active_buffer().kind == BufferKind::Channel;
+        let mut items = vec![
+            MenuItem::Item(1, "Open query"),
+            MenuItem::Item(2, "Whois"),
+            MenuItem::Item(3, "Mention"),
+            MenuItem::Separator,
+        ];
+        if is_chan {
+            items.push(MenuItem::Sub(
+                "Operator",
+                vec![
+                    MenuItem::Item(10, "Op"),
+                    MenuItem::Item(11, "Deop"),
+                    MenuItem::Item(12, "Voice"),
+                    MenuItem::Item(13, "Devoice"),
+                    MenuItem::Separator,
+                    MenuItem::Item(14, "Kick"),
+                    MenuItem::Item(15, "Ban"),
+                    MenuItem::Item(16, "Kick + ban"),
+                ],
+            ));
+        }
+        items.push(MenuItem::Sub(
+            "CTCP",
+            vec![MenuItem::Item(20, "Version"), MenuItem::Item(21, "Ping"), MenuItem::Item(22, "Time")],
+        ));
+        items.push(MenuItem::Item(30, "Ignore"));
+        items.push(MenuItem::Item(31, "Copy nick"));
+        let choice = win::popup_menu(self.hwnd, &items);
+        let command = match choice {
+            1 => Some(format!("/query {nick}")),
+            2 => Some(format!("/whois {nick}")),
+            10 => Some(format!("/op {nick}")),
+            11 => Some(format!("/deop {nick}")),
+            12 => Some(format!("/voice {nick}")),
+            13 => Some(format!("/devoice {nick}")),
+            14 => Some(format!("/kick {nick}")),
+            15 => Some(format!("/ban {nick}")),
+            16 => Some(format!("/kickban {nick}")),
+            20 => Some(format!("/ctcp {nick} VERSION")),
+            21 => Some(format!("/ping {nick}")),
+            22 => Some(format!("/ctcp {nick} TIME")),
+            30 => Some(format!("/ignore {nick}")),
+            _ => None,
+        };
+        match choice {
+            3 => {
+                let t = if self.input.is_empty() { format!("{nick}: ") } else { format!("{nick} ") };
+                self.input.insert(&t);
+            }
+            31 => win::set_clipboard(self.hwnd, nick),
+            _ => {}
+        }
+        if let Some(c) = command {
+            self.app.input(id, &c);
+            self.after_update();
+        }
+        self.invalidate();
+    }
+
+    fn tray_message(&mut self, lp: LPARAM) {
+        let event = (lp.0 & 0xffff) as u32;
+        match event {
+            WM_LBUTTONUP | WM_LBUTTONDBLCLK => self.toggle_visible(),
+            win::NIN_BALLOONUSERCLICK => {
+                self.restore();
+                if let Some(b) = self.notify_buffer.take() {
+                    self.switch_to(b);
+                }
+            }
+            WM_RBUTTONUP | WM_CONTEXTMENU => {
+                let r = win::popup_menu(
+                    self.hwnd,
+                    &[
+                        MenuItem::Item(1, "Show schwätz"),
+                        MenuItem::Item(2, "Reconnect all"),
+                        MenuItem::Separator,
+                        MenuItem::Item(3, "Quit"),
+                    ],
+                );
+                match r {
+                    1 => self.restore(),
+                    2 => {
+                        let ids: Vec<_> = self.app.networks.keys().copied().collect();
+                        for id in ids {
+                            self.app.reconnect_now(id);
+                        }
+                        self.after_update();
+                    }
+                    3 => self.begin_quit(),
+                    _ => {}
+                }
+                self.process_net();
+            }
+            _ => {}
+        }
+    }
+
+    /// Input forwarded from another process (second instance, irc:// links, automation).
+    fn remote_input(&mut self, text: &str) {
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            if line.starts_with("irc://") || line.starts_with("ircs://") {
+                self.open_irc_url(line);
+            } else if line == "!show" {
+                self.restore();
+            } else {
+                let id = self.app.active;
+                self.app.input(id, line);
+            }
+        }
+        self.after_update();
+        self.invalidate();
+    }
+
+    fn open_irc_url(&mut self, url: &str) {
+        let Some((host, _, _)) = NetworkConfig::parse_server(url) else { return };
+        let channel = url
+            .split_once("://")
+            .and_then(|(_, r)| r.split_once('/'))
+            .map(|(_, c)| c.trim_start_matches('/').to_owned())
+            .filter(|c| !c.is_empty())
+            .map(|c| if c.starts_with(['#', '&']) { c } else { format!("#{c}") });
+        self.restore();
+        let sb = self.app.status_buffer;
+        self.app.input(sb, &format!("/connect {url}"));
+        if let Some(chan) = channel {
+            // Join once the (possibly new) network is registered.
+            let net = self.app.networks.values().find(|n| {
+                n.cfg
+                    .servers
+                    .iter()
+                    .any(|s| NetworkConfig::parse_server(s).is_some_and(|(h, _, _)| h.eq_ignore_ascii_case(&host)))
+            });
+            if let Some(n) = net {
+                let id = n.id;
+                if n.conn == ConnState::Ready {
+                    let b = n.server_buffer;
+                    self.app.input(b, &format!("/join {chan}"));
+                } else if let Some(cfg) = self.app.networks.get_mut(&id) {
+                    cfg.cfg.autojoin.push(chan.clone());
+                    let list = cfg.cfg.autojoin_list();
+                    cfg.session.config_mut().autojoin = list;
+                }
+            }
+        }
+    }
+
+    fn restore(&self) {
+        unsafe {
+            let _ = ShowWindow(self.hwnd, if IsIconic(self.hwnd).as_bool() { SW_RESTORE } else { SW_SHOW });
+            let _ = SetForegroundWindow(self.hwnd);
+        }
+    }
+
+    fn toggle_visible(&self) {
+        unsafe {
+            if IsWindowVisible(self.hwnd).as_bool() && !IsIconic(self.hwnd).as_bool() {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            } else {
+                self.restore();
+            }
+        }
+    }
+
+    // ----- message dispatch ----------------------------------------------------------------------
+
+    fn handle(&mut self, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        match msg {
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                unsafe { BeginPaint(self.hwnd, &mut ps) };
+                self.paint();
+                unsafe {
+                    let _ = EndPaint(self.hwnd, &ps);
+                }
+                Some(LRESULT(0))
+            }
+            WM_SIZE => {
+                self.invalidate();
+                None
+            }
+            WM_DPICHANGED => {
+                let dpi = (wp.0 & 0xffff) as f32;
+                self.scale = dpi / 96.0;
+                if let Some(g) = self.gfx.as_mut() {
+                    g.set_dpi(dpi);
+                }
+                let r = unsafe { &*(lp.0 as *const RECT) };
+                unsafe {
+                    let _ = SetWindowPos(
+                        self.hwnd,
+                        None,
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+                self.chat.invalidate_styles();
+                self.invalidate();
+                Some(LRESULT(0))
+            }
+            WM_GETMINMAXINFO => {
+                let mmi = unsafe { &mut *(lp.0 as *mut MINMAXINFO) };
+                mmi.ptMinTrackSize = POINT { x: (560.0 * self.scale) as i32, y: (360.0 * self.scale) as i32 };
+                Some(LRESULT(0))
+            }
+            WM_ERASEBKGND => Some(LRESULT(1)),
+            WM_APP_NET => {
+                self.process_net();
+                Some(LRESULT(0))
+            }
+            WM_TIMER => {
+                match wp.0 {
+                    TIMER_TICK => {
+                        let t = now();
+                        self.app.tick(t);
+                        if let Some(h) = self.services.scripts.as_mut() {
+                            h.tick(&mut self.app, t);
+                        }
+                        self.process_net();
+                        self.after_update();
+                        // Countdown/lag text in the topic bar.
+                        if matches!(self.app.active_buffer().kind, BufferKind::Server) {
+                            self.invalidate();
+                        }
+                    }
+                    TIMER_CARET if self.active_window => {
+                        self.caret_on = !self.caret_on;
+                        self.invalidate();
+                    }
+                    _ => {}
+                }
+                Some(LRESULT(0))
+            }
+            WM_ACTIVATE => {
+                let active = (wp.0 & 0xffff) != 0;
+                self.active_window = active;
+                self.app.set_focused(active);
+                self.caret_on = true;
+                self.after_update();
+                self.invalidate();
+                None
+            }
+            WM_KEYDOWN | WM_SYSKEYDOWN => {
+                if self.key_down(wp.0 as u16) {
+                    Some(LRESULT(0))
+                } else {
+                    None
+                }
+            }
+            WM_CHAR => {
+                self.char_input(wp.0 as u16);
+                Some(LRESULT(0))
+            }
+            WM_SYSCHAR if win::key_down(VK_MENU.0) => Some(LRESULT(0)),
+            WM_LBUTTONDOWN => {
+                let (x, y) = self.pt(lp);
+                self.mouse_down(x, y, false);
+                Some(LRESULT(0))
+            }
+            WM_LBUTTONDBLCLK => {
+                let (x, y) = self.pt(lp);
+                self.mouse_down(x, y, true);
+                Some(LRESULT(0))
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = self.pt(lp);
+                self.mouse_move(x, y);
+                Some(LRESULT(0))
+            }
+            WM_LBUTTONUP => {
+                self.mouse_up();
+                Some(LRESULT(0))
+            }
+            WM_RBUTTONUP => {
+                let (x, y) = self.pt(lp);
+                self.right_click(x, y);
+                Some(LRESULT(0))
+            }
+            WM_MOUSEWHEEL => {
+                let mut p = POINT { x: win::lparam_point(lp).0, y: win::lparam_point(lp).1 };
+                unsafe {
+                    let _ = ScreenToClient(self.hwnd, &mut p);
+                }
+                self.wheel(p.x as f32 / self.scale, p.y as f32 / self.scale, win::wheel_delta(wp));
+                Some(LRESULT(0))
+            }
+            WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT => {
+                let mut p = POINT::default();
+                unsafe {
+                    let _ = GetCursorPos(&mut p);
+                    let _ = ScreenToClient(self.hwnd, &mut p);
+                }
+                let c = self.cursor_for(p.x as f32 / self.scale, p.y as f32 / self.scale);
+                unsafe {
+                    SetCursor(LoadCursorW(None, c).ok());
+                }
+                Some(LRESULT(1))
+            }
+            win::WM_APP_TRAY => {
+                self.tray_message(lp);
+                Some(LRESULT(0))
+            }
+            WM_COPYDATA => {
+                let cds = unsafe { &*(lp.0 as *const windows::Win32::System::DataExchange::COPYDATASTRUCT) };
+                if cds.dwData != COPYDATA_MAGIC || cds.lpData.is_null() {
+                    return Some(LRESULT(0));
+                }
+                let units = unsafe { std::slice::from_raw_parts(cds.lpData as *const u16, cds.cbData as usize / 2) };
+                let text = String::from_utf16_lossy(units);
+                self.remote_input(&text);
+                Some(LRESULT(1))
+            }
+            WM_POWERBROADCAST => {
+                if wp.0 as u32 == PBT_APMRESUMEAUTOMATIC || wp.0 as u32 == PBT_APMRESUMESUSPEND {
+                    self.app.on_connectivity_restored();
+                    self.after_update();
+                }
+                Some(LRESULT(1))
+            }
+            WM_SETTINGCHANGE => {
+                if self.app.config.appearance.theme == "system" {
+                    self.apply_appearance();
+                }
+                None
+            }
+            WM_SYSCOMMAND if (wp.0 & 0xfff0) as u32 == SC_MINIMIZE && self.app.config.general.minimize_to_tray => {
+                unsafe {
+                    let _ = ShowWindow(self.hwnd, SW_HIDE);
+                }
+                Some(LRESULT(0))
+            }
+            WM_CLOSE => {
+                if self.app.config.general.close_to_tray && !self.quitting {
+                    unsafe {
+                        let _ = ShowWindow(self.hwnd, SW_HIDE);
+                    }
+                } else {
+                    self.begin_quit();
+                }
+                Some(LRESULT(0))
+            }
+            WM_DESTROY => {
+                self.tray.remove();
+                unsafe { PostQuitMessage(0) };
+                Some(LRESULT(0))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn _assert_net_command_send(c: NetCommand) -> NetCommand {
+    c
+}
