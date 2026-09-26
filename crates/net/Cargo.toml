@@ -1,0 +1,20 @@
+[package]
+name = "schwaetz-net"
+description = "Network transport: TCP/TLS, flood control, keepalive, reconnect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+schwaetz-proto.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "sync", "macros"] }
+tokio-rustls.workspace = true
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
+rustls-pki-types.workspace = true
+tracing.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "sync", "macros"] }
