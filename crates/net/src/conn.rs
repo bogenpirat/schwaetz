@@ -251,7 +251,7 @@ async fn session(
     let mut reader = BufReader::with_capacity(16 * 1024, rd);
     let mut buf = Vec::with_capacity(1024);
     let mut discarding = false;
-    let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut queue = SendQueue::default();
     let fc = &params.flood;
     let mut bucket = Bucket {
         tokens: fc.burst as f64,
@@ -304,15 +304,13 @@ async fn session(
             }
             cmd = rx.recv() => match cmd {
                 Some(ConnCmd::Send(msg)) => {
-                    let mut line = msg.to_line();
-                    line.push_str("\r\n");
-                    queue.push_back(line.into_bytes());
+                    queue.push(&msg);
                     if let Err(e) = flush(&mut wr, &mut queue, &mut bucket).await {
                         return lost(e, false);
                     }
                 }
-                Some(ConnCmd::Stop(quit)) => return quit_and_close(&mut wr, quit).await,
-                None => return quit_and_close(&mut wr, None).await,
+                Some(ConnCmd::Stop(quit)) => return quit_and_close(&mut wr, &mut queue, quit).await,
+                None => return quit_and_close(&mut wr, &mut queue, None).await,
                 Some(ConnCmd::ReconnectNow) => return lost("Reconnecting".into(), true),
                 Some(ConnCmd::Update(p)) => *params = *p,
             },
@@ -341,18 +339,63 @@ async fn session(
     }
 }
 
-async fn quit_and_close(wr: &mut WriteHalf<BoxStream>, quit: Option<String>) -> Outcome {
+async fn quit_and_close(wr: &mut WriteHalf<BoxStream>, queue: &mut SendQueue, quit: Option<String>) -> Outcome {
     let line = match quit {
         Some(q) => Message::new("QUIT", [q]).to_line(),
         None => "QUIT".to_owned(),
     };
     let _ = timeout(Duration::from_secs(2), async {
+        // Deliver what the user already sent (messages typed right before quitting).
+        for l in queue.hi.drain(..).take(50) {
+            let _ = wr.write_all(&l).await;
+        }
         let _ = wr.write_all(format!("{line}\r\n").as_bytes()).await;
         let _ = wr.flush().await;
         let _ = wr.shutdown().await;
     })
     .await;
     Outcome::Stop
+}
+
+/// Outgoing lines waiting for flood-control tokens. Interactive traffic (messages, joins, …)
+/// always goes before background queries the client issues on its own, so a user's message is
+/// never stuck behind a burst of WHO/CHATHISTORY requests after joining many channels.
+#[derive(Default)]
+struct SendQueue {
+    hi: VecDeque<Vec<u8>>,
+    lo: VecDeque<Vec<u8>>,
+}
+
+impl SendQueue {
+    fn is_background(msg: &Message) -> bool {
+        match msg.command.to_ascii_uppercase().as_str() {
+            "WHO" | "CHATHISTORY" | "MARKREAD" | "MONITOR" | "ISON" => true,
+            // Typing notifications are worthless once delayed.
+            "TAGMSG" => msg.tags.contains("+typing"),
+            _ => false,
+        }
+    }
+
+    fn push(&mut self, msg: &Message) {
+        let mut line = msg.to_line();
+        line.push_str("\r\n");
+        if Self::is_background(msg) {
+            if msg.is("TAGMSG") && !self.lo.is_empty() {
+                return;
+            }
+            self.lo.push_back(line.into_bytes());
+        } else {
+            self.hi.push_back(line.into_bytes());
+        }
+    }
+
+    fn pop(&mut self) -> Option<Vec<u8>> {
+        self.hi.pop_front().or_else(|| self.lo.pop_front())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.hi.is_empty() && self.lo.is_empty()
+    }
 }
 
 async fn handle_line(
@@ -384,15 +427,11 @@ async fn handle_line(
     Ok(())
 }
 
-async fn flush(
-    wr: &mut WriteHalf<BoxStream>,
-    queue: &mut VecDeque<Vec<u8>>,
-    bucket: &mut Bucket,
-) -> Result<(), String> {
+async fn flush(wr: &mut WriteHalf<BoxStream>, queue: &mut SendQueue, bucket: &mut Bucket) -> Result<(), String> {
     bucket.refill();
     let mut wrote = false;
     while bucket.tokens >= 1.0 {
-        let Some(line) = queue.pop_front() else { break };
+        let Some(line) = queue.pop() else { break };
         wr.write_all(&line).await.map_err(|e| e.to_string())?;
         bucket.tokens -= 1.0;
         wrote = true;

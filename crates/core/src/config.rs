@@ -40,6 +40,8 @@ pub struct General {
     pub smart_filter_secs: u64,
     pub ctcp_replies: bool,
     pub log_to_files: bool,
+    /// Delete history older than this many days (0 = keep forever).
+    pub history_days: u32,
     pub confirm_paste_lines: usize,
     pub minimize_to_tray: bool,
     pub close_to_tray: bool,
@@ -62,6 +64,7 @@ impl Default for General {
             smart_filter_secs: 1200,
             ctcp_replies: true,
             log_to_files: true,
+            history_days: 0,
             confirm_paste_lines: 4,
             minimize_to_tray: false,
             close_to_tray: false,

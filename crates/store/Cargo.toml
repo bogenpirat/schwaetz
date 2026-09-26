@@ -1,0 +1,13 @@
+[package]
+name = "schwaetz-store"
+description = "Message history (SQLite + FTS5) and plain-text logs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+schwaetz-core.workspace = true
+schwaetz-proto.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true

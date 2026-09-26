@@ -153,7 +153,11 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         config.appearance.font_size,
         &config.appearance.ui_font,
     )?;
+    let mut services = services;
     let mut app = App::new(config);
+    if let Some(h) = services.history.take() {
+        app.set_history(h);
+    }
     app.track_new_lines = services.scripts.is_some();
     for note in startup_notes {
         let sb = app.status_buffer;
@@ -214,13 +218,9 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         }
     }
     // Drop the UI (and with it the network thread, which sends QUITs) after the loop.
+    // The history store flushes pending writes when the model is dropped.
     let ui = UI.with(|c| c.borrow_mut().take());
-    if let Some(mut ui) = ui {
-        if let Some(h) = ui.services.history.as_mut() {
-            h.flush();
-        }
-        drop(ui);
-    }
+    drop(ui);
     Ok(())
 }
 
@@ -655,35 +655,6 @@ impl Ui {
                     action: ConfirmAction::Paste { buffer, text },
                 });
                 self.invalidate();
-            }
-            Effect::Log { network, buffer, line } => {
-                if let Some(h) = self.services.history.as_mut() {
-                    h.log(&network, &buffer, &line);
-                }
-            }
-            Effect::LoadHistory { buffer, network, name, before } => {
-                let lines = match self.services.history.as_mut() {
-                    Some(h) => h.load_before(&network, &name, before, 200),
-                    None => Vec::new(),
-                };
-                self.app.insert_history(buffer, lines);
-            }
-            Effect::Search { query, network, buffer } => {
-                let results = match self.services.history.as_mut() {
-                    Some(h) => h.search(&query, network.as_deref(), buffer.as_deref(), 200),
-                    None => Vec::new(),
-                };
-                let id = self.app.active;
-                self.app.print(id, LineKind::Status, "", &format!("Search results for \"{query}\": {}", results.len()));
-                for (net, buf, line) in results.into_iter().rev() {
-                    let t = schwaetz_core::time::format("%Y-%m-%d %H:%M", schwaetz_core::time::local(line.time));
-                    let txt = format!(
-                        "[{t}] {net}/{buf} <{}> {}",
-                        line.display_nick(),
-                        schwaetz_proto::format::strip(&line.text)
-                    );
-                    self.app.print(id, LineKind::Server, "", &txt);
-                }
             }
             Effect::SaveConfig => {
                 if let Err(e) = self.app.config.save(&self.paths.config_file()) {

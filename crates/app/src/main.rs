@@ -61,7 +61,19 @@ fn main() {
         apply_irc_url(&mut config, &u);
     }
 
-    let services = Services { history: None, scripts: None };
+    let logs = config.general.log_to_files.then(|| paths.logs_dir());
+    let history: Option<Box<dyn schwaetz_core::services::HistoryStore>> =
+        match schwaetz_store::Store::open(&paths.history_db(), logs) {
+            Ok(s) => {
+                s.prune_days(config.general.history_days);
+                Some(Box::new(s))
+            }
+            Err(e) => {
+                notes.push(format!("Message history is unavailable: {e}"));
+                None
+            }
+        };
+    let services = Services { history, scripts: None };
     if let Err(e) = schwaetz_ui::run(config, paths, services, notes) {
         schwaetz_ui::win::error_box("schwätz", &format!("schwätz could not start:\n\n{e}"));
     }

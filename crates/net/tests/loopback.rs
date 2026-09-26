@@ -173,3 +173,24 @@ fn wake_is_coalesced() {
     let n = net.drain().filter(|e| matches!(e, NetEvent::Line { .. })).count();
     assert_eq!(n, 500);
 }
+
+#[test]
+fn user_messages_jump_background_queue_and_survive_quit() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let net = NetHandle::start(|| {}).unwrap();
+    let mut p = params(port);
+    p.flood = FloodControl { burst: 1, interval: Duration::from_secs(30) };
+    net.send(NetCommand::Connect(ID, p));
+    let (mut r, _w) = accept(&listener);
+    wait_for(&net, "connected", |e| matches!(e, NetEvent::Connected { .. }));
+    for c in ["#a", "#b", "#c"] {
+        net.send_line(ID, Message::new("WHO", [c]));
+    }
+    net.send_line(ID, Message::new("PRIVMSG", ["#a", "typed by the user"]));
+    std::thread::sleep(Duration::from_millis(200));
+    net.send(NetCommand::Disconnect(ID, Some("bye".into())));
+    assert_eq!(read_line(&mut r), "WHO #a");
+    assert_eq!(read_line(&mut r), "PRIVMSG #a :typed by the user");
+    assert_eq!(read_line(&mut r), "QUIT bye");
+}

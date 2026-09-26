@@ -8,6 +8,7 @@ use crate::completion::Completer;
 use crate::config::{Config, NetworkConfig, NetworkKind, SaslMechanism};
 use crate::filter::{Highlighter, IgnoreType, Ignores};
 use crate::secrets::{self, SecretKind};
+use crate::services::HistoryStore;
 use crate::{time, twitch, znc};
 use schwaetz_client::{Chat, ChatKind, Event, SaslConfig, Session, SessionConfig, SessionEvent, Target, TwitchEvent};
 use schwaetz_net::{
@@ -53,25 +54,6 @@ pub enum Effect {
         buffer: BufferId,
         text: String,
         lines: usize,
-    },
-    /// Persist a line (history database and text logs).
-    Log {
-        network: String,
-        buffer: String,
-        line: Line,
-    },
-    /// Load older lines from the history database for scroll-back.
-    LoadHistory {
-        buffer: BufferId,
-        network: String,
-        name: String,
-        before: i64,
-    },
-    /// Full-text search request.
-    Search {
-        query: String,
-        network: Option<String>,
-        buffer: Option<String>,
     },
     SaveConfig,
     ConfigChanged,
@@ -156,6 +138,8 @@ pub struct App {
     pub track_new_lines: bool,
     /// Mirror raw protocol traffic into per-network "raw log" buffers.
     pub rawlog: bool,
+    /// Persistent history (logging, scroll-back, search).
+    history: Option<Box<dyn HistoryStore>>,
 }
 
 impl App {
@@ -182,6 +166,7 @@ impl App {
             new_lines: Vec::new(),
             track_new_lines: false,
             rawlog: false,
+            history: None,
             config,
         };
         app.status_buffer = app.create_buffer(None, BufferKind::Special, "schwätz");
@@ -306,7 +291,82 @@ impl App {
         if let Some(id) = self.find_buffer(network, name) {
             return id;
         }
-        self.create_buffer(Some(network), kind, name)
+        let id = self.create_buffer(Some(network), kind, name);
+        if matches!(kind, BufferKind::Channel | BufferKind::Query) {
+            self.restore_from_history(id);
+        }
+        id
+    }
+
+    /// Attaches the history store; logging, scroll-back and search use it from now on.
+    pub fn set_history(&mut self, mut h: Box<dyn HistoryStore>) {
+        for n in self.networks.values_mut() {
+            let name = n.display_name().to_owned();
+            n.last_seen = h.last_seen(&name).unwrap_or(0);
+        }
+        self.history = Some(h);
+    }
+
+    pub fn has_history(&self) -> bool {
+        self.history.is_some()
+    }
+
+    /// Fills a freshly created buffer with its most recent logged lines, so reopening a channel
+    /// shows the previous conversation (and chathistory only has to fill the gap).
+    fn restore_from_history(&mut self, id: BufferId) {
+        let Some(b) = self.buffer(id) else { return };
+        let Some(net) = b.network.and_then(|n| self.networks.get(&n)).map(|n| n.display_name().to_owned()) else {
+            return;
+        };
+        let name = b.name.clone();
+        let Some(h) = self.history.as_mut() else { return };
+        let lines = h.load_before(&net, &name, i64::MAX, 150);
+        if lines.is_empty() {
+            return;
+        }
+        let newest = lines.iter().filter(|l| l.kind.is_message()).map(|l| l.time).max().unwrap_or(0);
+        self.insert_history(id, lines);
+        if let Some(b) = self.buffer_mut(id) {
+            b.last_seen = newest;
+            // Everything restored from disk was seen in an earlier session.
+            b.read_marker = Some(b.read_marker.unwrap_or(0).max(newest));
+            b.history_exhausted = false;
+        }
+    }
+
+    /// Full-text search over the history, printed into a "search" buffer.
+    pub fn search(&mut self, query: &str, network: Option<String>) {
+        let results = match self.history.as_mut() {
+            Some(h) => h.search(query, network.as_deref(), None, 200),
+            None => {
+                let id = self.active;
+                self.status(id, LineKind::Error, "Search needs the message history, which is disabled.");
+                return;
+            }
+        };
+        let sid = match self
+            .buffers
+            .iter()
+            .find(|b| b.network.is_none() && b.kind == BufferKind::Special && b.name == "search")
+        {
+            Some(b) => b.id,
+            None => self.create_buffer(None, BufferKind::Special, "search"),
+        };
+        if let Some(b) = self.buffer_mut(sid) {
+            b.clear();
+        }
+        let header = format!(
+            "{} result(s) for \"{query}\"{}",
+            results.len(),
+            network.map(|n| format!(" on {n}")).unwrap_or_default()
+        );
+        self.status(sid, LineKind::Status, header);
+        for (net, buf, line) in results.into_iter().rev() {
+            let when = time::format("%Y-%m-%d %H:%M", time::local(line.time));
+            let text = format!("{when}  {net} / {buf}  <{}> {}", line.display_nick(), fmt::strip(&line.text));
+            self.status(sid, LineKind::Server, text);
+        }
+        self.switch_to(sid);
     }
 
     pub fn switch_to(&mut self, id: BufferId) {
@@ -376,7 +436,6 @@ impl App {
     pub(crate) fn add_line(&mut self, buffer: BufferId, line: Line, activity: Activity) {
         let active = self.active == buffer && self.focused;
         let is_active = self.active == buffer;
-        let log = self.config.general.log_to_files;
         let Some(b) = self.buffers.iter_mut().find(|b| b.id == buffer) else { return };
         let history = line.flags.has(LineFlags::HISTORY);
         let unread_by_marker = b.read_marker.is_none_or(|m| line.time > m);
@@ -404,7 +463,9 @@ impl App {
         if !history {
             b.last_seen = b.last_seen.max(line.time);
         }
-        let logged = if log && matches!(b.kind, BufferKind::Channel | BufferKind::Query | BufferKind::Server) {
+        let logged = if self.history.is_some()
+            && matches!(b.kind, BufferKind::Channel | BufferKind::Query | BufferKind::Server)
+        {
             let net_name = b.network.and_then(|n| self.networks.get(&n)).map(|n| n.display_name().to_owned());
             net_name.map(|n| (n, b.name.clone(), line.clone()))
         } else {
@@ -419,9 +480,9 @@ impl App {
             self.dirty.lines = true;
         }
         if let Some((network, name, line)) = logged
-            && !history
+            && let Some(h) = self.history.as_mut()
         {
-            self.effects.push(Effect::Log { network, buffer: name, line });
+            h.log(&network, &name, &line);
         }
     }
 
@@ -1832,20 +1893,29 @@ impl App {
         let before = b.lines.front().map_or(self.now, |l| l.time);
         let (net, name, kind) = (b.network, b.name.clone(), b.kind);
         let Some(net) = net else { return };
-        let mut asked = false;
-        if matches!(kind, BufferKind::Channel | BufferKind::Query)
-            && let Some(n) = self.networks.get_mut(&net)
-            && n.conn == ConnState::Ready
-        {
-            asked = n.session.request_history_before(&name, before, 100);
-            self.flush(net);
+        if !matches!(kind, BufferKind::Channel | BufferKind::Query) {
+            return;
         }
-        if !asked {
-            let network = self.networks.get(&net).map(|n| n.display_name().to_owned()).unwrap_or_default();
-            self.effects.push(Effect::LoadHistory { buffer, network, name, before });
+        // Local history first (instant, works offline), then the server's CHATHISTORY.
+        let network = self.networks.get(&net).map(|n| n.display_name().to_owned()).unwrap_or_default();
+        if let Some(h) = self.history.as_mut() {
+            let lines = h.load_before(&network, &name, before, 200);
+            if !lines.is_empty() {
+                self.insert_history(buffer, lines);
+                return;
+            }
         }
+        let asked = match self.networks.get_mut(&net) {
+            Some(n) if n.conn == ConnState::Ready => n.session.request_history_before(&name, before, 100),
+            _ => false,
+        };
+        self.flush(net);
         if let Some(b) = self.buffer_mut(buffer) {
-            b.history_loading = true;
+            if asked {
+                b.history_loading = true;
+            } else {
+                b.history_exhausted = true;
+            }
         }
     }
 

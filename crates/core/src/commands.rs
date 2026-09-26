@@ -66,7 +66,7 @@ cmds! {
     "reconnect", "/reconnect", "Reconnect to the current network now.";
     "reload", "/reload", "Reload scripts.";
     "say", "/say <text>", "Send text as a message (even if it starts with /).";
-    "search", "/search <text>", "Search the message history.";
+    "search", "/search [-n] <text>", "Search the message history (all networks, or -n for the current one).";
     "server", "/server <host[:[+]port]>", "Connect to a server.";
     "set", "/set [key [value]]", "Show or change a setting, e.g. /set appearance.font_size 14.";
     "setname", "/setname <realname>", "Change your real name (IRCv3 setname).";
@@ -740,8 +740,14 @@ impl App {
                 if args.is_empty() {
                     return self.usage(buffer, "search");
                 }
-                let net = self.network_of(buffer).map(|n| n.display_name().to_owned());
-                self.effect(Effect::Search { query: args.to_owned(), network: net, buffer: None });
+                // `/search -n text` limits the search to the current network.
+                match args.strip_prefix("-n ") {
+                    Some(q) => {
+                        let net = self.network_of(buffer).map(|n| n.display_name().to_owned());
+                        self.search(q.trim(), net);
+                    }
+                    None => self.search(args, None),
+                }
             }
             "reload" => self.effect(Effect::ReloadScripts),
             "buffer" | "b" | "goto" => {
