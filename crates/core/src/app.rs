@@ -2146,7 +2146,13 @@ fn worth_logging(l: &Line) -> bool {
     match l.kind {
         LineKind::Message | LineKind::Action | LineKind::Notice | LineKind::System => true,
         LineKind::Join | LineKind::Part => !l.flags.has(LineFlags::OWN),
-        LineKind::Quit | LineKind::Kick | LineKind::Nick | LineKind::Mode | LineKind::Topic | LineKind::Invite | LineKind::Netsplit => true,
+        LineKind::Quit
+        | LineKind::Kick
+        | LineKind::Nick
+        | LineKind::Mode
+        | LineKind::Topic
+        | LineKind::Invite
+        | LineKind::Netsplit => true,
         LineKind::Status | LineKind::Error | LineKind::Server | LineKind::Motd | LineKind::Ctcp => false,
     }
 }
