@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: Lint, test & build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Cache Ergo test server
+        uses: actions/cache@v4
+        with:
+          path: tests/ergo/bin
+          key: ergo-${{ hashFiles('tests/ergo/VERSION') }}
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build release
+        run: cargo build --release --bin schwaetz
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: schwaetz-${{ github.sha }}-x86_64
+          path: target/release/schwaetz.exe
+          retention-days: 7

@@ -1,0 +1,16 @@
+[package]
+name = "schwaetz-client"
+description = "Sans-IO IRC session: registration, CAP/SASL, state tracking, IRCv3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+schwaetz-proto.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+tracing.workspace = true

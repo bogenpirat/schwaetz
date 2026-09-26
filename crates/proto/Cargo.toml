@@ -1,0 +1,16 @@
+[package]
+name = "schwaetz-proto"
+description = "IRC wire format: parsing, serialization, formatting codes, casemapping, ISUPPORT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+memchr.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_yaml.workspace = true
+proptest.workspace = true

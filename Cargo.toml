@@ -1,0 +1,52 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/bogenpirat/schwaetz"
+
+[workspace.dependencies]
+schwaetz-proto = { path = "crates/proto" }
+schwaetz-client = { path = "crates/client" }
+schwaetz-net = { path = "crates/net" }
+schwaetz-core = { path = "crates/core" }
+schwaetz-store = { path = "crates/store" }
+schwaetz-media = { path = "crates/media" }
+schwaetz-script = { path = "crates/script" }
+schwaetz-ui = { path = "crates/ui" }
+
+memchr = "2.7"
+tokio = { version = "1.47", default-features = false }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.7"
+rustls-pki-types = "1.12"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+base64 = "0.22"
+unicode-segmentation = "1.12"
+tracing = "0.1"
+proptest = "1"
+serde_yaml = "0.9"
+getrandom = "0.3"
+windows = "0.62"
+windows-core = "0.62"
+windows-numerics = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev.package."*"]
+opt-level = 1

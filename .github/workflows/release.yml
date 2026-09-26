@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag, e.g. v0.1.0 (must match the workspace version in Cargo.toml)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as pre-release'
+        type: boolean
+        default: false
+      draft:
+        description: 'Create as draft'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version and tag
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::'$VERSION' is not a vX.Y.Z tag"; exit 1; }
+          cargo_version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml)
+          if [[ "${VERSION#v}" != "$cargo_version" && "${VERSION#v}" != "$cargo_version"-* ]]; then
+            echo "::error::Tag $VERSION does not match Cargo.toml version $cargo_version"; exit 1
+          fi
+          if gh release view "$VERSION" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null; then
+            echo "::error::Release or tag $VERSION already exists"; exit 1
+          fi
+
+  build:
+    needs: validate
+    runs-on: windows-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x86_64
+            test: true
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+            test: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Test
+        if: matrix.test
+        run: cargo test --workspace
+
+      - name: Build
+        run: cargo build --release --locked --bin schwaetz --target ${{ matrix.target }}
+
+      # Code signing: plug a certificate in here (e.g. signtool with a secret-held PFX) when available.
+
+      - name: Package
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          $name = "schwaetz-$env:VERSION-${{ matrix.arch }}"
+          $dir = "dist/$name"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/schwaetz.exe" $dir
+          Copy-Item README.md, LICENSE $dir
+          if (Test-Path themes) { Copy-Item -Recurse themes $dir }
+          if (Test-Path scripts/examples) { Copy-Item -Recurse scripts/examples "$dir/scripts" }
+          if (Test-Path docs/schwaetz.d.ts) { Copy-Item docs/schwaetz.d.ts $dir }
+          Compress-Archive -Path "$dir/*" -DestinationPath "dist/$name.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: dist/*.zip
+          retention-days: 3
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.zip > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          flags=()
+          [[ "${{ inputs.prerelease }}" == "true" ]] && flags+=(--prerelease)
+          [[ "${{ inputs.draft }}" == "true" ]] && flags+=(--draft)
+          gh release create "$VERSION" dist/*.zip dist/SHA256SUMS.txt \
+            --target "$GITHUB_SHA" --title "schwätz $VERSION" --generate-notes "${flags[@]}"
