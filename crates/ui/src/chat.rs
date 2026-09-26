@@ -43,6 +43,8 @@ struct Cached {
     map: U16Map,
     height: f32,
     card: Option<Card>,
+    /// Content signature; a mismatch (deleted, decorated, folded …) forces a re-layout.
+    sig: u64,
     used: u64,
 }
 
@@ -436,7 +438,7 @@ impl ChatView {
         if let Some(card) = &card {
             height += card.h + 6.0;
         }
-        Cached { msg, msg_h, nick, ts, reply, reactions, links, bgs, plain, map, height, card, used: self.frame }
+        Cached { msg, msg_h, nick, ts, reply, reactions, links, bgs, plain, map, height, card, sig: 0, used: self.frame }
     }
 
     /// Builds the preview card (or load chip) for a message's first https link.
@@ -532,11 +534,15 @@ impl ChatView {
 
     fn ensure(&mut self, c: &mut Ctx, line: &Line, m: &Metrics) -> f32 {
         let frame = self.frame;
-        if let Some(e) = self.cache.get_mut(&line.id) {
+        let sig = signature(line);
+        if let Some(e) = self.cache.get_mut(&line.id)
+            && e.sig == sig
+        {
             e.used = frame;
             return e.height;
         }
-        let e = self.layout_line(c, line, m);
+        let mut e = self.layout_line(c, line, m);
+        e.sig = sig;
         let h = e.height;
         self.cache.insert(line.id, e);
         h
@@ -994,4 +1000,12 @@ impl ChatView {
 fn card_offset(e: &Cached) -> f32 {
     let reactions = e.reactions.as_ref().map_or(0.0, |r| text::metrics(r).height + 6.0);
     e.msg_h + 4.0 + reactions
+}
+
+/// Cheap fingerprint of the parts of a line that can change after it was added.
+fn signature(l: &Line) -> u64 {
+    let (emotes, reactions, reply) = l.extra.as_ref().map_or((0, 0, 0), |e| {
+        (e.emotes.len() as u64, e.reactions.iter().map(|(_, n)| n.len() as u64).sum::<u64>(), e.reply_to.is_some() as u64)
+    });
+    l.flags.0 as u64 | emotes << 16 | reactions << 24 | reply << 40 | (l.text.len() as u64) << 41
 }

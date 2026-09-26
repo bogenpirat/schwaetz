@@ -35,6 +35,7 @@ pub const WM_APP_MEDIA: u32 = WM_APP + 3;
 pub const COPYDATA_MAGIC: usize = 0x5357_4158;
 const TIMER_TICK: usize = 1;
 const TIMER_CARET: usize = 2;
+const TIMER_PAINT: usize = 3;
 const SIDEBAR_MIN: f32 = 160.0;
 const TOPIC_H: f32 = 56.0;
 const NICKLIST_W: f32 = 210.0;
@@ -92,6 +93,8 @@ pub struct Ui {
     /// Buffer to reselect once it exists again after startup (network, buffer).
     restore_active: Option<(String, String)>,
     form: Option<Box<crate::form::Form>>,
+    background_update: bool,
+    paint_pending: bool,
 }
 
 thread_local! {
@@ -216,6 +219,8 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         active_window: true,
         restore_active: None,
         form: None,
+        background_update: false,
+        paint_pending: false,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -586,7 +591,9 @@ impl Ui {
             }
             self.app.on_net_event(ev, t);
         }
+        self.background_update = true;
         self.after_update();
+        self.background_update = false;
     }
 
     /// Forwards network commands, runs effects and schedules a repaint.
@@ -620,7 +627,21 @@ impl Ui {
             if d.nicklist {
                 self.nicklist_gen = (None, 0);
             }
-            self.invalidate();
+            if self.background_update {
+                self.invalidate_soon();
+            } else {
+                self.invalidate();
+            }
+        }
+    }
+
+    /// Coalesces repaints caused by network traffic to at most ~20 per second.
+    fn invalidate_soon(&mut self) {
+        if !self.paint_pending {
+            self.paint_pending = true;
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_PAINT, 50, None);
+            }
         }
     }
 
@@ -1868,6 +1889,13 @@ impl Ui {
                         if matches!(self.app.active_buffer().kind, BufferKind::Server) {
                             self.invalidate();
                         }
+                    }
+                    TIMER_PAINT => {
+                        unsafe {
+                            let _ = KillTimer(Some(self.hwnd), TIMER_PAINT);
+                        }
+                        self.paint_pending = false;
+                        self.invalidate();
                     }
                     TIMER_CARET if self.active_window => {
                         self.caret_on = !self.caret_on;
