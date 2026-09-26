@@ -78,7 +78,10 @@ fn rejects_garbage() {
 
 /// A GIF89a with 128-color palette and "uncompressed" LZW (8-bit codes, clear every 126 pixels).
 /// frames: (left, top, w, h, disposal, delay_cs, palette indices)
-fn gif(w: u16, h: u16, palette: &[[u8; 3]], frames: &[(u16, u16, u16, u16, u8, u16, Vec<u8>)]) -> Vec<u8> {
+/// (left, top, width, height, disposal, delay in centiseconds, palette indices)
+type GifFrame = (u16, u16, u16, u16, u8, u16, Vec<u8>);
+
+fn gif(w: u16, h: u16, palette: &[[u8; 3]], frames: &[GifFrame]) -> Vec<u8> {
     let mut out = b"GIF89a".to_vec();
     out.extend_from_slice(&w.to_le_bytes());
     out.extend_from_slice(&h.to_le_bytes());

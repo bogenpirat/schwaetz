@@ -97,6 +97,7 @@ pub struct Ui {
     background_update: bool,
     paint_pending: bool,
     anim_start: std::time::Instant,
+    a11y_window: (i64, u32),
 }
 
 thread_local! {
@@ -177,7 +178,8 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
     if let Some(h) = services.history.take() {
         app.set_history(h);
     }
-    app.track_new_lines = services.scripts.is_some();
+    // New lines feed scripts and screen-reader announcements.
+    app.track_new_lines = true;
     for note in startup_notes {
         let sb = app.status_buffer;
         app.print(sb, LineKind::Status, "", &note);
@@ -224,6 +226,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         background_update: false,
         paint_pending: false,
         anim_start: std::time::Instant::now(),
+        a11y_window: (0, 0),
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -264,6 +267,11 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // Screen readers ask for the automation tree; answer without touching UI state.
+    if msg == WM_GETOBJECT && lp.0 as i32 == windows::Win32::UI::Accessibility::UiaRootObjectId {
+        let root = crate::a11y::Root::provider(hwnd);
+        return unsafe { windows::Win32::UI::Accessibility::UiaReturnRawElementProvider(hwnd, wp, lp, &root) };
+    }
     let handled = UI.with(|cell| match cell.try_borrow_mut() {
         Ok(mut guard) => guard.as_mut().and_then(|ui| ui.handle(msg, wp, lp)),
         // Re-entered from a nested modal loop (context menu): default processing.
@@ -622,11 +630,12 @@ impl Ui {
             self.check_restore_active();
         }
         for _ in 0..4 {
-            if let Some(host) = self.services.scripts.as_mut() {
-                let lines = self.app.take_new_lines();
-                if !lines.is_empty() {
+            let lines = self.app.take_new_lines();
+            if !lines.is_empty() {
+                if let Some(host) = self.services.scripts.as_mut() {
                     host.on_lines(&mut self.app, &lines);
                 }
+                self.announce(&lines);
             }
             for cmd in self.app.take_net_commands() {
                 self.net.send(cmd);
@@ -2066,4 +2075,126 @@ impl Ui {
 #[allow(dead_code)]
 fn _assert_net_command_send(c: NetCommand) -> NetCommand {
     c
+}
+
+/// Runs `f` with the UI if it isn't currently borrowed (accessibility providers).
+pub(crate) fn with_ui<R>(f: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    UI.with(|c| c.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(|ui| f(ui))))
+}
+
+impl Ui {
+    fn to_screen(&self, r: Rect) -> RECT {
+        let mut p = POINT::default();
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(self.hwnd, &mut p);
+        }
+        let s = self.scale;
+        RECT {
+            left: p.x + (r.x * s) as i32,
+            top: p.y + (r.y * s) as i32,
+            right: p.x + (r.right() * s) as i32,
+            bottom: p.y + (r.bottom() * s) as i32,
+        }
+    }
+
+    pub(crate) fn a11y_snapshot(&self) -> crate::a11y::Snapshot {
+        let (title, _) = self.app.topic_for(self.app.active);
+        let buffers = self
+            .sidebar
+            .row_rects()
+            .into_iter()
+            .filter_map(|(id, r)| {
+                let b = self.app.buffer(id)?;
+                let mut name = match b.kind {
+                    BufferKind::Server => format!(
+                        "{} network",
+                        self.app.network_of(id).map(|n| n.display_name().to_owned()).unwrap_or_default()
+                    ),
+                    _ => b.name.clone(),
+                };
+                if b.highlights > 0 {
+                    name.push_str(&format!(", {} highlights", b.highlights));
+                } else if b.unread > 0 {
+                    name.push_str(&format!(", {} unread", b.unread));
+                }
+                Some((id.0, name, id == self.app.active, self.to_screen(r)))
+            })
+            .collect();
+        let b = self.app.active_buffer();
+        let lines = b
+            .lines
+            .iter()
+            .filter(|l| !l.flags.has(schwaetz_core::LineFlags::FILTERED))
+            .rev()
+            .take(30)
+            .map(spoken)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        crate::a11y::Snapshot {
+            title: format!("{title} — schwätz"),
+            window: self.to_screen(self.win_rect),
+            sidebar: self.to_screen(self.sidebar.rect),
+            chat: self.to_screen(self.chat.rect),
+            input: self.to_screen(self.input_rect),
+            input_text: self.input.text().to_owned(),
+            buffers,
+            lines,
+        }
+    }
+
+    pub(crate) fn a11y_select(&mut self, id: u32) {
+        self.switch_to(BufferId(id));
+    }
+
+    pub(crate) fn a11y_set_input(&mut self, text: &str) {
+        self.input.set_text(text, None);
+        self.invalidate();
+    }
+
+    /// Speaks new messages of the active buffer (and highlights anywhere) to screen readers.
+    fn announce(&mut self, lines: &[(BufferId, u64)]) {
+        if !crate::a11y::listening() {
+            return;
+        }
+        let now = now();
+        for &(bid, lid) in lines {
+            let Some(b) = self.app.buffer(bid) else { continue };
+            let Some(l) = b.lines.iter().rev().find(|l| l.id == lid) else { continue };
+            if l.flags.has(schwaetz_core::LineFlags::OWN)
+                || l.flags.has(schwaetz_core::LineFlags::HISTORY)
+                || !l.kind.is_message()
+            {
+                continue;
+            }
+            let highlight = l.flags.has(schwaetz_core::LineFlags::HIGHLIGHT);
+            if bid != self.app.active && !highlight {
+                continue;
+            }
+            // In busy channels only highlights are read out (at most 3 lines per second).
+            if now - self.a11y_window.0 > 1000 {
+                self.a11y_window = (now, 0);
+            }
+            if self.a11y_window.1 >= 3 && !highlight {
+                continue;
+            }
+            self.a11y_window.1 += 1;
+            let mut text = spoken(l);
+            if bid != self.app.active {
+                text = format!("{} in {}: {text}", if highlight { "Highlight" } else { "Message" }, b.name);
+            }
+            crate::a11y::announce(self.hwnd, &text, highlight);
+        }
+    }
+}
+
+fn spoken(l: &schwaetz_core::Line) -> String {
+    let text = schwaetz_proto::format::strip(&l.text);
+    match l.kind {
+        LineKind::Message => format!("{}: {text}", l.display_nick()),
+        LineKind::Action => format!("{} {text}", l.display_nick()),
+        LineKind::Notice => format!("Notice from {}: {text}", l.display_nick()),
+        _ => text,
+    }
 }

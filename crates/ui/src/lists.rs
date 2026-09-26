@@ -228,3 +228,10 @@ impl NickList {
         self.scroll = (self.scroll - dy).clamp(0.0, max);
     }
 }
+
+impl Sidebar {
+    /// Row rectangles as last drawn (accessibility, hit testing).
+    pub fn row_rects(&self) -> Vec<(BufferId, Rect)> {
+        self.rows.iter().map(|r| (r.id, Rect::new(self.rect.x + 8.0, r.y, self.rect.w - 16.0, r.h))).collect()
+    }
+}
