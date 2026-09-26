@@ -8,6 +8,7 @@ use schwaetz_core::time;
 use std::collections::HashMap;
 use windows::Win32::Graphics::Direct2D::ID2D1DeviceContext;
 use windows::Win32::Graphics::DirectWrite::IDWriteTextLayout;
+use windows::core::Interface;
 
 pub const PAD_X: f32 = 14.0;
 const PAD_BOTTOM: f32 = 8.0;
@@ -41,7 +42,19 @@ struct Cached {
     plain: String,
     map: U16Map,
     height: f32,
+    card: Option<Card>,
     used: u64,
+}
+
+/// A link preview below a message: either a "Show preview" chip or a card.
+struct Card {
+    url: String,
+    w: f32,
+    h: f32,
+    chip: bool,
+    image: Option<(String, f32, f32)>,
+    title: Option<IDWriteTextLayout>,
+    desc: Option<IDWriteTextLayout>,
 }
 
 /// A line as drawn in the last frame (for hit testing).
@@ -69,6 +82,8 @@ pub struct Metrics {
 /// What a point in the chat view refers to.
 pub enum Hit {
     Link(LinkTarget),
+    /// The "Show preview" chip of a link.
+    LoadPreview(String),
     Nick(String),
     Text(Pos),
     Nothing,
@@ -110,6 +125,12 @@ pub struct Ctx<'a> {
     pub nick_column_chars: u32,
     pub colors: bool,
     pub colored_nicks: bool,
+    pub images: &'a std::rc::Rc<std::cell::RefCell<crate::images::ImageStore>>,
+    /// Link previews enabled for this buffer.
+    pub previews: bool,
+    /// Load previews without a click (subject to `allow_hosts`).
+    pub preview_auto: bool,
+    pub allow_hosts: &'a [String],
 }
 
 impl Default for ChatView {
@@ -306,6 +327,26 @@ impl ChatView {
             }
         }
 
+        // Inline emotes (Twitch tags or script decorations): byte ranges of the stripped body.
+        if !deleted && let Some(emotes) = line.extra.as_ref().map(|e| &e.emotes).filter(|e| !e.is_empty()) {
+            let h = (f.line_height * 1.35).round();
+            for e in emotes {
+                if e.end as usize > body.len() || e.start >= e.end || c.images.borrow().failed(&e.url) {
+                    continue;
+                }
+                let a = map.to_u16(e.start + off);
+                let b = map.to_u16(e.end + off);
+                // Never hide part of a link behind an image.
+                if links.iter().any(|l| a < l.start + l.len && l.start < b) {
+                    continue;
+                }
+                let obj = crate::images::InlineImage::create(&e.url, h, h * 0.78, c.images, c.dc);
+                unsafe {
+                    let _ = msg.SetInlineObject(&obj, text::range(a, b - a));
+                }
+            }
+        }
+
         // Nick column.
         let nick = if c.nick_column {
             let (sym, name) = match line.kind {
@@ -383,7 +424,99 @@ impl ChatView {
         if let Some(r) = &reactions {
             height += text::metrics(r).height + 6.0;
         }
-        Cached { msg, msg_h, nick, ts, reply, reactions, links, bgs, plain, map, height, used: self.frame }
+        let card = if c.previews && !deleted && matches!(line.kind, LineKind::Message | LineKind::Action) {
+            let url = links.iter().find_map(|l| match &l.target {
+                LinkTarget::Url(u) if u.starts_with("https://") => Some(u.clone()),
+                _ => None,
+            });
+            url.and_then(|u| self.card_for(c, u, msg_w))
+        } else {
+            None
+        };
+        if let Some(card) = &card {
+            height += card.h + 6.0;
+        }
+        Cached { msg, msg_h, nick, ts, reply, reactions, links, bgs, plain, map, height, card, used: self.frame }
+    }
+
+    /// Builds the preview card (or load chip) for a message's first https link.
+    fn card_for(&self, c: &mut Ctx, url: String, msg_w: f32) -> Option<Card> {
+        let f = &c.text.fonts;
+
+        let max_w = msg_w.min(420.0);
+        let mut store = c.images.borrow_mut();
+        let host_ok = || {
+            let host = url
+                .split("://")
+                .nth(1)
+                .and_then(|r| r.split(['/', '?', '#']).next())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            c.allow_hosts.is_empty() || c.allow_hosts.iter().any(|h| host == *h || host.ends_with(&format!(".{h}")))
+        };
+        let state = store.previews.get(&url).cloned();
+        match state {
+            None => {
+                if store.requested.contains(&url) || (c.preview_auto && host_ok()) {
+                    if !store.wants.iter().any(|(u, _)| *u == url) {
+                        store.wants.push((url.clone(), true));
+                    }
+                    return None;
+                }
+                Some(Card { url, w: 128.0, h: 22.0, chip: true, image: None, title: None, desc: None })
+            }
+            Some(crate::images::Preview::Failed) => None,
+            Some(crate::images::Preview::Image) => {
+                let (w, h) = store.size(&url, false)?;
+                let scale = (max_w / w as f32).min(240.0 / h as f32).min(1.0);
+                let (iw, ih) = (w as f32 * scale, h as f32 * scale);
+                Some(Card {
+                    url: url.clone(),
+                    w: iw,
+                    h: ih,
+                    chip: false,
+                    image: Some((url, iw, ih)),
+                    title: None,
+                    desc: None,
+                })
+            }
+            Some(crate::images::Preview::Page(meta)) => {
+                let inner = max_w - 24.0;
+                let image = meta.image.as_ref().and_then(|img| {
+                    let (w, h) = store.size(img, false)?;
+                    let scale = (inner / w as f32).min(200.0 / h as f32).min(1.0);
+                    Some((img.clone(), w as f32 * scale, h as f32 * scale))
+                });
+                drop(store);
+                let title = meta.title.as_ref().map(|t| c.text.layout(t, &f.ui_semibold, inner, 40.0));
+                let desc_text = match (&meta.site, &meta.description) {
+                    (Some(s), Some(d)) => format!("{s} — {d}"),
+                    (Some(s), None) => s.clone(),
+                    (None, Some(d)) => d.clone(),
+                    (None, None) => String::new(),
+                };
+                let desc = (!desc_text.is_empty()).then(|| {
+                    let l = c.text.layout(&desc_text, &f.chat, inner, f.line_height * 3.2);
+                    unsafe {
+                        let _ = l.SetWordWrapping(windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_WRAP);
+                        let _ =
+                            l.SetFontSize(f.chat_size * 0.9, text::range(0, desc_text.encode_utf16().count() as u32));
+                    }
+                    l
+                });
+                let mut h = 12.0;
+                if let Some(t) = &title {
+                    h += text::metrics(t).height + 4.0;
+                }
+                if let Some(d) = &desc {
+                    h += text::metrics(d).height.min(f.line_height * 3.2) + 4.0;
+                }
+                if let Some((_, _, ih)) = &image {
+                    h += ih + 8.0;
+                }
+                Some(Card { url, w: max_w, h: h + 4.0, chip: false, image, title, desc })
+            }
+        }
     }
 
     fn nick_color(&self, c: &Ctx, line: &Line) -> crate::gfx::Color {
@@ -679,6 +812,42 @@ impl ChatView {
             p.fill_round(Rect::new(msg_x - 4.0, ry - 1.0, mt.width + 12.0, mt.height + 4.0), 6.0, th.badge_bg);
             p.text(r, msg_x + 2.0, ry + 1.0, th.text);
         }
+        if let Some(card) = &e.card {
+            let top = my + card_offset(e);
+            let r = Rect::new(msg_x, top, card.w, card.h);
+            if card.chip {
+                p.fill_round(r, 11.0, th.badge_bg);
+                let l = c.text.layout("🖼  Show preview", &c.text.fonts.ui_small, card.w, 20.0);
+                p.text(&l, r.x + 12.0, r.y + 4.0, th.text_dim);
+            } else if card.title.is_none() && card.desc.is_none() {
+                // Direct image link.
+                if let Some((url, w, h)) = &card.image
+                    && let Some(bmp) = c.images.borrow().bitmap(url)
+                {
+                    p.bitmap(&bmp.cast().unwrap(), Rect::new(r.x, r.y, *w, *h), 1.0);
+                }
+            } else {
+                p.fill_round(r, 8.0, th.input_bg);
+                p.stroke_round(r, 8.0, th.border, 1.0);
+                p.fill_round(Rect::new(r.x, r.y, 3.0, r.h), 1.5, th.accent);
+                let mut y = r.y + 8.0;
+                if let Some(t) = &card.title {
+                    p.text(t, r.x + 14.0, y, th.link);
+                    y += text::metrics(t).height + 4.0;
+                }
+                if let Some(d) = &card.desc {
+                    p.clip(Rect::new(r.x, y, r.w, c.text.fonts.line_height * 3.2));
+                    p.text(d, r.x + 14.0, y, th.text_dim);
+                    p.unclip();
+                    y += text::metrics(d).height.min(c.text.fonts.line_height * 3.2) + 4.0;
+                }
+                if let Some((url, w, h)) = &card.image
+                    && let Some(bmp) = c.images.borrow().bitmap(url)
+                {
+                    p.bitmap(&bmp.cast().unwrap(), Rect::new(r.x + 14.0, y + 4.0, *w, *h), 1.0);
+                }
+            }
+        }
         if matches!(line.kind, LineKind::Message | LineKind::Action | LineKind::Notice) && !line.nick.is_empty() {
             self.nicks.insert(line.id, line.nick.to_string());
         }
@@ -720,6 +889,16 @@ impl ChatView {
                 return Hit::Nick(n.clone());
             }
             let Some(e) = self.cache.get(&d.id) else { return Hit::Nothing };
+            if let Some(card) = &e.card {
+                let r = Rect::new(d.msg_x, d.msg_y + card_offset(e), card.w, card.h);
+                if r.contains(x, y) {
+                    return if card.chip {
+                        Hit::LoadPreview(card.url.clone())
+                    } else {
+                        Hit::Link(LinkTarget::Url(card.url.clone()))
+                    };
+                }
+            }
             let (pos, inside) = text::hit_point(&e.msg, x - d.msg_x, y - d.msg_y);
             if inside && let Some(l) = e.links.iter().find(|l| pos >= l.start && pos < l.start + l.len) {
                 return Hit::Link(l.target.clone());
@@ -809,4 +988,10 @@ impl ChatView {
         let Some(e) = self.cache.get(&pos.line) else { return };
         self.selection = Some((Pos { line: pos.line, u16: 0 }, Pos { line: pos.line, u16: e.map.len_u16() }));
     }
+}
+
+/// Distance from the top of a message's text to its preview card.
+fn card_offset(e: &Cached) -> f32 {
+    let reactions = e.reactions.as_ref().map_or(0.0, |r| text::metrics(r).height + 6.0);
+    e.msg_h + 4.0 + reactions
 }

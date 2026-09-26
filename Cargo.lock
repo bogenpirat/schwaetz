@@ -1561,6 +1561,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "schwaetz-media"
+version = "0.1.0"
+dependencies = [
+ "schwaetz-net",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "schwaetz-net"
 version = "0.1.0"
 dependencies = [
@@ -1622,12 +1631,14 @@ dependencies = [
  "linkify",
  "schwaetz-client",
  "schwaetz-core",
+ "schwaetz-media",
  "schwaetz-net",
  "schwaetz-proto",
  "serde",
  "toml",
  "tracing",
  "windows",
+ "windows-core",
  "windows-numerics",
 ]
 

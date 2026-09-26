@@ -16,6 +16,8 @@ toml.workspace = true
 linkify.workspace = true
 tracing.workspace = true
 windows-numerics = "0.3"
+windows-core = "0.62"
+schwaetz-media.workspace = true
 
 [dependencies.windows]
 workspace = true

@@ -11,3 +11,4 @@ pub mod theme;
 pub mod win;
 
 pub use shell::{COPYDATA_MAGIC, Services, run};
+pub mod images;

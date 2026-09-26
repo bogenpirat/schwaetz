@@ -30,6 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, w};
 
 pub const WM_APP_NET: u32 = WM_APP + 1;
+pub const WM_APP_MEDIA: u32 = WM_APP + 3;
 /// `dwData` tag for WM_COPYDATA messages carrying input for the running instance.
 pub const COPYDATA_MAGIC: usize = 0x5357_4158;
 const TIMER_TICK: usize = 1;
@@ -84,6 +85,9 @@ pub struct Ui {
     shown_buffer: Option<BufferId>,
     nicklist_gen: (Option<BufferId>, u64),
     quitting: bool,
+    media: schwaetz_media::Media,
+    images: std::rc::Rc<std::cell::RefCell<crate::images::ImageStore>>,
+    preview_pending: std::collections::HashSet<String>,
     active_window: bool,
 }
 
@@ -136,6 +140,13 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
     }
 
     let hwnd_shared = Arc::new(AtomicIsize::new(hwnd.0 as isize));
+    let media_target = hwnd_shared.clone();
+    let media = schwaetz_media::Media::start(Some(paths.cache_dir.clone()), 2, move || {
+        let h = HWND(media_target.load(Ordering::Relaxed) as *mut _);
+        unsafe {
+            let _ = PostMessageW(Some(h), WM_APP_MEDIA, WPARAM(0), LPARAM(0));
+        }
+    });
     let wake_target = hwnd_shared.clone();
     let net = NetHandle::start(move || {
         let h = HWND(wake_target.load(Ordering::Relaxed) as *mut _);
@@ -196,6 +207,9 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         shown_buffer: None,
         nicklist_gen: (None, 0),
         quitting: false,
+        media,
+        images: Default::default(),
+        preview_pending: Default::default(),
         active_window: true,
     });
     ui.apply_appearance();
@@ -351,9 +365,12 @@ impl Ui {
         brushes: &'a mut Brushes,
         dc: &'a windows::Win32::Graphics::Direct2D::ID2D1DeviceContext,
         dgen: u64,
-        cfg: &'a Config,
+        app: &'a App,
+        images: &'a std::rc::Rc<std::cell::RefCell<crate::images::ImageStore>>,
     ) -> Ctx<'a> {
+        let cfg = &app.config;
         let a = &cfg.appearance;
+        let net_previews = app.network_of(app.active).is_some_and(|n| n.cfg.previews);
         Ctx {
             text,
             theme,
@@ -365,6 +382,10 @@ impl Ui {
             nick_column_chars: a.nick_column_width,
             colors: a.show_mirc_colors,
             colored_nicks: a.colored_nicks,
+            images,
+            previews: cfg.previews.enabled && net_previews,
+            preview_auto: cfg.previews.auto_load,
+            allow_hosts: &cfg.previews.allow_hosts,
         }
     }
 
@@ -376,6 +397,7 @@ impl Ui {
         let dgen = gfx.generation;
         let r = gfx.frame(pw, ph, |dc| self.draw(dc, dgen));
         self.gfx = Some(gfx);
+        self.dispatch_media();
         if let Err(e) = r {
             tracing::error!("render failed: {e}");
         }
@@ -432,6 +454,7 @@ impl Ui {
         } else {
             p.clear(th.backdrop_opaque);
         }
+        self.images.borrow_mut().realize(dc, dgen);
         self.sidebar.render(&p, &self.text, &th, &self.app);
 
         // Topic bar.
@@ -449,8 +472,8 @@ impl Ui {
         // Chat.
         let id = self.app.active;
         {
-            let Ui { ref mut chat, ref text, ref mut brushes, ref app, .. } = *self;
-            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, &app.config);
+            let Ui { ref mut chat, ref text, ref mut brushes, ref app, ref images, .. } = *self;
+            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, app, images);
             if let Some(b) = app.buffer(id) {
                 chat.render(&p, &mut ctx, b);
             }
@@ -710,6 +733,57 @@ impl Ui {
         self.after_update();
     }
 
+    /// Sends image/preview requests collected while laying out lines.
+    fn dispatch_media(&mut self) {
+        let wants = std::mem::take(&mut self.images.borrow_mut().wants);
+        for (url, preview) in wants {
+            if self.media.is_pending(&url) {
+                continue;
+            }
+            let kind = if preview {
+                self.preview_pending.insert(url.clone());
+                schwaetz_media::Kind::Preview { max_dim: (420.0 * self.scale) as u32 }
+            } else {
+                schwaetz_media::Kind::Image { max_dim: (420.0 * self.scale) as u32 }
+            };
+            self.media.request(&url, kind);
+        }
+    }
+
+    fn process_media(&mut self) {
+        let results = self.media.drain();
+        if results.is_empty() {
+            return;
+        }
+        {
+            let mut store = self.images.borrow_mut();
+            for r in results {
+                match r {
+                    schwaetz_media::MediaResult::Image { url, width, height, bgra } => {
+                        if self.preview_pending.remove(&url) {
+                            store.previews.insert(url.clone(), crate::images::Preview::Image);
+                        }
+                        store.insert_pixels(url, width, height, bgra);
+                    }
+                    schwaetz_media::MediaResult::Page { url, meta } => {
+                        self.preview_pending.remove(&url);
+                        store.previews.insert(url, crate::images::Preview::Page(meta));
+                    }
+                    schwaetz_media::MediaResult::Failed { url, error } => {
+                        tracing::debug!("media {url}: {error}");
+                        if self.preview_pending.remove(&url) {
+                            store.previews.insert(url.clone(), crate::images::Preview::Failed);
+                        }
+                        store.insert_failed(url);
+                    }
+                }
+            }
+        }
+        // Image sizes change line heights: re-layout.
+        self.chat.invalidate_styles();
+        self.invalidate();
+    }
+
     /// Input from the user (typed or forwarded): scripts first, then the model.
     fn run_input(&mut self, buffer: BufferId, text: &str) {
         let consumed = match self.services.scripts.as_mut() {
@@ -789,9 +863,9 @@ impl Ui {
         let (pw, ph) = self.client_size();
         let _ = gfx.frame(pw, ph, |dc| {
             let id = self.app.active;
-            let Ui { ref mut chat, ref text, ref mut brushes, ref app, ref theme, .. } = *self;
+            let Ui { ref mut chat, ref text, ref mut brushes, ref app, ref theme, ref images, .. } = *self;
             let th = theme.clone();
-            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, &app.config);
+            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, app, images);
             if let Some(b) = app.buffer(id) {
                 chat.scroll(&mut ctx, b, dy);
             }
@@ -1131,6 +1205,10 @@ impl Ui {
                     self.open_link(target);
                 }
                 Hit::Nick(nick) => self.nick_menu(&nick),
+                Hit::LoadPreview(url) => {
+                    self.images.borrow_mut().requested.insert(url);
+                    self.chat.invalidate_styles();
+                }
                 Hit::Nothing => self.chat.selection = None,
             }
             self.invalidate();
@@ -1600,6 +1678,10 @@ impl Ui {
                 Some(LRESULT(0))
             }
             WM_ERASEBKGND => Some(LRESULT(1)),
+            WM_APP_MEDIA => {
+                self.process_media();
+                Some(LRESULT(0))
+            }
             WM_APP_NET => {
                 self.process_net();
                 Some(LRESULT(0))
