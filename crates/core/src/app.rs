@@ -1517,6 +1517,17 @@ impl App {
             let (pn, pt) = parent_line.map(|l| (l.nick.to_string(), excerpt(&fmt::strip(&l.text)))).unwrap_or_default();
             extra.reply_to = Some((parent.to_owned(), pn, pt));
         }
+        // Our own replies (local echo) carry only the parent id: fill in who and what from the buffer.
+        if let Some((parent, pn, pt)) = extra.reply_to.as_mut()
+            && pn.is_empty()
+            && let Some(l) =
+                self.buffer(bid).and_then(|b| b.lines.iter().rev().find(|l| l.msgid() == Some(parent.as_str())))
+        {
+            *pn = l.display_nick().to_owned();
+            if pt.is_empty() {
+                *pt = excerpt(&fmt::strip(&l.text));
+            }
+        }
         if extra != LineExtra::default() {
             line.extra = Some(Box::new(extra));
         }

@@ -161,8 +161,24 @@ impl App {
         let Some(b) = self.buffer(buffer) else { return };
         let (Some(net), name) = (b.network, b.name.clone()) else { return };
         let mut tags = Tags::new();
-        tags.insert("+draft/reply", msgid);
+        // Twitch uses its own (non-client) tag for replies.
+        let key =
+            if self.networks.get(&net).is_some_and(|n| n.is_twitch()) { "reply-parent-msg-id" } else { "+draft/reply" };
+        tags.insert(key, msgid);
         self.send_chat(net, ChatKind::Privmsg, &name, text, tags);
+    }
+
+    /// Whether messages in this buffer can be replied to (Twitch, or servers with message-tags).
+    pub fn can_reply(&self, buffer: BufferId) -> bool {
+        let Some(b) = self.buffer(buffer) else { return false };
+        if !matches!(b.kind, BufferKind::Channel | BufferKind::Query) {
+            return false;
+        }
+        b.network.and_then(|n| self.networks.get(&n)).is_some_and(|n| {
+            n.conn == ConnState::Ready
+                && (n.is_twitch()
+                    || (n.session.has_cap("message-tags") && !n.session.isupport().tag_denied("+draft/reply")))
+        })
     }
 
     /// Reacts to a message (`+draft/react`).

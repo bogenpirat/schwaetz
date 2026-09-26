@@ -179,6 +179,7 @@ pub struct Tray {
     added: bool,
 }
 
+pub const WM_MOUSELEAVE: u32 = 0x02A3;
 pub const WM_APP_TRAY: u32 = WM_APP + 2;
 pub const NIN_BALLOONUSERCLICK: u32 = WM_USER + 5;
 

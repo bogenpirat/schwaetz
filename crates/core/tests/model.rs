@@ -369,3 +369,37 @@ fn joined_channels_are_remembered() {
     h.lines(&[":me!u@h JOIN #third"]);
     assert_eq!(h.app.config.networks[0].autojoin, ["#new"]);
 }
+
+#[test]
+fn replies_use_the_right_tag_and_show_context() {
+    // Twitch: reply-parent-msg-id, local echo resolves the parent.
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.connect();
+    h.lines(&[
+        ":tmi.twitch.tv CAP * ACK :twitch.tv/tags twitch.tv/commands",
+        ":tmi.twitch.tv 001 me :hi",
+        ":tmi.twitch.tv 376 me :>",
+    ]);
+    h.lines(&[
+        ":me!me@me.tmi.twitch.tv JOIN #chan",
+        "@id=abc;display-name=Alice :alice!alice@alice.tmi.twitch.tv PRIVMSG #chan :original words",
+    ]);
+    let c = h.buffer("#chan");
+    assert!(h.app.can_reply(c));
+    h.sent();
+    h.app.reply(c, "abc", "my answer");
+    assert_eq!(h.sent(), ["@reply-parent-msg-id=abc PRIVMSG #chan :my answer"]);
+    let own = h.app.buffer(c).unwrap().lines.back().unwrap().clone();
+    let (parent, nick, text) = own.extra.unwrap().reply_to.unwrap();
+    assert_eq!((parent.as_str(), nick.as_str(), text.as_str()), ("abc", "Alice", "original words"));
+
+    // IRC with message-tags: +draft/reply.
+    let mut h = Harness::new(NetworkKind::Irc, &[]);
+    h.connect();
+    h.lines(&[":srv CAP * LS :message-tags", ":srv CAP * ACK :message-tags"]);
+    h.lines(&[":srv 001 me :hi", ":srv 376 me :end", ":me!u@h JOIN #c"]);
+    let c = h.buffer("#c");
+    h.sent();
+    h.app.reply(c, "m1", "sure");
+    assert_eq!(h.sent(), ["@+draft/reply=m1 PRIVMSG #c sure"]);
+}

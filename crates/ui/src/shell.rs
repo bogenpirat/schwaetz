@@ -98,6 +98,10 @@ pub struct Ui {
     paint_pending: bool,
     anim_start: std::time::Instant,
     a11y_window: (i64, u32),
+    /// Message being replied to (shown above the input).
+    reply: Option<ReplyTarget>,
+    reply_rect: Rect,
+    mouse_tracking: bool,
 }
 
 thread_local! {
@@ -227,6 +231,9 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         paint_pending: false,
         anim_start: std::time::Instant::now(),
         a11y_window: (0, 0),
+        reply: None,
+        reply_rect: Rect::default(),
+        mouse_tracking: false,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -386,7 +393,14 @@ impl Ui {
         let typing_h = 20.0;
         let chat_w = main_w - nick_w;
         self.input_rect = Rect::new(sw + 14.0, h - input_h - 14.0, chat_w - 28.0, input_h);
-        self.typing_rect = Rect::new(sw + 16.0, self.input_rect.y - typing_h, chat_w - 32.0, typing_h);
+        // The "replying to" bar sits directly above the input.
+        let replying = self.reply.as_ref().is_some_and(|r| r.buffer == self.app.active);
+        self.reply_rect = if replying {
+            Rect::new(sw + 14.0, self.input_rect.y - 34.0, chat_w - 28.0, 30.0)
+        } else {
+            Rect::new(sw + 14.0, self.input_rect.y, chat_w - 28.0, 0.0)
+        };
+        self.typing_rect = Rect::new(sw + 16.0, self.reply_rect.y - typing_h, chat_w - 32.0, typing_h);
         let chat_top = TOPIC_H;
         self.chat.rect = Rect::new(sw, chat_top, chat_w, self.typing_rect.y - chat_top);
         self.nicklist.rect = Rect::new(w - nick_w, chat_top, nick_w, h - chat_top);
@@ -419,6 +433,7 @@ impl Ui {
             previews: cfg.previews.enabled && net_previews,
             preview_auto: cfg.previews.auto_load,
             allow_hosts: &cfg.previews.allow_hosts,
+            replies: app.can_reply(app.active),
         }
     }
 
@@ -485,6 +500,10 @@ impl Ui {
     }
 
     fn draw(&mut self, dc: &windows::Win32::Graphics::Direct2D::ID2D1DeviceContext, dgen: u64) {
+        // The reply bar belongs to one buffer; re-layout when switching in or out of it.
+        if self.reply.as_ref().is_some_and(|r| r.buffer == self.app.active) != (self.reply_rect.h > 0.0) {
+            self.layout();
+        }
         let p = Painter::new(dc);
         let th = self.theme.clone();
         if self.mica {
@@ -540,6 +559,23 @@ impl Ui {
             p.text(&l, self.typing_rect.x, self.typing_rect.y + 2.0, th.text_dim);
         }
 
+        // Pending reply.
+        let replying = self.reply.as_ref().filter(|r| r.buffer == id && self.reply_rect.h > 0.0);
+        if let Some(r) = replying {
+            let rr = self.reply_rect;
+            p.fill_round(rr, 8.0, th.panel_bg);
+            p.fill(Rect::new(rr.x + 8.0, rr.y + 7.0, 3.0, rr.h - 14.0), th.accent);
+            let head = self.text.layout(&format!("↩  Replying to {}", r.nick), &f.ui_semibold, rr.w - 60.0, 20.0);
+            let hw = text::metrics(&head).width;
+            p.text(&head, rr.x + 20.0, rr.y + 7.0, th.accent);
+            let ex = self.text.layout(&r.excerpt, &f.ui, (rr.w - hw - 72.0).max(1.0), 20.0);
+            p.text(&ex, rr.x + 32.0 + hw, rr.y + 7.0, th.text_dim);
+            let cr = self.reply_close_rect();
+            let x = self.text.layout("✕", &f.ui, cr.w, cr.h);
+            let xw = text::metrics(&x).width;
+            p.text(&x, cr.x + (cr.w - xw) / 2.0, cr.y + 4.0, th.text_dim);
+        }
+
         // Input box.
         let ir = self.input_rect;
         p.fill_round(ir, 10.0, th.input_bg);
@@ -552,7 +588,9 @@ impl Ui {
         p.clip(inner.inset(-2.0, 0.0));
         if self.input.is_empty() {
             let b = self.app.active_buffer();
+            let reply_nick = replying.map(|r| r.nick.clone());
             let ph = match b.kind {
+                _ if let Some(n) = reply_nick => format!("Reply to {n}"),
                 BufferKind::Channel | BufferKind::Query => format!("Message {}", b.name),
                 _ => "Type a command, e.g. /connect irc.libera.chat".to_owned(),
             };
@@ -832,7 +870,25 @@ impl Ui {
         if let Some(b) = self.app.buffer_mut(id) {
             b.input.draft.clear();
         }
-        self.run_input(id, &text);
+        let reply = self.reply.take_if(|r| r.buffer == id);
+        match reply {
+            // Commands keep their usual meaning; the reply stays pending for the next message.
+            Some(r) if text.starts_with('/') && !text.starts_with("//") => {
+                self.reply = Some(r);
+                self.run_input(id, &text);
+            }
+            Some(r) => {
+                let consumed = match self.services.scripts.as_mut() {
+                    Some(h) => h.on_input(&mut self.app, id, &text),
+                    None => false,
+                };
+                if !consumed {
+                    let body = text.strip_prefix('/').filter(|t| t.starts_with('/')).unwrap_or(&text);
+                    self.app.reply(id, &r.msgid, body);
+                }
+            }
+            None => self.run_input(id, &text),
+        }
         if self.last_typing_sent > 0 {
             self.last_typing_sent = 0;
         }
@@ -909,6 +965,28 @@ impl Ui {
         if !consumed {
             self.app.input(buffer, text);
         }
+    }
+
+    /// Arms a reply to a chat line of the active buffer (from its hover button).
+    fn start_reply(&mut self, line: u64) {
+        let id = self.app.active;
+        let Some(l) = self.app.buffer(id).and_then(|b| b.lines.iter().find(|l| l.id == line)) else { return };
+        let Some(msgid) = l.msgid() else { return };
+        let text: String = schwaetz_proto::format::strip(&l.text).split_whitespace().collect::<Vec<_>>().join(" ");
+        let excerpt =
+            if text.chars().count() > 120 { text.chars().take(117).chain("…".chars()).collect() } else { text };
+        self.reply =
+            Some(ReplyTarget { buffer: id, msgid: msgid.to_owned(), nick: l.display_nick().to_owned(), excerpt });
+        self.layout();
+        self.invalidate();
+        unsafe {
+            let _ = SetFocus(Some(self.hwnd));
+        }
+    }
+
+    fn reply_close_rect(&self) -> Rect {
+        let r = self.reply_rect;
+        Rect::new(r.right() - 30.0, r.y + 3.0, 24.0, 24.0)
     }
 
     fn typed(&mut self) {
@@ -1127,7 +1205,9 @@ impl Ui {
             VK_BACK => self.input.backspace(ctrl),
             VK_DELETE => self.input.delete(ctrl),
             VK_ESCAPE => {
-                if self.chat.selection.take().is_none() {
+                if self.reply.take_if(|r| r.buffer == self.app.active).is_some() {
+                    // Cancelled the reply.
+                } else if self.chat.selection.take().is_none() {
                     self.chat.scroll_to_bottom();
                 }
             }
@@ -1370,6 +1450,14 @@ impl Ui {
             }
             return;
         }
+        if self.reply_rect.h > 0.0 && self.reply_rect.contains(x, y) {
+            if self.reply_close_rect().contains(x, y) {
+                self.reply = None;
+                self.layout();
+                self.invalidate();
+            }
+            return;
+        }
         if self.input_rect.contains(x, y) {
             let inner = self.input_rect.inset(14.0, 11.0);
             let shift = win::key_down(VK_SHIFT.0);
@@ -1414,6 +1502,7 @@ impl Ui {
                     self.open_link(target);
                 }
                 Hit::Nick(nick) => self.nick_menu(&nick),
+                Hit::Reply(line) => self.start_reply(line),
                 Hit::LoadPreview(url) => {
                     self.images.borrow_mut().requested.insert(url);
                     self.chat.invalidate_styles();
@@ -1470,6 +1559,11 @@ impl Ui {
                 let nh = if self.show_nicklist { self.nicklist.hit(x, y) } else { None };
                 if nh != self.nicklist.hover {
                     self.nicklist.hover = nh;
+                    self.invalidate();
+                }
+                let ch = if self.chat.rect.contains(x, y) { self.chat.line_at(y) } else { None };
+                if ch != self.chat.hover {
+                    self.chat.hover = ch;
                     self.invalidate();
                 }
             }
@@ -1801,13 +1895,48 @@ impl Ui {
                 self.open_irc_url(line);
             } else if line == "!show" {
                 self.restore();
-            } else {
+            } else if !line.strip_prefix('!').is_some_and(|r| self.automation(r)) {
                 let id = self.app.active;
                 self.run_input(id, line);
             }
         }
         self.after_update();
         self.invalidate();
+    }
+
+    /// Scripted UI actions for automated checks (`scripts/send.ps1 "!click 500 640"`), in DIPs:
+    /// `!move x y`, `!click x y`, `!key <vk>`, `!submit <text>` (types and presses Enter).
+    fn automation(&mut self, cmd: &str) -> bool {
+        let (verb, arg) = cmd.split_once(' ').unwrap_or((cmd, ""));
+        let xy = || -> Option<(f32, f32)> {
+            let (x, y) = arg.trim().split_once(' ')?;
+            Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+        };
+        match verb {
+            "move" => {
+                if let Some((x, y)) = xy() {
+                    self.mouse_move(x, y);
+                }
+            }
+            "click" => {
+                if let Some((x, y)) = xy() {
+                    self.mouse_move(x, y);
+                    self.mouse_down(x, y, false);
+                    self.mouse_up();
+                }
+            }
+            "key" => {
+                if let Ok(vk) = arg.trim().parse() {
+                    self.key_down(vk);
+                }
+            }
+            "submit" => {
+                self.input.set_text(arg, None);
+                self.submit();
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn open_irc_url(&mut self, url: &str) {
@@ -1981,8 +2110,32 @@ impl Ui {
                 Some(LRESULT(0))
             }
             WM_MOUSEMOVE => {
+                if !self.mouse_tracking {
+                    self.mouse_tracking = true;
+                    let mut tme = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: self.hwnd,
+                        dwHoverTime: 0,
+                    };
+                    unsafe {
+                        let _ = TrackMouseEvent(&mut tme);
+                    }
+                }
                 let (x, y) = self.pt(lp);
                 self.mouse_move(x, y);
+                Some(LRESULT(0))
+            }
+            win::WM_MOUSELEAVE => {
+                self.mouse_tracking = false;
+                if self.drag == Drag::None
+                    && (self.chat.hover.is_some() || self.sidebar.hover.is_some() || self.nicklist.hover.is_some())
+                {
+                    self.chat.hover = None;
+                    self.sidebar.hover = None;
+                    self.nicklist.hover = None;
+                    self.invalidate();
+                }
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
@@ -2197,4 +2350,13 @@ fn spoken(l: &schwaetz_core::Line) -> String {
         LineKind::Notice => format!("Notice from {}: {text}", l.display_nick()),
         _ => text,
     }
+}
+
+/// The message a reply will be attached to.
+#[derive(Clone, Debug)]
+pub(crate) struct ReplyTarget {
+    buffer: BufferId,
+    msgid: String,
+    nick: String,
+    excerpt: String,
 }

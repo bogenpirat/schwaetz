@@ -62,6 +62,8 @@ struct Card {
 /// A line as drawn in the last frame (for hit testing).
 struct Drawn {
     id: u64,
+    /// "Reply" button shown on the hovered line.
+    reply_btn: Option<Rect>,
     y: f32,
     h: f32,
     msg_x: f32,
@@ -84,6 +86,8 @@ pub struct Metrics {
 /// What a point in the chat view refers to.
 pub enum Hit {
     Link(LinkTarget),
+    /// The reply button of a line.
+    Reply(u64),
     /// The "Show preview" chip of a link.
     LoadPreview(String),
     Nick(String),
@@ -110,6 +114,8 @@ pub struct ChatView {
     /// Set when the top of the buffer came into view (load older history).
     pub wants_older: bool,
     pub style_gen: u64,
+    /// Line under the mouse (hover affordances).
+    pub hover: Option<u64>,
     /// Line id → position in the buffer, refreshed while a selection exists.
     order: HashMap<u64, usize>,
     /// Line id → sender nick for drawn lines (nick-column clicks).
@@ -133,6 +139,8 @@ pub struct Ctx<'a> {
     /// Load previews without a click (subject to `allow_hosts`).
     pub preview_auto: bool,
     pub allow_hosts: &'a [String],
+    /// Messages in this buffer can be replied to.
+    pub replies: bool,
 }
 
 impl Default for ChatView {
@@ -153,6 +161,7 @@ impl Default for ChatView {
             show_filtered: false,
             wants_older: false,
             style_gen: 0,
+            hover: None,
             order: HashMap::new(),
             nicks: HashMap::new(),
         }
@@ -776,6 +785,9 @@ impl ChatView {
         let th = c.theme;
         let Some(e) = self.cache.get(&line.id) else { return };
         let x0 = self.rect.x;
+        if self.hover == Some(line.id) && c.replies && line.kind.is_message() {
+            p.fill(Rect::new(x0, y, self.rect.w, h), th.sidebar_hover);
+        }
         if line.flags.has(LineFlags::HIGHLIGHT) {
             p.fill(Rect::new(x0, y, self.rect.w, h), th.highlight_bg);
             p.fill(Rect::new(x0, y, 3.0, h), th.highlight_bar);
@@ -872,8 +884,24 @@ impl ChatView {
         if matches!(line.kind, LineKind::Message | LineKind::Action | LineKind::Notice) && !line.nick.is_empty() {
             self.nicks.insert(line.id, line.nick.to_string());
         }
+        let mut reply_btn = None;
+        if self.hover == Some(line.id)
+            && c.replies
+            && line.kind.is_message()
+            && line.msgid().is_some()
+            && !line.flags.has(LineFlags::DELETED)
+        {
+            let l = c.text.layout("↩  Reply", &c.text.fonts.ui_small, 120.0, 20.0);
+            let w = text::metrics(&l).width + 20.0;
+            let r = Rect::new(self.rect.right() - w - 18.0, y + 1.0, w, 22.0);
+            p.fill_round(r, 11.0, th.panel_bg);
+            p.stroke_round(r, 11.0, th.border, 1.0);
+            p.text(&l, r.x + 10.0, r.y + 4.0, th.text);
+            reply_btn = Some(r);
+        }
         self.drawn.push(Drawn {
             id: line.id,
+            reply_btn,
             y,
             h,
             msg_x,
@@ -901,6 +929,11 @@ impl ChatView {
 
     pub fn hit(&self, x: f32, y: f32) -> Hit {
         for d in &self.drawn {
+            if let Some(r) = d.reply_btn
+                && r.contains(x, y)
+            {
+                return Hit::Reply(d.id);
+            }
             if y < d.y || y >= d.y + d.h {
                 continue;
             }
@@ -1027,4 +1060,11 @@ fn signature(l: &Line) -> u64 {
         )
     });
     l.flags.0 as u64 | emotes << 16 | reactions << 24 | reply << 40 | (l.text.len() as u64) << 41
+}
+
+impl ChatView {
+    /// The line drawn at vertical position `y`, if any.
+    pub fn line_at(&self, y: f32) -> Option<u64> {
+        self.drawn.iter().find(|d| y >= d.y && y < d.y + d.h).map(|d| d.id)
+    }
 }

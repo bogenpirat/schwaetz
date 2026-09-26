@@ -2,7 +2,8 @@
 # (commands included), via WM_COPYDATA. Used for scripted UI checks and automation.
 #
 # Usage: .\scripts\send.ps1 "/join #test" ["hello"] [...]
-#        Special lines: "irc://host/#chan" opens a link, "!show" restores the window.
+#        Special lines: "irc://host/#chan" opens a link, "!show" restores the window;
+#        "!move x y", "!click x y", "!key <vk>", "!submit <text>" drive the UI (DIP coordinates).
 
 param([Parameter(Mandatory, ValueFromRemainingArguments)][string[]]$Lines)
 $ErrorActionPreference = 'Stop'
