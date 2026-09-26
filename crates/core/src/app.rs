@@ -473,6 +473,7 @@ impl App {
         }
         let logged = if self.history.is_some()
             && matches!(b.kind, BufferKind::Channel | BufferKind::Query | BufferKind::Server)
+            && worth_logging(&line)
         {
             let net_name = b.network.and_then(|n| self.networks.get(&n)).map(|n| n.display_name().to_owned());
             net_name.map(|n| (n, b.name.clone(), line.clone()))
@@ -2136,5 +2137,16 @@ impl App {
                 id
             }
         }
+    }
+}
+
+/// Conversation and channel events are persisted; client status text, MOTDs and our own
+/// joins/parts (repeated on every connect) are not.
+fn worth_logging(l: &Line) -> bool {
+    match l.kind {
+        LineKind::Message | LineKind::Action | LineKind::Notice | LineKind::System => true,
+        LineKind::Join | LineKind::Part => !l.flags.has(LineFlags::OWN),
+        LineKind::Quit | LineKind::Kick | LineKind::Nick | LineKind::Mode | LineKind::Topic | LineKind::Invite | LineKind::Netsplit => true,
+        LineKind::Status | LineKind::Error | LineKind::Server | LineKind::Motd | LineKind::Ctcp => false,
     }
 }
