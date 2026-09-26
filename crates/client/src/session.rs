@@ -75,6 +75,8 @@ pub struct SessionConfig {
     pub port: u16,
     /// CTCP VERSION string.
     pub version: String,
+    /// soju: bind this connection to one upstream network (`BOUNCER BIND`).
+    pub bouncer_netid: Option<String>,
 }
 
 impl Default for SessionConfig {
@@ -95,6 +97,7 @@ impl Default for SessionConfig {
             tls: true,
             port: 6697,
             version: format!("schwätz {}", env!("CARGO_PKG_VERSION")),
+            bouncer_netid: None,
         }
     }
 }
@@ -1172,6 +1175,11 @@ impl Session {
     fn end_cap(&mut self, _now: i64) {
         if !self.cap_end_sent {
             self.cap_end_sent = true;
+            if let Some(id) = self.cfg.bouncer_netid.clone()
+                && self.has_cap("soju.im/bouncer-networks")
+            {
+                self.send(Message::new("BOUNCER", ["BIND".to_owned(), id]));
+            }
             self.send(Message::new("CAP", ["END"]));
         }
     }

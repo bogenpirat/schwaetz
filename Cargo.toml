@@ -38,8 +38,9 @@ proptest = "1"
 serde_yaml = "0.9"
 getrandom = "0.3"
 windows = "0.62"
-windows-core = "0.62"
-windows-numerics = "0.3"
+windows-sys = "0.61"
+regex-lite = "0.1"
+linkify = "0.11"
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,1881 @@
+//! The application model. Owned by the UI thread; UI-agnostic and deterministic given its inputs
+//! (config, network events, user input and the current time), which keeps it testable.
+
+use crate::buffer::{
+    Activity, Buffer, BufferId, BufferKind, Line, LineExtra, LineFlags, LineKind, NotifyLevel, Typing,
+};
+use crate::completion::Completer;
+use crate::config::{Config, NetworkConfig, NetworkKind, SaslMechanism};
+use crate::filter::{Highlighter, IgnoreType, Ignores};
+use crate::secrets::{self, SecretKind};
+use crate::{time, twitch, znc};
+use schwaetz_client::{Chat, ChatKind, Event, SaslConfig, Session, SessionConfig, SessionEvent, Target, TwitchEvent};
+use schwaetz_net::{
+    ClientCert, ConnectParams, FloodControl, NetCommand, NetEvent, NetworkId, Reconnect, ServerAddr, TlsInfo,
+};
+use schwaetz_proto::{Message, Source, ctcp, format as fmt};
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+/// Messages older than this when received live are treated as playback (no notifications).
+const PLAYBACK_AGE_MS: i64 = 60_000;
+const TYPING_TIMEOUT_MS: i64 = 6_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnState {
+    Disconnected,
+    Connecting,
+    /// Transport up, registering.
+    Connected,
+    Ready,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Effect {
+    /// Desktop notification.
+    Notify {
+        title: String,
+        body: String,
+        buffer: BufferId,
+    },
+    FlashTaskbar,
+    /// Channel list results are ready (or being streamed) for this network.
+    ChannelList(NetworkId),
+    /// ZNC `ListNetworks` finished; offer to add these networks.
+    ZncNetworks {
+        network: NetworkId,
+        names: Vec<String>,
+    },
+    /// soju advertised/changed its networks.
+    BouncerNetworks(NetworkId),
+    /// A multi-line paste needs confirmation before sending.
+    ConfirmPaste {
+        buffer: BufferId,
+        text: String,
+        lines: usize,
+    },
+    /// Persist a line (history database and text logs).
+    Log {
+        network: String,
+        buffer: String,
+        line: Line,
+    },
+    /// Load older lines from the history database for scroll-back.
+    LoadHistory {
+        buffer: BufferId,
+        network: String,
+        name: String,
+        before: i64,
+    },
+    /// Full-text search request.
+    Search {
+        query: String,
+        network: Option<String>,
+        buffer: Option<String>,
+    },
+    SaveConfig,
+    ConfigChanged,
+    OpenUrl(String),
+    ReloadScripts,
+    Quit,
+}
+
+/// What the UI has to refresh after a batch of updates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Dirty {
+    pub sidebar: bool,
+    pub lines: bool,
+    pub nicklist: bool,
+    pub topic: bool,
+    pub input: bool,
+}
+
+pub struct Network {
+    pub id: NetworkId,
+    pub cfg: NetworkConfig,
+    pub session: Session,
+    pub conn: ConnState,
+    pub lag_ms: Option<u64>,
+    pub server_buffer: BufferId,
+    pub server: Option<ServerAddr>,
+    pub tls: Option<TlsInfo>,
+    /// When the next reconnect attempt happens (Unix ms).
+    pub retry_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub channel_list: Vec<(String, u32, String)>,
+    pub channel_list_complete: bool,
+    pub bouncer_networks: BTreeMap<String, Vec<(String, String)>>,
+    /// Label → buffer that issued the command (labeled-response routing).
+    pub(crate) label_buffers: BTreeMap<String, BufferId>,
+    pub(crate) znc_collect: Option<Vec<String>>,
+    ctcp_window: (i64, u32),
+    /// Channels we asked to join from this client (switch to them on join).
+    pub(crate) pending_joins: Vec<String>,
+    /// Twitch: our own display tags from USERSTATE/GLOBALUSERSTATE.
+    pub twitch_self: Option<schwaetz_proto::Tags>,
+    /// Newest message time seen on this network, for ZNC playback.
+    pub last_seen: i64,
+    pub user_quit: bool,
+}
+
+impl Network {
+    pub fn display_name(&self) -> &str {
+        if self.cfg.name.is_empty() {
+            self.session.isupport().network.as_deref().unwrap_or("network")
+        } else {
+            &self.cfg.name
+        }
+    }
+
+    pub fn is_twitch(&self) -> bool {
+        self.cfg.kind == NetworkKind::Twitch
+    }
+}
+
+pub struct App {
+    pub config: Config,
+    pub networks: BTreeMap<NetworkId, Network>,
+    buffers: Vec<Buffer>,
+    pub active: BufferId,
+    pub status_buffer: BufferId,
+    next_line: u64,
+    next_buffer: u32,
+    next_network: u32,
+    pub(crate) highlighter: Highlighter,
+    pub(crate) ignores: Ignores,
+    pub focused: bool,
+    pub dark_theme: bool,
+    net_out: Vec<NetCommand>,
+    effects: Vec<Effect>,
+    pub(crate) completer: Completer,
+    pub dirty: Dirty,
+    /// Line ids of the per-buffer "last read" separator, for the UI.
+    pub now: i64,
+}
+
+impl App {
+    pub fn new(config: Config) -> App {
+        let (highlighter, errors) = Highlighter::new(&config.highlight);
+        let ignores = Ignores::new(&config.ignores);
+        let mut app = App {
+            networks: BTreeMap::new(),
+            buffers: Vec::new(),
+            active: BufferId(0),
+            status_buffer: BufferId(0),
+            next_line: 1,
+            next_buffer: 0,
+            next_network: 1,
+            highlighter,
+            ignores,
+            focused: true,
+            dark_theme: true,
+            net_out: Vec::new(),
+            effects: Vec::new(),
+            completer: Completer::default(),
+            dirty: Dirty { sidebar: true, lines: true, nicklist: true, topic: true, input: true },
+            now: time::now_ms(),
+            config,
+        };
+        app.status_buffer = app.create_buffer(None, BufferKind::Special, "schwätz");
+        app.active = app.status_buffer;
+        for e in errors {
+            app.status(app.status_buffer, LineKind::Error, e);
+        }
+        let nets = app.config.networks.clone();
+        for n in nets {
+            app.add_network(n);
+        }
+        app
+    }
+
+    // ----- accessors -----------------------------------------------------------------------------
+
+    pub fn buffers(&self) -> &[Buffer] {
+        &self.buffers
+    }
+
+    pub fn buffer(&self, id: BufferId) -> Option<&Buffer> {
+        self.buffers.iter().find(|b| b.id == id)
+    }
+
+    pub fn buffer_mut(&mut self, id: BufferId) -> Option<&mut Buffer> {
+        self.buffers.iter_mut().find(|b| b.id == id)
+    }
+
+    pub fn active_buffer(&self) -> &Buffer {
+        self.buffer(self.active).unwrap_or(&self.buffers[0])
+    }
+
+    pub fn network(&self, id: NetworkId) -> Option<&Network> {
+        self.networks.get(&id)
+    }
+
+    pub fn network_of(&self, buffer: BufferId) -> Option<&Network> {
+        self.buffer(buffer).and_then(|b| b.network).and_then(|n| self.networks.get(&n))
+    }
+
+    pub fn find_buffer(&self, network: NetworkId, name: &str) -> Option<BufferId> {
+        let net = self.networks.get(&network)?;
+        let cm = net.session.casemapping();
+        self.buffers
+            .iter()
+            .find(|b| b.network == Some(network) && b.kind != BufferKind::Server && cm.eq(&b.name, name))
+            .map(|b| b.id)
+    }
+
+    /// Buffers in sidebar order: status buffer, then per network its server buffer, channels and
+    /// queries (each sorted), then other special buffers.
+    pub fn sidebar_order(&self) -> Vec<BufferId> {
+        let mut out = vec![self.status_buffer];
+        for net in self.networks.values() {
+            out.push(net.server_buffer);
+            let cm = net.session.casemapping();
+            let mut chans: Vec<&Buffer> =
+                self.buffers.iter().filter(|b| b.network == Some(net.id) && b.kind == BufferKind::Channel).collect();
+            chans.sort_by_key(|b| cm.fold(&b.name).into_owned());
+            out.extend(chans.iter().map(|b| b.id));
+            let mut queries: Vec<&Buffer> = self
+                .buffers
+                .iter()
+                .filter(|b| b.network == Some(net.id) && matches!(b.kind, BufferKind::Query | BufferKind::Special))
+                .collect();
+            queries.sort_by_key(|b| cm.fold(&b.name).into_owned());
+            out.extend(queries.iter().map(|b| b.id));
+        }
+        out.extend(self.buffers.iter().filter(|b| b.network.is_none() && b.id != self.status_buffer).map(|b| b.id));
+        out
+    }
+
+    pub fn take_net_commands(&mut self) -> Vec<NetCommand> {
+        std::mem::take(&mut self.net_out)
+    }
+
+    pub fn take_effects(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.effects)
+    }
+
+    pub fn take_dirty(&mut self) -> Dirty {
+        std::mem::take(&mut self.dirty)
+    }
+
+    pub(crate) fn effect(&mut self, e: Effect) {
+        self.effects.push(e);
+    }
+
+    // ----- buffers -------------------------------------------------------------------------------
+
+    pub(crate) fn create_buffer(&mut self, network: Option<NetworkId>, kind: BufferKind, name: &str) -> BufferId {
+        let id = BufferId(self.next_buffer);
+        self.next_buffer += 1;
+        self.buffers.push(Buffer::new(id, network, kind, name, self.config.general.scrollback_lines));
+        self.dirty.sidebar = true;
+        id
+    }
+
+    /// Returns the buffer for a channel/query, creating it if needed.
+    pub(crate) fn ensure_buffer(&mut self, network: NetworkId, kind: BufferKind, name: &str) -> BufferId {
+        if let Some(id) = self.find_buffer(network, name) {
+            return id;
+        }
+        self.create_buffer(Some(network), kind, name)
+    }
+
+    pub fn switch_to(&mut self, id: BufferId) {
+        if self.buffer(id).is_none() {
+            return;
+        }
+        let prev = self.active;
+        if prev != id {
+            self.sync_read_marker(prev);
+        }
+        self.active = id;
+        self.completer.reset();
+        if let Some(b) = self.buffer_mut(id) {
+            b.mark_read();
+        }
+        self.dirty = Dirty { sidebar: true, lines: true, nicklist: true, topic: true, input: true };
+    }
+
+    /// Sends the read marker to the server (draft/read-marker) for a buffer being left.
+    fn sync_read_marker(&mut self, id: BufferId) {
+        let Some(b) = self.buffer(id) else { return };
+        let (Some(net), Some(marker), name) = (b.network, b.read_marker, b.name.clone()) else { return };
+        if matches!(b.kind, BufferKind::Channel | BufferKind::Query)
+            && let Some(n) = self.networks.get_mut(&net)
+            && n.conn == ConnState::Ready
+        {
+            n.session.mark_read(&name, marker);
+            self.flush(net);
+        }
+    }
+
+    pub fn close_buffer(&mut self, id: BufferId) {
+        let Some(b) = self.buffer(id) else { return };
+        if id == self.status_buffer || b.kind == BufferKind::Server {
+            return;
+        }
+        let order = self.sidebar_order();
+        let pos = order.iter().position(|x| *x == id).unwrap_or(0);
+        self.buffers.retain(|b| b.id != id);
+        if self.active == id {
+            let next = order.get(pos + 1).or(order.get(pos.wrapping_sub(1))).copied().unwrap_or(self.status_buffer);
+            let next = if self.buffer(next).is_some() { next } else { self.status_buffer };
+            self.switch_to(next);
+        }
+        self.dirty.sidebar = true;
+    }
+
+    fn line_id(&mut self) -> u64 {
+        self.next_line += 1;
+        self.next_line
+    }
+
+    pub(crate) fn new_line(&mut self, time: i64, kind: LineKind, nick: &str, text: impl Into<Box<str>>) -> Line {
+        Line {
+            id: self.line_id(),
+            time,
+            kind,
+            flags: LineFlags::default(),
+            nick: nick.into(),
+            prefix: None,
+            text: text.into(),
+            extra: None,
+        }
+    }
+
+    /// Adds a line, updating activity and emitting a log effect.
+    pub(crate) fn add_line(&mut self, buffer: BufferId, line: Line, activity: Activity) {
+        let active = self.active == buffer && self.focused;
+        let is_active = self.active == buffer;
+        let log = self.config.general.log_to_files;
+        let Some(b) = self.buffers.iter_mut().find(|b| b.id == buffer) else { return };
+        let history = line.flags.has(LineFlags::HISTORY);
+        let unread_by_marker = b.read_marker.is_none_or(|m| line.time > m);
+        if !line.flags.has(LineFlags::FILTERED) && !line.flags.has(LineFlags::OWN) && !(history && !unread_by_marker) {
+            let level = match b.notify {
+                NotifyLevel::Mute => Activity::None,
+                NotifyLevel::HighlightsOnly if activity < Activity::Highlight => Activity::None,
+                _ => activity,
+            };
+            if !active && level != Activity::None {
+                b.bump(level);
+                if level >= Activity::Messages {
+                    b.unread += 1;
+                }
+                if level == Activity::Highlight {
+                    b.highlights += 1;
+                }
+                self.dirty.sidebar = true;
+            }
+        }
+        if line.flags.has(LineFlags::OWN) && !history {
+            // Sending a message means we've read everything before it.
+            b.read_marker = Some(line.time);
+        }
+        if !history {
+            b.last_seen = b.last_seen.max(line.time);
+        }
+        let logged = if log && matches!(b.kind, BufferKind::Channel | BufferKind::Query | BufferKind::Server) {
+            let net_name = b.network.and_then(|n| self.networks.get(&n)).map(|n| n.display_name().to_owned());
+            net_name.map(|n| (n, b.name.clone(), line.clone()))
+        } else {
+            None
+        };
+        b.push(line);
+        if is_active {
+            self.dirty.lines = true;
+        }
+        if let Some((network, name, line)) = logged
+            && !history
+        {
+            self.effects.push(Effect::Log { network, buffer: name, line });
+        }
+    }
+
+    pub(crate) fn status(&mut self, buffer: BufferId, kind: LineKind, text: impl Into<String>) {
+        let line = self.new_line(self.now, kind, "", text.into());
+        let activity = if kind == LineKind::Error { Activity::Messages } else { Activity::Events };
+        self.add_line(buffer, line, activity);
+    }
+
+    /// Prints into the active buffer if it belongs to `net`, else the network's server buffer.
+    pub(crate) fn status_for(&mut self, net: NetworkId, kind: LineKind, text: impl Into<String>) {
+        let target = self.contextual_buffer(net);
+        self.status(target, kind, text);
+    }
+
+    pub(crate) fn contextual_buffer(&self, net: NetworkId) -> BufferId {
+        if self.buffer(self.active).is_some_and(|b| b.network == Some(net)) {
+            self.active
+        } else {
+            self.networks.get(&net).map_or(self.status_buffer, |n| n.server_buffer)
+        }
+    }
+
+    // ----- networks ------------------------------------------------------------------------------
+
+    pub fn add_network(&mut self, cfg: NetworkConfig) -> NetworkId {
+        let id = NetworkId(self.next_network);
+        self.next_network += 1;
+        let name =
+            if cfg.name.is_empty() { cfg.servers.first().cloned().unwrap_or_default() } else { cfg.name.clone() };
+        let server_buffer = self.create_buffer(Some(id), BufferKind::Server, &name);
+        let session = Session::new(self.session_config(&cfg, true, 6697));
+        self.networks.insert(
+            id,
+            Network {
+                id,
+                cfg,
+                session,
+                conn: ConnState::Disconnected,
+                lag_ms: None,
+                server_buffer,
+                server: None,
+                tls: None,
+                retry_at: None,
+                last_error: None,
+                channel_list: Vec::new(),
+                channel_list_complete: false,
+                bouncer_networks: BTreeMap::new(),
+                label_buffers: BTreeMap::new(),
+                znc_collect: None,
+                ctcp_window: (0, 0),
+                pending_joins: Vec::new(),
+                twitch_self: None,
+                last_seen: 0,
+                user_quit: false,
+            },
+        );
+        self.dirty.sidebar = true;
+        id
+    }
+
+    pub fn remove_network(&mut self, id: NetworkId) {
+        self.disconnect(id, None);
+        self.networks.remove(&id);
+        self.buffers.retain(|b| b.network != Some(id));
+        if self.buffer(self.active).is_none() {
+            self.active = self.status_buffer;
+        }
+        self.dirty = Dirty { sidebar: true, lines: true, nicklist: true, topic: true, input: true };
+    }
+
+    fn session_config(&self, cfg: &NetworkConfig, tls: bool, port: u16) -> SessionConfig {
+        let g = &self.config.general;
+        let nick = cfg.nick.clone().unwrap_or_else(|| g.nick.clone());
+        let alt_nicks = if cfg.alt_nicks.is_empty() { g.alt_nicks.clone() } else { cfg.alt_nicks.clone() };
+        let secret = |k| secrets::get(&cfg.name, k);
+        let sasl_user = cfg.sasl_username.clone().unwrap_or_else(|| nick.clone());
+        let sasl = match cfg.sasl {
+            SaslMechanism::None => None,
+            SaslMechanism::External => Some(SaslConfig::External),
+            SaslMechanism::Plain => {
+                secret(SecretKind::Sasl).map(|password| SaslConfig::Plain { username: sasl_user.clone(), password })
+            }
+            SaslMechanism::ScramSha256 => secret(SecretKind::Sasl)
+                .map(|password| SaslConfig::ScramSha256 { username: sasl_user.clone(), password }),
+        };
+        let password = match cfg.kind {
+            NetworkKind::Twitch => {
+                secret(SecretKind::TwitchToken).map(|t| if t.starts_with("oauth:") { t } else { format!("oauth:{t}") })
+            }
+            NetworkKind::Znc if cfg.server_password => secret(SecretKind::ServerPassword)
+                .map(|p| znc::pass(cfg.znc_user.as_deref().unwrap_or(&nick), cfg.znc_network.as_deref(), &p)),
+            _ if cfg.server_password => secret(SecretKind::ServerPassword),
+            _ => None,
+        };
+        let twitch = cfg.kind == NetworkKind::Twitch;
+        SessionConfig {
+            nick: if twitch { nick.to_lowercase() } else { nick },
+            alt_nicks,
+            username: cfg.username.clone().unwrap_or_else(|| g.username.clone()),
+            realname: cfg.realname.clone().unwrap_or_else(|| g.realname.clone()),
+            password,
+            sasl,
+            sasl_required: cfg.sasl_required,
+            autojoin: cfg.autojoin_list(),
+            twitch,
+            tls,
+            port,
+            bouncer_netid: cfg.bouncer_netid.clone(),
+            ..Default::default()
+        }
+    }
+
+    fn connect_params(&self, cfg: &NetworkConfig) -> ConnectParams {
+        let servers = cfg
+            .servers
+            .iter()
+            .filter_map(|s| NetworkConfig::parse_server(s))
+            .map(|(host, port, tls)| ServerAddr { host, port, tls, accept_invalid_certs: cfg.accept_invalid_certs })
+            .collect();
+        let client_cert = cfg.client_cert.as_ref().and_then(|p| {
+            let pem = std::fs::read(p).ok()?;
+            Some(ClientCert { key_pem: pem.clone(), cert_pem: pem })
+        });
+        ConnectParams {
+            servers,
+            client_cert,
+            flood: if cfg.kind == NetworkKind::Twitch {
+                FloodControl::twitch()
+            } else {
+                FloodControl {
+                    burst: cfg.flood_burst.max(1),
+                    interval: Duration::from_millis(cfg.flood_interval_ms.max(50)),
+                }
+            },
+            reconnect: Reconnect {
+                enabled: cfg.reconnect,
+                max_attempts: cfg.reconnect_max_attempts,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    pub fn connect(&mut self, id: NetworkId) {
+        let Some(net) = self.networks.get(&id) else { return };
+        let params = self.connect_params(&net.cfg);
+        if params.servers.is_empty() {
+            let sb = net.server_buffer;
+            self.status(sb, LineKind::Error, "No valid server address configured for this network.");
+            return;
+        }
+        let net = self.networks.get_mut(&id).unwrap();
+        net.user_quit = false;
+        net.conn = ConnState::Connecting;
+        self.net_out.push(NetCommand::Connect(id, Box::new(params)));
+        self.dirty.sidebar = true;
+    }
+
+    pub fn connect_auto(&mut self) {
+        let ids: Vec<NetworkId> = self.networks.values().filter(|n| n.cfg.auto_connect).map(|n| n.id).collect();
+        for id in ids {
+            self.connect(id);
+        }
+    }
+
+    pub fn disconnect(&mut self, id: NetworkId, quit: Option<String>) {
+        let Some(net) = self.networks.get_mut(&id) else { return };
+        net.user_quit = true;
+        let msg = quit.or_else(|| Some(self.config.general.quit_message.clone())).filter(|q| !q.is_empty());
+        self.net_out.push(NetCommand::Disconnect(id, msg));
+    }
+
+    pub fn reconnect_now(&mut self, id: NetworkId) {
+        let Some(net) = self.networks.get(&id) else { return };
+        if net.conn == ConnState::Disconnected && net.user_quit {
+            self.connect(id);
+        } else {
+            self.net_out.push(NetCommand::ReconnectNow(id));
+        }
+    }
+
+    /// OS resumed from sleep or connectivity returned: retry disconnected networks right away.
+    pub fn on_connectivity_restored(&mut self) {
+        let ids: Vec<NetworkId> = self
+            .networks
+            .values()
+            .filter(|n| !n.user_quit && matches!(n.conn, ConnState::Disconnected | ConnState::Connecting))
+            .map(|n| n.id)
+            .collect();
+        for id in ids {
+            self.net_out.push(NetCommand::ReconnectNow(id));
+        }
+    }
+
+    pub fn quit_all(&mut self, message: Option<String>) {
+        let ids: Vec<NetworkId> = self.networks.keys().copied().collect();
+        for id in ids {
+            self.disconnect(id, message.clone());
+        }
+    }
+
+    /// Moves queued session output to the network thread.
+    pub(crate) fn flush(&mut self, id: NetworkId) {
+        let Some(net) = self.networks.get_mut(&id) else { return };
+        for m in net.session.drain_outgoing() {
+            self.net_out.push(NetCommand::Send(id, m));
+        }
+        let events: Vec<SessionEvent> = net.session.drain_events().collect();
+        for ev in events {
+            self.on_session_event(id, ev);
+        }
+        // Handling events may queue more output.
+        if let Some(net) = self.networks.get_mut(&id) {
+            for m in net.session.drain_outgoing() {
+                self.net_out.push(NetCommand::Send(id, m));
+            }
+        }
+    }
+
+    // ----- network events ------------------------------------------------------------------------
+
+    pub fn on_net_event(&mut self, ev: NetEvent, now: i64) {
+        self.now = now;
+        match ev {
+            NetEvent::Connecting { id, server, attempt } => {
+                let Some(net) = self.networks.get_mut(&id) else { return };
+                net.conn = ConnState::Connecting;
+                net.retry_at = None;
+                let sb = net.server_buffer;
+                let text = if attempt > 1 {
+                    format!("Connecting to {server} (attempt {attempt})…")
+                } else {
+                    format!("Connecting to {server}…")
+                };
+                self.status(sb, LineKind::Status, text);
+                self.dirty.sidebar = true;
+            }
+            NetEvent::Connected { id, server, tls } => {
+                let cfg = {
+                    let Some(net) = self.networks.get(&id) else { return };
+                    net.cfg.clone()
+                };
+                let scfg = self.session_config(&cfg, server.tls, server.port);
+                let net = self.networks.get_mut(&id).unwrap();
+                *net.session.config_mut() = scfg;
+                net.conn = ConnState::Connected;
+                net.server = Some(server.clone());
+                net.tls = tls.clone();
+                net.last_error = None;
+                net.session.on_connect(now);
+                let sb = net.server_buffer;
+                let secure = match &tls {
+                    Some(t) => format!(" ({} {})", t.protocol, t.cipher),
+                    None => " (unencrypted)".into(),
+                };
+                self.status(sb, LineKind::Status, format!("Connected to {server}{secure}"));
+                self.flush(id);
+                self.dirty.sidebar = true;
+            }
+            NetEvent::Line { id, msg } => {
+                if let Some(net) = self.networks.get_mut(&id) {
+                    net.session.on_message(msg, now);
+                    self.flush(id);
+                }
+            }
+            NetEvent::Lag { id, ms } => {
+                if let Some(net) = self.networks.get_mut(&id) {
+                    net.lag_ms = Some(ms);
+                    self.dirty.topic = true;
+                }
+            }
+            NetEvent::Disconnected { id, reason, retry_in } => {
+                let Some(net) = self.networks.get_mut(&id) else { return };
+                let was_up = matches!(net.conn, ConnState::Connected | ConnState::Ready);
+                net.session.on_disconnect();
+                net.conn = if retry_in.is_some() { ConnState::Connecting } else { ConnState::Disconnected };
+                net.lag_ms = None;
+                net.retry_at = retry_in.map(|d| now + d.as_millis() as i64);
+                net.last_error = Some(reason.clone());
+                let sb = net.server_buffer;
+                let text = match retry_in {
+                    Some(d) if d.is_zero() => format!("Disconnected: {reason}. Reconnecting…"),
+                    Some(d) => {
+                        format!("Disconnected: {reason}. Reconnecting in {}…", time::duration(d.as_secs().max(1)))
+                    }
+                    None => format!("Disconnected: {reason}"),
+                };
+                if was_up {
+                    let ids: Vec<BufferId> = self
+                        .buffers
+                        .iter()
+                        .filter(|b| b.network == Some(id) && b.kind != BufferKind::Server)
+                        .map(|b| b.id)
+                        .collect();
+                    for bid in ids {
+                        if let Some(b) = self.buffer_mut(bid) {
+                            b.joined = false;
+                            b.typing.clear();
+                        }
+                        self.status(bid, LineKind::Error, text.clone());
+                    }
+                }
+                self.status(sb, LineKind::Error, text);
+                self.dirty = Dirty { sidebar: true, lines: true, nicklist: true, topic: true, input: false };
+            }
+            NetEvent::Stopped { id } => {
+                if let Some(net) = self.networks.get_mut(&id) {
+                    net.conn = ConnState::Disconnected;
+                    net.retry_at = None;
+                    self.dirty.sidebar = true;
+                }
+            }
+        }
+    }
+
+    /// Periodic housekeeping (about once per second).
+    pub fn tick(&mut self, now: i64) {
+        self.now = now;
+        let ids: Vec<NetworkId> = self.networks.keys().copied().collect();
+        for id in ids {
+            if let Some(n) = self.networks.get_mut(&id) {
+                n.session.tick(now);
+            }
+            self.flush(id);
+        }
+        // Expire typing indicators.
+        let active = self.active;
+        for b in &mut self.buffers {
+            let before = b.typing.len();
+            b.typing.retain(|t| t.expires > now);
+            if b.typing.len() != before && b.id == active {
+                self.dirty.topic = true;
+            }
+        }
+    }
+
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+        if focused {
+            let id = self.active;
+            if let Some(b) = self.buffer_mut(id) {
+                b.mark_read();
+            }
+            self.dirty.sidebar = true;
+        }
+    }
+
+    // ----- session events ------------------------------------------------------------------------
+
+    fn on_session_event(&mut self, net_id: NetworkId, ev: SessionEvent) {
+        let time = ev.time;
+        let label_buffer = ev.label.as_ref().and_then(|l| self.networks.get(&net_id)?.label_buffers.get(l).copied());
+        let Some(net) = self.networks.get(&net_id) else { return };
+        let sb = net.server_buffer;
+        match ev.kind {
+            Event::Status(text) => self.status(sb, LineKind::Status, text),
+            Event::ServerText { msg } => self.server_text(net_id, &msg, time, label_buffer),
+            Event::Registered { nick } => {
+                self.status(sb, LineKind::Status, format!("Registered as {nick}"));
+                self.dirty.sidebar = true;
+            }
+            Event::Ready => self.on_ready(net_id),
+            Event::ISupportChanged => {
+                self.dirty.sidebar = true;
+                if let Some(b) = self.buffer(sb) {
+                    // Show the network's own name once it's known.
+                    let net = &self.networks[&net_id];
+                    if net.cfg.name.is_empty() {
+                        let name = net.display_name().to_owned();
+                        if b.name != name {
+                            self.buffer_mut(sb).unwrap().name = name;
+                        }
+                    }
+                }
+            }
+            Event::CapsChanged { enabled } => {
+                if self.networks[&net_id].conn == ConnState::Connected && !enabled.is_empty() {
+                    self.status(sb, LineKind::Status, format!("Capabilities: {}", enabled.join(" ")));
+                }
+            }
+            Event::SaslResult { success, message } => {
+                let kind = if success { LineKind::Status } else { LineKind::Error };
+                let text = if success {
+                    format!("SASL authentication successful: {message}")
+                } else {
+                    format!("SASL authentication failed: {message}")
+                };
+                self.status(sb, kind, text);
+            }
+            Event::ReconnectRequested { tls_port } => {
+                if let Some(port) = tls_port {
+                    // STS: upgrade the stored server list to TLS on the advertised port.
+                    let net = self.networks.get_mut(&net_id).unwrap();
+                    let host = net.server.as_ref().map(|s| s.host.clone()).unwrap_or_default();
+                    for s in &mut net.cfg.servers {
+                        if NetworkConfig::parse_server(s).is_some_and(|(h, _, _)| h == host) {
+                            *s = format!("{host}:+{port}");
+                        }
+                    }
+                    let cfg = net.cfg.clone();
+                    if let Some(c) = self.config.networks.iter_mut().find(|n| n.name == cfg.name) {
+                        c.servers = cfg.servers.clone();
+                        self.effects.push(Effect::SaveConfig);
+                    }
+                    let params = self.connect_params(&cfg);
+                    self.net_out.push(NetCommand::Update(net_id, Box::new(params)));
+                }
+                self.net_out.push(NetCommand::ReconnectNow(net_id));
+            }
+            Event::StsPolicy { .. } => {}
+            Event::Error { message } => self.status(sb, LineKind::Error, format!("Server error: {message}")),
+            Event::NickChangedSelf { new, .. } => {
+                self.status(sb, LineKind::Status, format!("You are now known as {new}"));
+                self.dirty.sidebar = true;
+                self.dirty.input = true;
+            }
+            Event::Chat(chat) => self.on_chat(net_id, chat, time, false),
+            Event::CtcpRequest { from, target, command, params } => {
+                self.on_ctcp_request(net_id, from, target, command, params, time)
+            }
+            Event::CtcpReply { from, command, params } => {
+                let text = if command == "PING" {
+                    match params.parse::<i64>() {
+                        Ok(sent) => {
+                            format!("CTCP PING reply from {}: {:.3}s", from.nick, (self.now - sent) as f64 / 1000.0)
+                        }
+                        Err(_) => format!("CTCP PING reply from {}: {params}", from.nick),
+                    }
+                } else {
+                    format!("CTCP {command} reply from {}: {}", from.nick, fmt::strip(&params))
+                };
+                let target = label_buffer.unwrap_or_else(|| self.contextual_buffer(net_id));
+                let line = self.new_line(time, LineKind::Ctcp, &from.nick, text);
+                self.add_line(target, line, Activity::Events);
+            }
+            Event::Join { channel, user, account, own, .. } => {
+                self.on_join(net_id, &channel, &user, account, own, time, false)
+            }
+            Event::Part { channel, user, reason, own } => {
+                let bid = self.find_buffer(net_id, &channel);
+                let Some(bid) = bid else { return };
+                if own && let Some(b) = self.buffer_mut(bid) {
+                    b.joined = false;
+                }
+                let text = format!(
+                    "{} ({}) has left {channel}{}",
+                    user.nick,
+                    userhost(&user),
+                    reason.filter(|r| !r.is_empty()).map(|r| format!(" ({})", fmt::strip(&r))).unwrap_or_default()
+                );
+                self.membership_line(net_id, bid, LineKind::Part, &user, text, time, own, false);
+                self.dirty.nicklist = true;
+                self.dirty.sidebar |= own;
+            }
+            Event::Kick { channel, by, nick, reason, own } => {
+                let Some(bid) = self.find_buffer(net_id, &channel) else { return };
+                let reason = reason.map(|r| fmt::strip(&r)).unwrap_or_default();
+                let text = if own {
+                    format!("You were kicked from {channel} by {} ({reason})", by.nick)
+                } else {
+                    format!("{nick} was kicked by {} ({reason})", by.nick)
+                };
+                let mut line = self.new_line(time, LineKind::Kick, &nick, text);
+                line.flags.set(LineFlags::HIGHLIGHT, own);
+                self.add_line(bid, line, if own { Activity::Highlight } else { Activity::Events });
+                if own {
+                    if let Some(b) = self.buffer_mut(bid) {
+                        b.joined = false;
+                    }
+                    let rejoin = self.networks[&net_id].cfg.rejoin_on_kick;
+                    if rejoin {
+                        let key = self.networks[&net_id].session.channel(&channel).and_then(|c| c.key.clone());
+                        let mut params = vec![channel.clone()];
+                        params.extend(key);
+                        self.send(net_id, Message::new("JOIN", params));
+                    }
+                    self.notify(bid, format!("Kicked from {channel}"), format!("by {}: {reason}", by.nick));
+                }
+                self.dirty.nicklist = true;
+                self.dirty.sidebar = true;
+            }
+            Event::Quit { user, reason, channels, netsplit } => {
+                let reason = reason.map(|r| fmt::strip(&r)).unwrap_or_default();
+                let split = netsplit || looks_like_netsplit(&reason);
+                let mut targets: Vec<BufferId> = channels.iter().filter_map(|c| self.find_buffer(net_id, c)).collect();
+                if let Some(q) = self.find_buffer(net_id, &user.nick) {
+                    targets.push(q);
+                }
+                for bid in targets {
+                    if split && self.fold_into_netsplit(bid, &user.nick, &reason, time) {
+                        continue;
+                    }
+                    let text = if split {
+                        format!("Netsplit {reason}: {}", user.nick)
+                    } else if reason.is_empty() {
+                        format!("{} ({}) has quit", user.nick, userhost(&user))
+                    } else {
+                        format!("{} ({}) has quit ({reason})", user.nick, userhost(&user))
+                    };
+                    let kind = if split { LineKind::Netsplit } else { LineKind::Quit };
+                    self.membership_line(net_id, bid, kind, &user, text, time, false, false);
+                }
+                self.dirty.nicklist = true;
+            }
+            Event::Nick { old, new, channels, own } => {
+                let mut targets: Vec<BufferId> = channels.iter().filter_map(|c| self.find_buffer(net_id, c)).collect();
+                if let Some(q) = self.find_buffer(net_id, &old) {
+                    // Follow the user: rename the query.
+                    if let Some(b) = self.buffer_mut(q)
+                        && b.kind == BufferKind::Query
+                    {
+                        b.name = new.clone();
+                        self.dirty.sidebar = true;
+                    }
+                    targets.push(q);
+                }
+                let text =
+                    if own { format!("You are now known as {new}") } else { format!("{old} is now known as {new}") };
+                let cm = self.networks[&net_id].session.casemapping();
+                for bid in targets {
+                    let src = Source::nick(old.clone());
+                    self.membership_line(net_id, bid, LineKind::Nick, &src, text.clone(), time, own, false);
+                    if let Some(b) = self.buffer_mut(bid)
+                        && let Some(t) = b.last_spoke.remove(cm.fold(&old).as_ref())
+                    {
+                        b.last_spoke.insert(cm.fold(&new).into_owned(), t);
+                    }
+                }
+                self.dirty.nicklist = true;
+            }
+            Event::Topic { channel, topic, by, changed } => {
+                let Some(bid) = self.find_buffer(net_id, &channel) else { return };
+                let text = match (&by, changed) {
+                    (Some(by), true) if topic.is_empty() => format!("{by} removed the topic"),
+                    (Some(by), true) => format!("{by} changed the topic to: {topic}"),
+                    _ if topic.is_empty() => "No topic is set".to_owned(),
+                    _ => format!("Topic: {topic}"),
+                };
+                let line = self.new_line(time, LineKind::Topic, by.as_deref().unwrap_or(""), text);
+                self.add_line(bid, line, Activity::Events);
+                self.dirty.topic = true;
+            }
+            Event::ChannelMode { channel, by, changes } => {
+                let Some(bid) = self.find_buffer(net_id, &channel) else { return };
+                let mut s = String::new();
+                let mut args = Vec::new();
+                let mut last = None;
+                for c in &changes {
+                    if last != Some(c.add) {
+                        s.push(if c.add { '+' } else { '-' });
+                        last = Some(c.add);
+                    }
+                    s.push(c.mode);
+                    if let Some(a) = &c.arg {
+                        args.push(a.as_str());
+                    }
+                }
+                let modes = if args.is_empty() { s } else { format!("{s} {}", args.join(" ")) };
+                let text = match &by {
+                    Some(by) => format!("{} sets mode {modes}", by.nick),
+                    None => format!("Channel modes: {modes}"),
+                };
+                let nick = by.as_ref().map(|b| b.nick.clone()).unwrap_or_default();
+                let line = self.new_line(time, LineKind::Mode, &nick, text);
+                self.add_line(bid, line, Activity::Events);
+                self.dirty.topic = true;
+                self.dirty.nicklist = true;
+            }
+            Event::UserMode { changes } => {
+                let modes: String =
+                    changes.iter().map(|c| format!("{}{}", if c.add { '+' } else { '-' }, c.mode)).collect();
+                self.status(sb, LineKind::Mode, format!("Your user mode: {modes}"));
+            }
+            Event::MembersChanged { channel } => {
+                if self.buffer(self.active).is_some_and(|b| {
+                    b.network == Some(net_id) && self.networks[&net_id].session.casemapping().eq(&b.name, &channel)
+                }) {
+                    self.dirty.nicklist = true;
+                }
+            }
+            Event::UserUpdated { .. } => {
+                if self.buffer(self.active).is_some_and(|b| b.network == Some(net_id)) {
+                    self.dirty.nicklist = true;
+                }
+            }
+            Event::Invite { by, nick, channel } => {
+                let src = by.clone();
+                if self.is_ignored(net_id, None, &src, IgnoreType::Invite) {
+                    return;
+                }
+                let me = self.networks[&net_id].session.is_me(&nick);
+                let text = if me {
+                    format!("{} invites you to {channel}", by.nick)
+                } else {
+                    format!("{} invited {nick} to {channel}", by.nick)
+                };
+                let target = self.contextual_buffer(net_id);
+                let line = self.new_line(time, LineKind::Invite, &by.nick, text.clone());
+                self.add_line(target, line, if me { Activity::Highlight } else { Activity::Events });
+                if me {
+                    self.notify(target, "Invitation".into(), text);
+                }
+            }
+            Event::Whois(w) => {
+                let target = label_buffer.unwrap_or_else(|| self.contextual_buffer(net_id));
+                let mut lines = vec![format!(
+                    "[{}] {}@{} — {}",
+                    w.nick,
+                    w.user.as_deref().unwrap_or("?"),
+                    w.host.as_deref().unwrap_or("?"),
+                    w.realname.as_deref().map(fmt::strip).unwrap_or_default()
+                )];
+                if let Some(a) = &w.account {
+                    lines.push(format!("[{}] logged in as {a}", w.nick));
+                }
+                if !w.channels.is_empty() {
+                    lines.push(format!("[{}] channels: {}", w.nick, w.channels.join(" ")));
+                }
+                if let Some(s) = &w.server {
+                    lines.push(format!("[{}] server: {s} ({})", w.nick, w.server_info.as_deref().unwrap_or("")));
+                }
+                if let Some(o) = &w.operator {
+                    lines.push(format!("[{}] {o}", w.nick));
+                }
+                if let Some(a) = &w.away {
+                    lines.push(format!("[{}] away: {}", w.nick, fmt::strip(a)));
+                }
+                if w.secure {
+                    lines.push(format!("[{}] is using a secure connection", w.nick));
+                }
+                if w.bot {
+                    lines.push(format!("[{}] is a bot", w.nick));
+                }
+                if let Some(h) = &w.actual_host {
+                    lines.push(format!("[{}] actual host: {h}", w.nick));
+                }
+                if let Some(c) = &w.certfp {
+                    lines.push(format!("[{}] {c}", w.nick));
+                }
+                for e in &w.extra {
+                    lines.push(format!("[{}] {e}", w.nick));
+                }
+                if let Some(idle) = w.idle_secs {
+                    let signon = w.signon.map(|s| time::format("%Y-%m-%d %H:%M", time::local(s))).unwrap_or_default();
+                    lines.push(format!("[{}] idle {}, signed on {signon}", w.nick, time::duration(idle)));
+                }
+                for l in lines {
+                    let line = self.new_line(time, LineKind::Server, &w.nick, l);
+                    self.add_line(target, line, Activity::Events);
+                }
+            }
+            Event::ListEntry { channel, users, topic } => {
+                let net = self.networks.get_mut(&net_id).unwrap();
+                if net.channel_list_complete {
+                    net.channel_list.clear();
+                    net.channel_list_complete = false;
+                }
+                net.channel_list.push((channel, users, fmt::strip(&topic)));
+                if net.channel_list.len().is_multiple_of(500) {
+                    self.effects.push(Effect::ChannelList(net_id));
+                }
+            }
+            Event::ListEnd => {
+                let net = self.networks.get_mut(&net_id).unwrap();
+                net.channel_list_complete = true;
+                let n = net.channel_list.len();
+                self.effects.push(Effect::ChannelList(net_id));
+                self.status_for(net_id, LineKind::Status, format!("Channel list: {n} channels"));
+            }
+            Event::ModeList { channel, mode, entries } => {
+                let target = self.find_buffer(net_id, &channel).unwrap_or_else(|| self.contextual_buffer(net_id));
+                let what = match mode {
+                    'b' => "Ban",
+                    'e' => "Exception",
+                    'I' => "Invite exception",
+                    'q' => "Quiet",
+                    _ => "Mode list",
+                };
+                if entries.is_empty() {
+                    self.status(target, LineKind::Server, format!("{what} list for {channel} is empty"));
+                }
+                for e in entries {
+                    let when = e.set_at.map(|t| time::format(" on %Y-%m-%d %H:%M", time::local(t))).unwrap_or_default();
+                    let by = e.set_by.map(|b| format!(" by {b}")).unwrap_or_default();
+                    self.status(target, LineKind::Server, format!("{what}: {}{by}{when}", e.mask));
+                }
+            }
+            Event::Names { channel, names } => {
+                let target = label_buffer.unwrap_or_else(|| self.contextual_buffer(net_id));
+                self.status(target, LineKind::Server, format!("Users on {channel}: {}", names.join(" ")));
+            }
+            Event::StandardReply { kind, command, code, context, description } => {
+                use schwaetz_client::StandardReplyKind as K;
+                let target = label_buffer
+                    .or_else(|| context.iter().find_map(|c| self.find_buffer(net_id, c)))
+                    .unwrap_or_else(|| self.contextual_buffer(net_id));
+                let (lk, tag) = match kind {
+                    K::Fail => (LineKind::Error, "Failed"),
+                    K::Warn => (LineKind::Error, "Warning"),
+                    K::Note => (LineKind::Server, "Note"),
+                };
+                if command == "CHATHISTORY" {
+                    if let Some(b) = self.buffer_mut(target) {
+                        b.history_loading = false;
+                    }
+                    if code == "INVALID_TARGET" || code == "MESSAGE_ERROR" {
+                        return;
+                    }
+                }
+                self.status(target, lk, format!("{tag} ({command} {code}): {description}"));
+            }
+            Event::MonitorOnline { nicks } => {
+                for n in nicks {
+                    if let Some(q) = self.find_buffer(net_id, &n.nick) {
+                        self.buffer_mut(q).unwrap().joined = true;
+                        self.status(q, LineKind::Status, format!("{} is online", n.nick));
+                    }
+                }
+                self.dirty.sidebar = true;
+            }
+            Event::MonitorOffline { nicks } => {
+                for n in nicks {
+                    if let Some(q) = self.find_buffer(net_id, &n) {
+                        self.buffer_mut(q).unwrap().joined = false;
+                        self.status(q, LineKind::Status, format!("{n} is offline"));
+                    }
+                }
+                self.dirty.sidebar = true;
+            }
+            Event::Away { own, message } => {
+                if own {
+                    let text = match message {
+                        Some(_) => "You have been marked as being away",
+                        None => "You are no longer marked as being away",
+                    };
+                    self.status(sb, LineKind::Status, text);
+                    self.dirty.input = true;
+                }
+            }
+            Event::Redact { target, msgid, by, reason } => {
+                let name = self.chat_buffer_name(net_id, &target, &by.nick);
+                if let Some(bid) = self.find_buffer(net_id, &name)
+                    && let Some(b) = self.buffer_mut(bid)
+                    && let Some(line) = b.find_msgid_mut(&msgid)
+                {
+                    line.flags.set(LineFlags::DELETED, true);
+                    let _ = reason;
+                    b.generation += 1;
+                    self.dirty.lines |= bid == self.active;
+                }
+            }
+            Event::ReadMarker { target, time: marker } => {
+                if let Some(bid) = self.find_buffer(net_id, &target)
+                    && let Some(b) = self.buffer_mut(bid)
+                {
+                    b.read_marker = marker.or(b.read_marker);
+                    if b.lines.back().is_none_or(|l| marker.is_some_and(|m| l.time <= m)) {
+                        b.activity = Activity::None;
+                        b.unread = 0;
+                        b.highlights = 0;
+                    }
+                    b.generation += 1;
+                    self.dirty.sidebar = true;
+                }
+            }
+            Event::ChannelRename { old, new, reason } => {
+                if let Some(bid) = self.find_buffer(net_id, &old) {
+                    self.buffer_mut(bid).unwrap().name = new.clone();
+                    let r = reason.map(|r| format!(" ({r})")).unwrap_or_default();
+                    self.status(bid, LineKind::Status, format!("Channel renamed from {old} to {new}{r}"));
+                    self.dirty.sidebar = true;
+                }
+            }
+            Event::History { target, events } => self.on_history(net_id, &target, events),
+            Event::BouncerNetwork { id, attrs } => {
+                let net = self.networks.get_mut(&net_id).unwrap();
+                match attrs {
+                    Some(a) => {
+                        let entry = net.bouncer_networks.entry(id).or_default();
+                        for (k, v) in a {
+                            entry.retain(|(ek, _)| *ek != k);
+                            entry.push((k, v));
+                        }
+                    }
+                    None => {
+                        net.bouncer_networks.remove(&id);
+                    }
+                }
+                self.effects.push(Effect::BouncerNetworks(net_id));
+            }
+            Event::Twitch(t) => self.on_twitch(net_id, t, time),
+        }
+    }
+
+    fn on_ready(&mut self, net_id: NetworkId) {
+        let net = self.networks.get_mut(&net_id).unwrap();
+        net.conn = ConnState::Ready;
+        let sb = net.server_buffer;
+        let nick = net.session.nick().to_owned();
+        let perform = net.cfg.perform.clone();
+        let last_seen = net.last_seen;
+        let kind = net.cfg.kind;
+        if net.session.has_cap("znc.in/playback") {
+            // Only replay what we haven't seen; on first connect, everything the bouncer buffered.
+            net.session.znc_playback(last_seen);
+        }
+        if net.session.has_cap("soju.im/bouncer-networks") && net.cfg.bouncer_netid.is_none() {
+            net.session.send(Message::new("BOUNCER", ["LISTNETWORKS"]));
+        }
+        let _ = kind;
+        self.dirty.sidebar = true;
+        for cmd in perform {
+            let cmd = cmd.replace("$nick", &nick);
+            self.input_line(sb, &cmd);
+        }
+        self.flush(net_id);
+    }
+
+    fn server_text(&mut self, net_id: NetworkId, msg: &Message, time: i64, label_buffer: Option<BufferId>) {
+        use schwaetz_proto::numeric::*;
+        let sb = self.networks[&net_id].server_buffer;
+        let num = msg.numeric();
+        let (kind, text) = match num {
+            Some(RPL_MOTD | RPL_MOTDSTART | RPL_ENDOFMOTD) => {
+                (LineKind::Motd, msg.last_param().unwrap_or("").to_owned())
+            }
+            Some(n) if (400..600).contains(&n) => {
+                (LineKind::Error, msg.params.iter().skip(1).map(String::as_str).collect::<Vec<_>>().join(" "))
+            }
+            Some(_) => (LineKind::Server, msg.params.iter().skip(1).map(String::as_str).collect::<Vec<_>>().join(" ")),
+            None => (LineKind::Server, format!("{} {}", msg.command, msg.params.join(" "))),
+        };
+        // Route channel-related replies to the channel buffer.
+        let target = label_buffer
+            .or_else(|| match num {
+                Some(
+                    ERR_CANNOTSENDTOCHAN | ERR_CHANOPRIVSNEEDED | ERR_NOTONCHANNEL | ERR_USERNOTINCHANNEL
+                    | ERR_CHANNELISFULL | ERR_INVITEONLYCHAN | ERR_BANNEDFROMCHAN | ERR_BADCHANNELKEY
+                    | ERR_NEEDREGGEDNICK | RPL_INVITING | ERR_USERONCHANNEL | RPL_AWAY | ERR_NOSUCHNICK,
+                ) => msg.param(1).and_then(|c| self.find_buffer(net_id, c)),
+                _ => None,
+            })
+            .or_else(|| match num {
+                Some(ERR_NOSUCHNICK | ERR_NOSUCHCHANNEL | RPL_UNAWAY | RPL_NOWAWAY) | None => None,
+                Some(n) if n >= 400 => Some(self.contextual_buffer(net_id)),
+                _ => None,
+            })
+            .unwrap_or(sb);
+        let line = self.new_line(time, kind, "", text);
+        let activity = if kind == LineKind::Error { Activity::Messages } else { Activity::Events };
+        self.add_line(target, line, activity);
+    }
+
+    fn chat_buffer_name(&self, net_id: NetworkId, target: &str, sender: &str) -> String {
+        let s = &self.networks[&net_id].session;
+        if s.is_channel(target) || s.is_me(sender) { target.to_owned() } else { sender.to_owned() }
+    }
+
+    fn is_ignored(&self, net_id: NetworkId, channel: Option<&str>, src: &Source, kind: IgnoreType) -> bool {
+        let net = &self.networks[&net_id];
+        self.ignores.is_ignored(net.display_name(), channel, src, kind, net.session.casemapping())
+    }
+
+    pub(crate) fn notify(&mut self, buffer: BufferId, title: String, body: String) {
+        let n = &self.config.notifications;
+        let is_active = self.active == buffer;
+        if self.focused && (is_active || !n.when_focused) {
+            return;
+        }
+        if self.buffer(buffer).is_some_and(|b| b.notify == NotifyLevel::Mute) {
+            return;
+        }
+        self.effects.push(Effect::Notify { title, body, buffer });
+        if n.flash_taskbar && !self.focused {
+            self.effects.push(Effect::FlashTaskbar);
+        }
+    }
+
+    fn on_chat(&mut self, net_id: NetworkId, chat: Chat, time: i64, in_history: bool) {
+        let Chat { kind, from, target, text, tags, msgid, own, history } = chat;
+        let history = history || in_history;
+        let net = &self.networks[&net_id];
+        let twitch = net.is_twitch();
+        let session = &net.session;
+        let cm = session.casemapping();
+        let my_nick = session.nick().to_owned();
+        let channel = match &target {
+            Target::Channel { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+        let ig_kind = match kind {
+            ChatKind::Privmsg => IgnoreType::Msg,
+            ChatKind::Notice => IgnoreType::Notice,
+            ChatKind::Action => IgnoreType::Action,
+            ChatKind::Tagmsg => IgnoreType::Tagmsg,
+        };
+        if !own && self.is_ignored(net_id, channel.as_deref(), &from, ig_kind) {
+            return;
+        }
+
+        // Resolve the buffer.
+        let bid = match &target {
+            Target::Channel { name, .. } => self.ensure_buffer(net_id, BufferKind::Channel, name),
+            Target::Query { peer } => {
+                let existing = self.find_buffer(net_id, peer);
+                if kind == ChatKind::Notice && existing.is_none() && !own {
+                    // Private notices (services, bots) go to the current context instead of opening queries.
+                    self.contextual_buffer(net_id)
+                } else {
+                    existing.unwrap_or_else(|| self.ensure_buffer(net_id, BufferKind::Query, peer))
+                }
+            }
+            Target::Server => self.networks[&net_id].server_buffer,
+        };
+
+        if kind == ChatKind::Tagmsg {
+            self.on_tagmsg(bid, &from, &tags, time);
+            return;
+        }
+
+        // ZNC: collect ListNetworks output.
+        if from.nick.eq_ignore_ascii_case("*status")
+            && let Some(rows) = self.networks.get_mut(&net_id).unwrap().znc_collect.as_mut()
+        {
+            if let Some(name) = znc::parse_list_networks_row(&text) {
+                rows.push(name);
+            } else if text.starts_with('+') && !rows.is_empty() {
+                let names = std::mem::take(rows);
+                self.networks.get_mut(&net_id).unwrap().znc_collect = None;
+                self.effects.push(Effect::ZncNetworks { network: net_id, names });
+            }
+        }
+
+        // Deduplicate history/playback against what we already have.
+        let old = history || time < self.now - PLAYBACK_AGE_MS;
+        if let Some(b) = self.buffer_mut(bid) {
+            if let Some(id) = &msgid {
+                if b.seen_msgid(id) {
+                    return;
+                }
+            } else if old && b.has_equivalent(time, &from.nick, &text) {
+                return;
+            }
+        }
+
+        let stripped = fmt::strip(&text);
+        // Private notices (services etc.) often contain our nick; don't treat those as highlights.
+        let private_notice = kind == ChatKind::Notice && !matches!(target, Target::Channel { .. });
+        let highlight = !own && !private_notice && self.highlighter.matches(&stripped, &my_nick, &from, cm);
+        let net = &self.networks[&net_id];
+        let prefix = channel
+            .as_ref()
+            .and_then(|c| net.session.channel(c))
+            .and_then(|c| c.members.get(cm.fold(&from.nick).as_ref()))
+            .and_then(|m| m.highest());
+
+        let line_kind = match kind {
+            ChatKind::Action => LineKind::Action,
+            ChatKind::Notice => LineKind::Notice,
+            _ => LineKind::Message,
+        };
+        let mut line = self.new_line(time, line_kind, &from.nick, text.as_str());
+        line.prefix = prefix;
+        line.flags.set(LineFlags::OWN, own);
+        line.flags.set(LineFlags::HIGHLIGHT, highlight);
+        line.flags.set(LineFlags::HISTORY, history);
+        line.flags.set(LineFlags::BOT, tags.contains("bot") || tags.contains("draft/bot"));
+        let mut extra = LineExtra { msgid: msgid.clone(), ..Default::default() };
+        if let Target::Channel { status: Some(s), .. } = target {
+            extra.status = Some(s);
+            line.flags.set(LineFlags::STATUSMSG, true);
+        }
+        extra.account = tags.value("account").map(str::to_owned);
+        if twitch {
+            twitch::apply_tags(&mut extra, &tags, &stripped, &from.nick);
+            line.flags.set(LineFlags::FIRST_MESSAGE, tags.get("first-msg") == Some("1"));
+            if own && let Some(st) = self.networks[&net_id].twitch_self.clone() {
+                twitch::apply_tags(&mut extra, &st, &stripped, &from.nick);
+                extra.emotes.clear();
+            }
+        } else if let Some(parent) = tags.value("+draft/reply").or(tags.value("+reply")) {
+            let parent_line = self.buffer(bid).and_then(|b| b.lines.iter().rev().find(|l| l.msgid() == Some(parent)));
+            let (pn, pt) = parent_line.map(|l| (l.nick.to_string(), excerpt(&fmt::strip(&l.text)))).unwrap_or_default();
+            extra.reply_to = Some((parent.to_owned(), pn, pt));
+        }
+        if extra != LineExtra::default() {
+            line.extra = Some(Box::new(extra));
+        }
+
+        let is_query = matches!(target, Target::Query { .. });
+        let activity = if highlight || (is_query && !own && kind != ChatKind::Notice) {
+            Activity::Highlight
+        } else if matches!(target, Target::Server) {
+            Activity::Events
+        } else {
+            Activity::Messages
+        };
+        let is_playback = history || time < self.now - PLAYBACK_AGE_MS;
+        let buffer_all = self.buffer(bid).is_some_and(|b| b.notify == NotifyLevel::All);
+        self.add_line(bid, line, activity);
+        if let Some(n) = self.networks.get_mut(&net_id)
+            && !history
+        {
+            n.last_seen = n.last_seen.max(time);
+        }
+        if let Some(b) = self.buffer_mut(bid)
+            && !own
+        {
+            b.last_spoke.insert(cm.fold(&from.nick).into_owned(), time);
+            b.typing.retain(|t| !cm.eq(&t.nick, &from.nick));
+        }
+
+        let notify_cfg = &self.config.notifications;
+        let should_notify = !own
+            && !is_playback
+            && ((highlight && notify_cfg.on_highlight)
+                || (is_query && kind != ChatKind::Notice && notify_cfg.on_private)
+                || buffer_all);
+        if should_notify {
+            let bname = self.buffer(bid).map(|b| b.name.clone()).unwrap_or_default();
+            let title = if is_query { from.nick.clone() } else { format!("{} in {bname}", from.nick) };
+            let body = if kind == ChatKind::Action { format!("* {} {stripped}", from.nick) } else { stripped };
+            self.notify(bid, title, body);
+        }
+    }
+
+    fn on_tagmsg(&mut self, bid: BufferId, from: &Source, tags: &schwaetz_proto::Tags, time: i64) {
+        let now = self.now;
+        if let Some(state) = tags.get("+typing").or(tags.get("+draft/typing")) {
+            let Some(b) = self.buffer_mut(bid) else { return };
+            b.typing.retain(|t| t.nick != from.nick);
+            match state {
+                "active" => {
+                    b.typing.push(Typing { nick: from.nick.clone(), expires: now + TYPING_TIMEOUT_MS, paused: false })
+                }
+                "paused" => b.typing.push(Typing { nick: from.nick.clone(), expires: now + 30_000, paused: true }),
+                _ => {}
+            }
+            if bid == self.active {
+                self.dirty.topic = true;
+            }
+        }
+        if let (Some(reaction), Some(parent)) =
+            (tags.value("+draft/react").or(tags.value("+react")), tags.value("+draft/reply").or(tags.value("+reply")))
+        {
+            let Some(b) = self.buffer_mut(bid) else { return };
+            if let Some(line) = b.find_msgid_mut(parent) {
+                let extra = line.extra_mut();
+                match extra.reactions.iter_mut().find(|(r, _)| r == reaction) {
+                    Some((_, nicks)) if !nicks.contains(&from.nick) => nicks.push(from.nick.clone()),
+                    Some(_) => {}
+                    None => extra.reactions.push((reaction.to_owned(), vec![from.nick.clone()])),
+                }
+                b.generation += 1;
+                if bid == self.active {
+                    self.dirty.lines = true;
+                }
+            }
+        }
+        let _ = time;
+    }
+
+    fn on_ctcp_request(
+        &mut self,
+        net_id: NetworkId,
+        from: Source,
+        target: String,
+        command: String,
+        params: String,
+        time: i64,
+    ) {
+        let channel = self.networks[&net_id].session.is_channel(&target).then_some(target.as_str());
+        if self.is_ignored(net_id, channel, &from, IgnoreType::Ctcp) {
+            return;
+        }
+        let where_ = if channel.is_some() { format!(" (to {target})") } else { String::new() };
+        let text = format!(
+            "CTCP {command}{} from {}{where_}",
+            if params.is_empty() { String::new() } else { format!(" {params}") },
+            from.nick
+        );
+        let sb = self.networks[&net_id].server_buffer;
+        let line = self.new_line(time, LineKind::Ctcp, &from.nick, text);
+        self.add_line(sb, line, Activity::Events);
+        if !self.config.general.ctcp_replies {
+            return;
+        }
+        // Rate limit: at most 4 replies per 10 seconds.
+        let net = self.networks.get_mut(&net_id).unwrap();
+        if self.now - net.ctcp_window.0 > 10_000 {
+            net.ctcp_window = (self.now, 0);
+        }
+        if net.ctcp_window.1 >= 4 {
+            return;
+        }
+        net.ctcp_window.1 += 1;
+        let version = net.session.config().version.clone();
+        let reply = match command.as_str() {
+            "VERSION" => Some(version),
+            "PING" => Some(params.clone()),
+            "TIME" => Some(time::format("%A, %d %B %Y %H:%M:%S", time::local(self.now))),
+            "CLIENTINFO" => Some("ACTION CLIENTINFO PING TIME VERSION".into()),
+            "SOURCE" => Some("https://github.com/bogenpirat/schwaetz".into()),
+            _ => None,
+        };
+        if let Some(r) = reply {
+            self.send(net_id, Message::new("NOTICE", [from.nick.clone(), ctcp::encode(&command, &r)]));
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn on_join(
+        &mut self,
+        net_id: NetworkId,
+        channel: &str,
+        user: &Source,
+        account: Option<String>,
+        own: bool,
+        time: i64,
+        history: bool,
+    ) {
+        if !own && !history && self.is_ignored(net_id, Some(channel), user, IgnoreType::Join) {
+            return;
+        }
+        let bid = if own {
+            self.ensure_buffer(net_id, BufferKind::Channel, channel)
+        } else {
+            match self.find_buffer(net_id, channel) {
+                Some(b) => b,
+                None => return,
+            }
+        };
+        if own && !history {
+            let net = self.networks.get_mut(&net_id).unwrap();
+            let cm = net.session.casemapping();
+            let requested = net.pending_joins.iter().position(|c| cm.eq(c, channel));
+            if let Some(i) = requested {
+                net.pending_joins.remove(i);
+            }
+            let b = self.buffer_mut(bid).unwrap();
+            b.joined = true;
+            b.name = channel.to_owned();
+            if requested.is_some() {
+                self.switch_to(bid);
+            }
+            // Fill the gap since we last saw this channel, or fetch recent history.
+            let last_seen = self.buffer(bid).map_or(0, |b| b.last_seen);
+            let net = self.networks.get_mut(&net_id).unwrap();
+            let asked = if last_seen > 0 {
+                net.session.request_history(channel, Some(last_seen), 500)
+            } else {
+                net.session.request_history(channel, None, 100)
+            };
+            if asked && let Some(b) = self.buffer_mut(bid) {
+                b.history_loading = true;
+            }
+            self.dirty.sidebar = true;
+        }
+        let acct = account.map(|a| format!(" [{a}]")).unwrap_or_default();
+        let text = if own {
+            format!("You have joined {channel}")
+        } else {
+            format!("{} ({}){acct} has joined", user.nick, userhost(user))
+        };
+        self.membership_line(net_id, bid, LineKind::Join, user, text, time, own, history);
+        self.dirty.nicklist = true;
+    }
+
+    /// Adds a join/part/quit/nick line applying the smart filter.
+    #[allow(clippy::too_many_arguments)]
+    fn membership_line(
+        &mut self,
+        net_id: NetworkId,
+        bid: BufferId,
+        kind: LineKind,
+        user: &Source,
+        text: String,
+        time: i64,
+        own: bool,
+        history: bool,
+    ) {
+        let net = &self.networks[&net_id];
+        let cm = net.session.casemapping();
+        let twitch = net.is_twitch();
+        let mode = self.config.general.show_joins_parts.as_str();
+        let window = self.config.general.smart_filter_secs as i64 * 1000;
+        let filtered = !own
+            && match mode {
+                "none" => true,
+                "all" => false,
+                _ => {
+                    twitch
+                        || self
+                            .buffer(bid)
+                            .and_then(|b| b.last_spoke.get(cm.fold(&user.nick).as_ref()))
+                            .is_none_or(|t| time - *t > window)
+                }
+            };
+        let mut line = self.new_line(time, kind, &user.nick, text);
+        line.flags.set(LineFlags::FILTERED, filtered);
+        line.flags.set(LineFlags::OWN, own);
+        line.flags.set(LineFlags::HISTORY, history);
+        self.add_line(bid, line, Activity::Events);
+    }
+
+    /// Appends a nick to a recent netsplit summary line instead of adding a new line.
+    fn fold_into_netsplit(&mut self, bid: BufferId, nick: &str, reason: &str, time: i64) -> bool {
+        let Some(b) = self.buffer_mut(bid) else { return false };
+        let Some(last) = b.lines.back_mut() else { return false };
+        if last.kind != LineKind::Netsplit
+            || time - last.time > 10_000
+            || !last.text.starts_with(&format!("Netsplit {reason}:"))
+        {
+            return false;
+        }
+        let mut t = last.text.to_string();
+        t.push_str(", ");
+        t.push_str(nick);
+        last.text = t.into();
+        b.generation += 1;
+        true
+    }
+
+    fn on_history(&mut self, net_id: NetworkId, target: &str, events: Vec<SessionEvent>) {
+        if let Some(bid) = self.find_buffer(net_id, target)
+            && let Some(b) = self.buffer_mut(bid)
+        {
+            b.history_loading = false;
+            if events.is_empty() {
+                b.history_exhausted = true;
+            }
+        }
+        for ev in events {
+            match ev.kind {
+                Event::Chat(c) => self.on_chat(net_id, c, ev.time, true),
+                Event::Join { channel, user, account, own, .. } if !own => {
+                    self.on_join(net_id, &channel, &user, account, false, ev.time, true)
+                }
+                Event::Part { channel, user, reason, own: false } => {
+                    if let Some(bid) = self.find_buffer(net_id, &channel) {
+                        let r = reason.map(|r| format!(" ({})", fmt::strip(&r))).unwrap_or_default();
+                        let text = format!("{} ({}) has left {channel}{r}", user.nick, userhost(&user));
+                        self.membership_line(net_id, bid, LineKind::Part, &user, text, ev.time, false, true);
+                    }
+                }
+                Event::Quit { user, reason, .. } => {
+                    if let Some(bid) = self.find_buffer(net_id, target) {
+                        let r = reason.map(|r| format!(" ({})", fmt::strip(&r))).unwrap_or_default();
+                        let text = format!("{} ({}) has quit{r}", user.nick, userhost(&user));
+                        self.membership_line(net_id, bid, LineKind::Quit, &user, text, ev.time, false, true);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.dirty.lines = true;
+    }
+
+    fn on_twitch(&mut self, net_id: NetworkId, ev: TwitchEvent, time: i64) {
+        match ev {
+            TwitchEvent::ClearChat { channel, nick, duration_secs } => {
+                let Some(bid) = self.find_buffer(net_id, &channel) else { return };
+                let b = self.buffer_mut(bid).unwrap();
+                match &nick {
+                    Some(n) => {
+                        for l in b.lines.iter_mut().filter(|l| l.nick.eq_ignore_ascii_case(n) && l.kind.is_message()) {
+                            l.flags.set(LineFlags::DELETED, true);
+                        }
+                    }
+                    None => {
+                        for l in b.lines.iter_mut().filter(|l| l.kind.is_message()) {
+                            l.flags.set(LineFlags::DELETED, true);
+                        }
+                    }
+                }
+                b.generation += 1;
+                let text = match (nick, duration_secs) {
+                    (Some(n), Some(d)) => format!("{n} has been timed out for {}", time::duration(d)),
+                    (Some(n), None) => format!("{n} has been banned"),
+                    (None, _) => "Chat was cleared by a moderator".into(),
+                };
+                let line = self.new_line(time, LineKind::System, "", text);
+                self.add_line(bid, line, Activity::Events);
+            }
+            TwitchEvent::ClearMsg { channel, target_msgid, .. } => {
+                if let Some(bid) = self.find_buffer(net_id, &channel)
+                    && let Some(b) = self.buffer_mut(bid)
+                    && let Some(l) = b.find_msgid_mut(&target_msgid)
+                {
+                    l.flags.set(LineFlags::DELETED, true);
+                    b.generation += 1;
+                    self.dirty.lines |= bid == self.active;
+                }
+            }
+            TwitchEvent::UserNotice { channel, system_msg, text, tags, .. } => {
+                let Some(bid) = self.find_buffer(net_id, &channel) else { return };
+                let who = tags.value("display-name").or(tags.value("login")).unwrap_or("").to_owned();
+                let mut body = system_msg.unwrap_or_default();
+                if let Some(t) = text.filter(|t| !t.is_empty()) {
+                    if !body.is_empty() {
+                        body.push_str(" — ");
+                    }
+                    body.push_str(&t);
+                }
+                let mut line = self.new_line(time, LineKind::System, &who, body);
+                let mut extra = LineExtra { msgid: tags.value("id").map(str::to_owned), ..Default::default() };
+                extra.color = tags.value("color").and_then(twitch::parse_color);
+                line.extra = Some(Box::new(extra));
+                self.add_line(bid, line, Activity::Messages);
+            }
+            TwitchEvent::RoomState { channel, tags } => {
+                if let Some(bid) = self.find_buffer(net_id, &channel)
+                    && let Some(b) = self.buffer_mut(bid)
+                {
+                    for (k, v) in tags.iter() {
+                        if matches!(k, "emote-only" | "followers-only" | "r9k" | "slow" | "subs-only") {
+                            b.room_state.retain(|(ek, _)| ek != k);
+                            b.room_state.push((k.to_owned(), v.to_owned()));
+                        }
+                    }
+                    self.dirty.topic = true;
+                }
+            }
+            TwitchEvent::UserState { tags, .. } => {
+                if let Some(n) = self.networks.get_mut(&net_id) {
+                    n.twitch_self = Some(tags);
+                }
+            }
+        }
+    }
+
+    /// Sends a raw message on a network (no-op when disconnected).
+    pub(crate) fn send(&mut self, net_id: NetworkId, msg: Message) {
+        if let Some(n) = self.networks.get_mut(&net_id) {
+            n.session.send(msg);
+            self.flush(net_id);
+        }
+    }
+
+    /// Inserts lines loaded from the history database (scroll-back).
+    pub fn insert_history(&mut self, buffer: BufferId, lines: Vec<Line>) {
+        let active = self.active == buffer;
+        let next = &mut self.next_line;
+        let Some(b) = self.buffers.iter_mut().find(|b| b.id == buffer) else { return };
+        b.history_loading = false;
+        if lines.is_empty() {
+            b.history_exhausted = true;
+        }
+        let room = b.max_lines.saturating_sub(b.lines.len());
+        for mut l in lines.into_iter().rev().take(room.max(200)) {
+            if let Some(id) = l.msgid().map(str::to_owned)
+                && b.seen_msgid(&id)
+            {
+                continue;
+            }
+            *next += 1;
+            l.id = *next;
+            l.flags.set(LineFlags::HISTORY, true);
+            let pos = b.lines.partition_point(|x| x.time <= l.time);
+            b.lines.insert(pos, l);
+        }
+        b.generation += 1;
+        self.dirty.lines |= active;
+    }
+
+    /// Scroll-back reached the top of a buffer: ask the server (CHATHISTORY) or the local database.
+    pub fn request_older(&mut self, buffer: BufferId) {
+        let Some(b) = self.buffer(buffer) else { return };
+        if b.history_loading || b.history_exhausted {
+            return;
+        }
+        let before = b.lines.front().map_or(self.now, |l| l.time);
+        let (net, name, kind) = (b.network, b.name.clone(), b.kind);
+        let Some(net) = net else { return };
+        let mut asked = false;
+        if matches!(kind, BufferKind::Channel | BufferKind::Query)
+            && let Some(n) = self.networks.get_mut(&net)
+            && n.conn == ConnState::Ready
+        {
+            asked = n.session.request_history_before(&name, before, 100);
+            self.flush(net);
+        }
+        if !asked {
+            let network = self.networks.get(&net).map(|n| n.display_name().to_owned()).unwrap_or_default();
+            self.effects.push(Effect::LoadHistory { buffer, network, name, before });
+        }
+        if let Some(b) = self.buffer_mut(buffer) {
+            b.history_loading = true;
+        }
+    }
+
+    /// Re-reads highlight/ignore settings after the config changed.
+    pub fn apply_config(&mut self) {
+        let (h, errors) = Highlighter::new(&self.config.highlight);
+        self.highlighter = h;
+        self.ignores = Ignores::new(&self.config.ignores);
+        for e in errors {
+            self.status(self.status_buffer, LineKind::Error, e);
+        }
+        for b in &mut self.buffers {
+            b.max_lines = self.config.general.scrollback_lines.max(100);
+        }
+        self.dirty = Dirty { sidebar: true, lines: true, nicklist: true, topic: true, input: true };
+        self.effects.push(Effect::ConfigChanged);
+    }
+
+    /// Topic-bar text for the active buffer: (title, subtitle).
+    pub fn topic_for(&self, id: BufferId) -> (String, String) {
+        let Some(b) = self.buffer(id) else { return Default::default() };
+        let Some(net) = b.network.and_then(|n| self.networks.get(&n)) else {
+            return (b.name.clone(), format!("schwätz {}", env!("CARGO_PKG_VERSION")));
+        };
+        match b.kind {
+            BufferKind::Channel => {
+                let ch = net.session.channel(&b.name);
+                let mut sub = ch.and_then(|c| c.topic.clone()).unwrap_or_default();
+                let chips = twitch::room_state_summary(&b.room_state);
+                if !chips.is_empty() {
+                    sub = format!("[{}] {sub}", chips.join(", "));
+                }
+                (b.name.clone(), sub)
+            }
+            BufferKind::Query => {
+                let u = net.session.user(&b.name);
+                let sub = u
+                    .map(|u| {
+                        let mut parts = Vec::new();
+                        if let (Some(user), Some(host)) = (&u.user, &u.host) {
+                            parts.push(format!("{user}@{host}"));
+                        }
+                        if let Some(r) = &u.realname {
+                            parts.push(fmt::strip(r));
+                        }
+                        if let Some(a) = &u.away {
+                            parts.push(if a.is_empty() { "away".into() } else { format!("away: {}", fmt::strip(a)) });
+                        }
+                        parts.join(" · ")
+                    })
+                    .unwrap_or_default();
+                (b.name.clone(), sub)
+            }
+            _ => {
+                let state = match net.conn {
+                    ConnState::Disconnected => net
+                        .last_error
+                        .clone()
+                        .map(|e| format!("disconnected — {e}"))
+                        .unwrap_or_else(|| "disconnected".into()),
+                    ConnState::Connecting => match net.retry_at {
+                        Some(t) if t > self.now => {
+                            format!("reconnecting in {}", time::duration(((t - self.now) / 1000).max(1) as u64))
+                        }
+                        _ => "connecting…".into(),
+                    },
+                    ConnState::Connected => "registering…".into(),
+                    ConnState::Ready => {
+                        let server = net.server.as_ref().map(|s| s.to_string()).unwrap_or_default();
+                        let lag = net.lag_ms.map(|l| format!(" · lag {l} ms")).unwrap_or_default();
+                        format!("{} on {server}{lag}", net.session.nick())
+                    }
+                };
+                (net.display_name().to_owned(), state)
+            }
+        }
+    }
+}
+
+fn userhost(s: &Source) -> String {
+    match (&s.user, &s.host) {
+        (Some(u), Some(h)) => format!("{u}@{h}"),
+        (None, Some(h)) => h.clone(),
+        _ => "?".into(),
+    }
+}
+
+fn looks_like_netsplit(reason: &str) -> bool {
+    let mut parts = reason.split(' ');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(a), Some(b), None) => {
+            let host = |h: &str| h.contains('.') && !h.contains(['/', ':', '(', ')']) && h.len() > 3;
+            host(a) && host(b)
+        }
+        _ => false,
+    }
+}
+
+fn excerpt(s: &str) -> String {
+    if s.chars().count() > 80 { s.chars().take(77).chain("…".chars()).collect() } else { s.to_owned() }
+}

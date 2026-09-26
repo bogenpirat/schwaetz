@@ -1,0 +1,19 @@
+[package]
+name = "schwaetz-core"
+description = "Application model: networks, buffers, commands, configuration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+schwaetz-proto.workspace = true
+schwaetz-client.workspace = true
+schwaetz-net.workspace = true
+serde.workspace = true
+toml.workspace = true
+regex-lite.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Time"] }
