@@ -176,7 +176,8 @@ impl App {
         }
         b.network.and_then(|n| self.networks.get(&n)).is_some_and(|n| {
             n.conn == ConnState::Ready
-                && (n.is_twitch()
+                // Anonymous Twitch logins (justinfanNNN) can read but not send.
+                && ((n.is_twitch() && !n.session.nick().starts_with("justinfan"))
                     || (n.session.has_cap("message-tags") && !n.session.isupport().tag_denied("+draft/reply")))
         })
     }

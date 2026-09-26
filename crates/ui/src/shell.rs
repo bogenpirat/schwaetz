@@ -27,7 +27,7 @@ use windows::Win32::UI::Input::Ime::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::core::{HSTRING, Interface, PCWSTR, w};
 
 pub const WM_APP_NET: u32 = WM_APP + 1;
 pub const WM_APP_MEDIA: u32 = WM_APP + 3;
@@ -102,6 +102,8 @@ pub struct Ui {
     reply: Option<ReplyTarget>,
     reply_rect: Rect,
     mouse_tracking: bool,
+    /// Hovered inline emote: (code, image url, bounds).
+    tooltip: Option<(String, String, Rect)>,
 }
 
 thread_local! {
@@ -234,6 +236,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         reply: None,
         reply_rect: Rect::default(),
         mouse_tracking: false,
+        tooltip: None,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -613,6 +616,11 @@ impl Ui {
         // Sidebar edge.
         p.line(self.sidebar_w - 0.5, 0.0, self.sidebar_w - 0.5, self.win_rect.h, th.border, 1.0);
 
+        if let Some((code, url, anchor)) =
+            self.tooltip.as_ref().filter(|_| self.overlay.is_none() && self.form.is_none())
+        {
+            self.draw_emote_tip(&p, &th, code, url, *anchor);
+        }
         if let Some(o) = self.overlay.as_mut() {
             o.render(&p, &self.text, &th, &self.app, self.win_rect, self.caret_on);
         }
@@ -621,6 +629,34 @@ impl Ui {
         }
         let _ = draw_field;
         let _ = with_alpha;
+    }
+
+    /// Tooltip above a hovered emote: an enlarged image and its code.
+    fn draw_emote_tip(&self, p: &Painter, th: &Theme, code: &str, url: &str, anchor: Rect) {
+        let f = &self.text.fonts;
+        let l = self.text.layout(code, &f.ui_semibold, 400.0, 20.0);
+        let tw = text::metrics(&l).width;
+        let img = self.images.borrow().bitmap(url);
+        let (iw, ih) = match &img {
+            Some(b) => {
+                let s = unsafe { b.GetSize() };
+                let h = 56.0f32;
+                ((h * s.width / s.height.max(1.0)).min(168.0), h)
+            }
+            None => (0.0, 0.0),
+        };
+        let w = tw.max(iw) + 20.0;
+        let h = ih + if ih > 0.0 { 8.0 } else { 0.0 } + 18.0 + 14.0;
+        let x = (anchor.x + anchor.w / 2.0 - w / 2.0).clamp(4.0, (self.win_rect.w - w - 4.0).max(4.0));
+        // Above the emote unless that leaves the chat area.
+        let y = if anchor.y - h - 6.0 >= self.chat.rect.y { anchor.y - h - 6.0 } else { anchor.bottom() + 6.0 };
+        let r = Rect::new(x, y, w, h);
+        p.fill_round(r, 8.0, th.panel_bg);
+        p.stroke_round(r, 8.0, th.border, 1.0);
+        if let Some(b) = img {
+            p.bitmap(&b.cast().unwrap(), Rect::new(x + (w - iw) / 2.0, y + 7.0, iw, ih), 1.0);
+        }
+        p.text(&l, x + (w - tw) / 2.0, y + h - 25.0, th.text);
     }
 
     fn set_ime_pos(&self, x: f32, y: f32) {
@@ -1416,6 +1452,7 @@ impl Ui {
         unsafe {
             SetCapture(self.hwnd);
         }
+        self.tooltip = None;
         if let Some(f) = self.form.as_mut() {
             let action = f.click(self.win_rect, x, y);
             self.form_action(action);
@@ -1566,6 +1603,11 @@ impl Ui {
                     self.chat.hover = ch;
                     self.invalidate();
                 }
+                let tip = if self.chat.rect.contains(x, y) { self.chat.emote_at(x, y) } else { None };
+                if tip.as_ref().map(|t| t.2) != self.tooltip.as_ref().map(|t| t.2) {
+                    self.tooltip = tip;
+                    self.invalidate();
+                }
             }
         }
     }
@@ -1626,6 +1668,9 @@ impl Ui {
         }
         let lh = self.text.fonts.line_height + 3.0;
         let dy = delta as f32 / 120.0 * lines.clamp(1, 20) as f32 * lh;
+        // Line positions change; hover state comes back with the next mouse move.
+        self.tooltip = None;
+        self.chat.hover = None;
         if let Some(f) = self.form.as_mut() {
             f.scroll_by(dy);
             self.invalidate();
@@ -2129,8 +2174,12 @@ impl Ui {
             win::WM_MOUSELEAVE => {
                 self.mouse_tracking = false;
                 if self.drag == Drag::None
-                    && (self.chat.hover.is_some() || self.sidebar.hover.is_some() || self.nicklist.hover.is_some())
+                    && (self.chat.hover.is_some()
+                        || self.sidebar.hover.is_some()
+                        || self.nicklist.hover.is_some()
+                        || self.tooltip.is_some())
                 {
+                    self.tooltip = None;
                     self.chat.hover = None;
                     self.sidebar.hover = None;
                     self.nicklist.hover = None;

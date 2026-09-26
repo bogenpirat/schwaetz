@@ -38,6 +38,8 @@ struct Cached {
     reactions: Option<IDWriteTextLayout>,
     links: Vec<Link>,
     bgs: Vec<BgRun>,
+    /// Placed inline emotes: (utf16 start, utf16 len, code, image url).
+    emotes: Vec<(u32, u32, String, String)>,
     /// Plain text actually laid out in `msg` (for copying).
     plain: String,
     map: U16Map,
@@ -338,6 +340,7 @@ impl ChatView {
             }
         }
 
+        let mut placed = Vec::new();
         // Inline emotes (Twitch tags or script decorations): byte ranges of the stripped body.
         if !deleted && let Some(emotes) = line.extra.as_ref().map(|e| &e.emotes).filter(|e| !e.is_empty()) {
             let h = (f.line_height * 1.35).round();
@@ -355,6 +358,12 @@ impl ChatView {
                 unsafe {
                     let _ = msg.SetInlineObject(&obj, text::range(a, b - a));
                 }
+                let code = if e.name.is_empty() {
+                    body.get(e.start as usize..e.end as usize).unwrap_or_default().to_owned()
+                } else {
+                    e.name.clone()
+                };
+                placed.push((a, b - a, code, e.url.clone()));
             }
         }
 
@@ -456,6 +465,7 @@ impl ChatView {
             reactions,
             links,
             bgs,
+            emotes: placed,
             plain,
             map,
             height,
@@ -969,6 +979,19 @@ impl ChatView {
             return Hit::Text(Pos { line: d.id, u16: len });
         }
         Hit::Nothing
+    }
+
+    /// The inline emote under a point: its code, image url and bounds.
+    pub fn emote_at(&self, x: f32, y: f32) -> Option<(String, String, Rect)> {
+        let d = self.drawn.iter().find(|d| y >= d.y && y < d.y + d.h)?;
+        let e = self.cache.get(&d.id).filter(|e| !e.emotes.is_empty())?;
+        let (pos, inside) = text::hit_point(&e.msg, x - d.msg_x, y - d.msg_y);
+        if !inside {
+            return None;
+        }
+        let (start, len, code, url) = e.emotes.iter().find(|(s, l, ..)| pos >= *s && pos < s + l)?;
+        let (rx, ry, rw, rh) = text::range_rects(&e.msg, *start, *len).into_iter().next()?;
+        Some((code.clone(), url.clone(), Rect::new(d.msg_x + rx, d.msg_y + ry, rw, rh)))
     }
 
     pub fn nick_of(&self, id: u64) -> Option<String> {
