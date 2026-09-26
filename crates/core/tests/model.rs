@@ -403,3 +403,36 @@ fn replies_use_the_right_tag_and_show_context() {
     h.app.reply(c, "m1", "sure");
     assert_eq!(h.sent(), ["@+draft/reply=m1 PRIVMSG #c sure"]);
 }
+
+#[test]
+fn twitch_hides_hostmasks_and_has_no_queries() {
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.app.config.general.show_joins_parts = "all".into();
+    h.connect();
+    h.lines(&[
+        ":tmi.twitch.tv CAP * ACK :twitch.tv/tags twitch.tv/commands twitch.tv/membership",
+        ":tmi.twitch.tv 001 me :hi",
+        ":tmi.twitch.tv 376 me :>",
+        ":me!me@me.tmi.twitch.tv JOIN #chan",
+        ":bob!bob@bob.tmi.twitch.tv JOIN #chan",
+        ":bob!bob@bob.tmi.twitch.tv PART #chan",
+    ]);
+    let c = h.buffer("#chan");
+    let texts: Vec<String> = h.app.buffer(c).unwrap().lines.iter().map(|l| l.text.to_string()).collect();
+    assert!(texts.iter().any(|t| t == "bob has joined"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "bob has left #chan"), "{texts:?}");
+    assert_eq!(h.app.twitch_profile_url(c, "Bob").as_deref(), Some("https://www.twitch.tv/bob"));
+
+    let before = h.app.buffers().len();
+    h.app.input(c, "/query bob");
+    assert_eq!(h.app.buffers().len(), before, "no query buffer on Twitch");
+
+    // Regular IRC keeps the mask.
+    let mut h = Harness::new(NetworkKind::Irc, &[]);
+    h.app.config.general.show_joins_parts = "all".into();
+    h.connect();
+    h.lines(&[":srv 001 me :hi", ":srv 376 me :end", ":me!u@h JOIN #c", ":bob!b@example.org JOIN #c"]);
+    let c = h.buffer("#c");
+    assert!(h.app.buffer(c).unwrap().lines.iter().any(|l| &*l.text == "bob (b@example.org) has joined"));
+    assert_eq!(h.app.twitch_profile_url(c, "bob"), None);
+}

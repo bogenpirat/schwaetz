@@ -407,6 +407,10 @@ impl App {
             }
             "query" | "q" => {
                 let Some(net) = self.require_net(buffer) else { return };
+                if self.networks.get(&net).is_some_and(|n| n.is_twitch()) {
+                    let msg = "Twitch has no private messages over chat. Double-click a name to open the profile.";
+                    return self.status(buffer, LineKind::Error, msg);
+                }
                 if arg1.is_empty() {
                     return self.usage(buffer, "query");
                 }

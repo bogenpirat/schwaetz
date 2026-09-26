@@ -969,9 +969,8 @@ impl App {
                     self.remember_channel(net_id, &channel, false);
                 }
                 let text = format!(
-                    "{} ({}) has left {channel}{}",
-                    user.nick,
-                    userhost(&user),
+                    "{} has left {channel}{}",
+                    self.who(net_id, &user),
                     reason.filter(|r| !r.is_empty()).map(|r| format!(" ({})", fmt::strip(&r))).unwrap_or_default()
                 );
                 self.membership_line(net_id, bid, LineKind::Part, &user, text, time, own, false);
@@ -1019,9 +1018,9 @@ impl App {
                     let text = if split {
                         format!("Netsplit {reason}: {}", user.nick)
                     } else if reason.is_empty() {
-                        format!("{} ({}) has quit", user.nick, userhost(&user))
+                        format!("{} has quit", self.who(net_id, &user))
                     } else {
-                        format!("{} ({}) has quit ({reason})", user.nick, userhost(&user))
+                        format!("{} has quit ({reason})", self.who(net_id, &user))
                     };
                     let kind = if split { LineKind::Netsplit } else { LineKind::Quit };
                     self.membership_line(net_id, bid, kind, &user, text, time, false, false);
@@ -1706,7 +1705,7 @@ impl App {
         let text = if own {
             format!("You have joined {channel}")
         } else {
-            format!("{} ({}){acct} has joined", user.nick, userhost(user))
+            format!("{}{acct} has joined", self.who(net_id, user))
         };
         self.membership_line(net_id, bid, LineKind::Join, user, text, time, own, history);
         self.dirty.nicklist = true;
@@ -1789,14 +1788,14 @@ impl App {
                 Event::Part { channel, user, reason, own: false } => {
                     if let Some(bid) = self.find_buffer(net_id, &channel) {
                         let r = reason.map(|r| format!(" ({})", fmt::strip(&r))).unwrap_or_default();
-                        let text = format!("{} ({}) has left {channel}{r}", user.nick, userhost(&user));
+                        let text = format!("{} has left {channel}{r}", self.who(net_id, &user));
                         self.membership_line(net_id, bid, LineKind::Part, &user, text, ev.time, false, true);
                     }
                 }
                 Event::Quit { user, reason, .. } => {
                     if let Some(bid) = self.find_buffer(net_id, target) {
                         let r = reason.map(|r| format!(" ({})", fmt::strip(&r))).unwrap_or_default();
-                        let text = format!("{} ({}) has quit{r}", user.nick, userhost(&user));
+                        let text = format!("{} has quit{r}", self.who(net_id, &user));
                         self.membership_line(net_id, bid, LineKind::Quit, &user, text, ev.time, false, true);
                     }
                 }
@@ -2021,6 +2020,26 @@ impl App {
                 (net.display_name().to_owned(), state)
             }
         }
+    }
+}
+
+impl App {
+    /// "nick (user@host)" for membership lines; just the nick on Twitch, where the mask only
+    /// repeats it.
+    fn who(&self, net: NetworkId, user: &Source) -> String {
+        if self.networks.get(&net).is_some_and(|n| n.is_twitch()) {
+            user.nick.to_string()
+        } else {
+            format!("{} ({})", user.nick, userhost(user))
+        }
+    }
+
+    /// The Twitch channel page of a user (the login name), when `buffer` is on Twitch.
+    pub fn twitch_profile_url(&self, buffer: BufferId, login: &str) -> Option<String> {
+        let net = self.buffer(buffer)?.network?;
+        self.networks.get(&net).filter(|n| n.is_twitch())?;
+        let login = login.trim_start_matches('#').to_ascii_lowercase();
+        (!login.is_empty()).then(|| format!("https://www.twitch.tv/{login}"))
     }
 }
 

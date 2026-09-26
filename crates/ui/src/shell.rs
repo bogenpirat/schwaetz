@@ -1481,9 +1481,14 @@ impl Ui {
                 && let Some(i) = self.nicklist.hit(x, y)
                 && let Some(n) = self.nicklist.nick(i).map(str::to_owned)
             {
+                // Twitch has no private messages: open the user's channel page instead.
                 let id = self.app.active;
-                self.app.input(id, &format!("/query {n}"));
-                self.after_update();
+                if let Some(url) = self.app.twitch_profile_url(id, &n) {
+                    win::open_url(&url);
+                } else {
+                    self.app.input(id, &format!("/query {n}"));
+                    self.after_update();
+                }
             }
             return;
         }
@@ -1761,6 +1766,8 @@ impl Ui {
         let notify = b.notify;
         let net = b.network;
         let conn = net.and_then(|n| self.app.network(n)).map(|n| n.conn);
+        let twitch = net.and_then(|n| self.app.network(n)).is_some_and(|n| n.is_twitch());
+        let stream = format!("https://www.twitch.tv/{}", b.name.trim_start_matches('#').to_ascii_lowercase());
         let mut items = Vec::new();
         match kind {
             BufferKind::Server => {
@@ -1770,7 +1777,9 @@ impl Ui {
                     items.push(MenuItem::Item(11, "Disconnect"));
                     items.push(MenuItem::Item(12, "Reconnect now"));
                 }
-                items.push(MenuItem::Item(13, "Channel list…"));
+                if !twitch {
+                    items.push(MenuItem::Item(13, "Channel list…"));
+                }
                 items.push(MenuItem::Separator);
                 items.push(MenuItem::Item(15, "Edit network…"));
                 items.push(MenuItem::Item(14, "Remove network"));
@@ -1778,10 +1787,15 @@ impl Ui {
             BufferKind::Channel => {
                 let joined = b.joined;
                 items.push(if joined { MenuItem::Item(20, "Leave channel") } else { MenuItem::Item(21, "Rejoin") });
+                if twitch {
+                    items.push(MenuItem::Item(23, "Open stream"));
+                }
                 items.push(MenuItem::Item(22, "Close"));
             }
             BufferKind::Query => {
-                items.push(MenuItem::Item(30, "Whois"));
+                if !twitch {
+                    items.push(MenuItem::Item(30, "Whois"));
+                }
                 items.push(MenuItem::Item(22, "Close"));
             }
             BufferKind::Special => {
@@ -1829,6 +1843,7 @@ impl Ui {
         }
         match choice {
             15 => self.app.input(id, "/network edit"),
+            23 => win::open_url(&stream),
             16 => self.app.input(id, "/network add"),
             17 => self.app.input(id, "/settings"),
             _ => {}
@@ -1846,6 +1861,9 @@ impl Ui {
 
     fn nick_menu(&mut self, nick: &str) {
         let id = self.app.active;
+        if self.app.twitch_profile_url(id, nick).is_some() {
+            return self.twitch_nick_menu(nick);
+        }
         let is_chan = self.app.active_buffer().kind == BufferKind::Channel;
         let mut items = vec![
             MenuItem::Item(1, "Open query"),
@@ -1904,6 +1922,64 @@ impl Ui {
             self.after_update();
         }
         self.invalidate();
+    }
+
+    /// Nick menu for Twitch chat: no queries, WHOIS, CTCP or channel modes there (and moderation
+    /// commands no longer work over IRC), so it offers the web pages instead.
+    fn twitch_nick_menu(&mut self, nick: &str) {
+        let id = self.app.active;
+        let b = self.app.active_buffer();
+        let channel = (b.kind == BufferKind::Channel).then(|| b.name.trim_start_matches('#').to_owned());
+        let latest = self
+            .app
+            .can_reply(id)
+            .then(|| b.lines.iter().rev().find(|l| l.nick.eq_ignore_ascii_case(nick) && l.msgid().is_some()))
+            .flatten()
+            .map(|l| l.id);
+        let mut items = vec![MenuItem::Item(1, "Open profile")];
+        if channel.is_some() {
+            items.push(MenuItem::Item(2, "Open viewer card"));
+        }
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Item(3, "Mention"));
+        if latest.is_some() {
+            items.push(MenuItem::Item(4, "Reply to latest message"));
+        }
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Item(30, "Ignore"));
+        items.push(MenuItem::Item(31, "Copy name"));
+        match win::popup_menu(self.hwnd, &items) {
+            1 => self.open_twitch_profile(nick),
+            2 => {
+                if let Some(c) = channel {
+                    win::open_url(&format!(
+                        "https://www.twitch.tv/popout/{c}/viewercard/{}",
+                        nick.to_ascii_lowercase()
+                    ));
+                }
+            }
+            3 => {
+                self.input.insert(&format!("@{nick} "));
+            }
+            4 => {
+                if let Some(l) = latest {
+                    self.start_reply(l);
+                }
+            }
+            30 => {
+                self.app.input(id, &format!("/ignore {nick}"));
+                self.after_update();
+            }
+            31 => win::set_clipboard(self.hwnd, nick),
+            _ => {}
+        }
+        self.invalidate();
+    }
+
+    fn open_twitch_profile(&self, nick: &str) {
+        if let Some(url) = self.app.twitch_profile_url(self.app.active, nick) {
+            win::open_url(&url);
+        }
     }
 
     fn tray_message(&mut self, lp: LPARAM) {
