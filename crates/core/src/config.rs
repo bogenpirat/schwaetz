@@ -45,6 +45,8 @@ pub struct General {
     pub confirm_paste_lines: usize,
     pub minimize_to_tray: bool,
     pub close_to_tray: bool,
+    /// Add channels you join to the network's autojoin list (and remove them when you leave).
+    pub remember_channels: bool,
 }
 
 impl Default for General {
@@ -68,6 +70,7 @@ impl Default for General {
             confirm_paste_lines: 4,
             minimize_to_tray: false,
             close_to_tray: false,
+            remember_channels: true,
         }
     }
 }

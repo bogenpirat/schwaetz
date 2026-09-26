@@ -89,6 +89,8 @@ pub struct Ui {
     images: std::rc::Rc<std::cell::RefCell<crate::images::ImageStore>>,
     preview_pending: std::collections::HashSet<String>,
     active_window: bool,
+    /// Buffer to reselect once it exists again after startup (network, buffer).
+    restore_active: Option<(String, String)>,
 }
 
 thread_local! {
@@ -211,7 +213,14 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         images: Default::default(),
         preview_pending: Default::default(),
         active_window: true,
+        restore_active: None,
     });
+    let session = crate::session::Session::load(&ui.paths.session_file());
+    if let Some(w) = session.sidebar_width {
+        ui.sidebar_w = w;
+    }
+    ui.restore_active = session.active.clone();
+    let placed = session.apply_window(hwnd);
     ui.apply_appearance();
     ui.tray.add();
     ui.welcome();
@@ -221,7 +230,9 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
     unsafe {
         SetTimer(Some(hwnd), TIMER_TICK, 1000, None);
         SetTimer(Some(hwnd), TIMER_CARET, GetCaretBlinkTime().max(300), None);
-        let _ = ShowWindow(hwnd, SW_SHOWDEFAULT);
+        if !placed {
+            let _ = ShowWindow(hwnd, SW_SHOWDEFAULT);
+        }
     }
 
     let mut msg = MSG::default();
@@ -575,6 +586,9 @@ impl Ui {
 
     /// Forwards network commands, runs effects and schedules a repaint.
     fn after_update(&mut self) {
+        if self.restore_active.is_some() {
+            self.check_restore_active();
+        }
         for _ in 0..4 {
             if let Some(host) = self.services.scripts.as_mut() {
                 let lines = self.app.take_new_lines();
@@ -699,11 +713,40 @@ impl Ui {
         }
     }
 
+    fn save_session(&self) {
+        let mut s = crate::session::Session { sidebar_width: Some(self.sidebar_w), ..Default::default() };
+        s.capture_window(self.hwnd);
+        let b = self.app.active_buffer();
+        if let Some(net) = b.network.and_then(|n| self.app.network(n)) {
+            s.active = Some((net.display_name().to_owned(), b.name.clone()));
+        }
+        s.save(&self.paths.session_file());
+    }
+
+    /// Reselects the buffer that was active on exit once it has been recreated.
+    fn check_restore_active(&mut self) {
+        let Some((net, buf)) = self.restore_active.clone() else { return };
+        let Some(id) = self.app.network_by_name(&net) else {
+            self.restore_active = None;
+            return;
+        };
+        let target = if buf.eq_ignore_ascii_case(&net) {
+            self.app.network(id).map(|n| n.server_buffer)
+        } else {
+            self.app.find_buffer(id, &buf)
+        };
+        if let Some(b) = target {
+            self.restore_active = None;
+            self.app.switch_to(b);
+        }
+    }
+
     fn begin_quit(&mut self) {
         if self.quitting {
             return;
         }
         self.quitting = true;
+        self.save_session();
         self.app.quit_all(None);
         for cmd in self.app.take_net_commands() {
             self.net.send(cmd);
@@ -1805,6 +1848,11 @@ impl Ui {
                 unsafe {
                     let _ = ShowWindow(self.hwnd, SW_HIDE);
                 }
+                Some(LRESULT(0))
+            }
+            WM_ENDSESSION if wp.0 != 0 => {
+                // Windows is logging off or shutting down: persist state now.
+                self.save_session();
                 Some(LRESULT(0))
             }
             WM_CLOSE => {

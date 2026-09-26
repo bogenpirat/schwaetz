@@ -355,3 +355,17 @@ fn ignored_users_are_dropped() {
     assert!(!b.lines.iter().any(|l| l.text.contains("buy now")));
     assert!(b.lines.iter().any(|l| l.text.contains("notice passes")));
 }
+
+#[test]
+fn joined_channels_are_remembered() {
+    let mut h = Harness::new(NetworkKind::Irc, &["#old"]);
+    h.register();
+    h.lines(&[":me!u@h JOIN #old", ":me!u@h JOIN #new", ":srv 324 me #new +k pw", ":me!u@h PART #old"]);
+    let cfg = &h.app.config.networks[0];
+    assert_eq!(cfg.autojoin, ["#new"]);
+    assert!(h.app.take_effects().iter().any(|e| matches!(e, Effect::SaveConfig)));
+    // Disabled: nothing changes.
+    h.app.config.general.remember_channels = false;
+    h.lines(&[":me!u@h JOIN #third"]);
+    assert_eq!(h.app.config.networks[0].autojoin, ["#new"]);
+}

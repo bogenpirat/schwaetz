@@ -958,6 +958,9 @@ impl App {
                 if own && let Some(b) = self.buffer_mut(bid) {
                     b.joined = false;
                 }
+                if own {
+                    self.remember_channel(net_id, &channel, false);
+                }
                 let text = format!(
                     "{} ({}) has left {channel}{}",
                     user.nick,
@@ -1663,6 +1666,7 @@ impl App {
             if requested.is_some() {
                 self.switch_to(bid);
             }
+            self.remember_channel(net_id, channel, true);
             // Fill the gap since we last saw this channel, or fetch recent history.
             let last_seen = self.buffer(bid).map_or(0, |b| b.last_seen);
             let net = self.networks.get_mut(&net_id).unwrap();
@@ -2049,5 +2053,43 @@ impl App {
             _ => BufferKind::Query,
         };
         self.ensure_buffer(net, kind, name)
+    }
+}
+
+impl App {
+    /// Keeps the network's autojoin list in sync with the channels the user is in, so they are
+    /// rejoined after a restart (`general.remember_channels`).
+    fn remember_channel(&mut self, net: NetworkId, channel: &str, joined: bool) {
+        if !self.config.general.remember_channels {
+            return;
+        }
+        let Some(n) = self.networks.get_mut(&net) else { return };
+        let cm = n.session.casemapping();
+        let key = n.session.channel(channel).and_then(|c| c.key.clone());
+        let pos = n.cfg.autojoin.iter().position(|e| e.split_whitespace().next().is_some_and(|c| cm.eq(c, channel)));
+        let changed = match (joined, pos) {
+            (true, None) => {
+                n.cfg.autojoin.push(match key {
+                    Some(k) => format!("{channel} {k}"),
+                    None => channel.to_owned(),
+                });
+                true
+            }
+            (false, Some(i)) => {
+                n.cfg.autojoin.remove(i);
+                true
+            }
+            _ => false,
+        };
+        if !changed {
+            return;
+        }
+        let list = n.cfg.autojoin.clone();
+        let name = n.cfg.name.clone();
+        n.session.config_mut().autojoin = n.cfg.autojoin_list();
+        if let Some(c) = self.config.networks.iter_mut().find(|c| c.name == name) {
+            c.autojoin = list;
+            self.effects.push(Effect::SaveConfig);
+        }
     }
 }
