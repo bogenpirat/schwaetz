@@ -467,7 +467,8 @@ impl App {
             // Sending a message means we've read everything before it.
             b.read_marker = Some(line.time);
         }
-        if !history {
+        // Only server traffic moves the gap-fill anchor; local status lines must not.
+        if !history && (line.kind.is_message() || line.kind == LineKind::System) {
             b.last_seen = b.last_seen.max(line.time);
         }
         let logged = if self.history.is_some()

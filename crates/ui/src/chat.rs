@@ -438,7 +438,22 @@ impl ChatView {
         if let Some(card) = &card {
             height += card.h + 6.0;
         }
-        Cached { msg, msg_h, nick, ts, reply, reactions, links, bgs, plain, map, height, card, sig: 0, used: self.frame }
+        Cached {
+            msg,
+            msg_h,
+            nick,
+            ts,
+            reply,
+            reactions,
+            links,
+            bgs,
+            plain,
+            map,
+            height,
+            card,
+            sig: 0,
+            used: self.frame,
+        }
     }
 
     /// Builds the preview card (or load chip) for a message's first https link.
@@ -1005,7 +1020,11 @@ fn card_offset(e: &Cached) -> f32 {
 /// Cheap fingerprint of the parts of a line that can change after it was added.
 fn signature(l: &Line) -> u64 {
     let (emotes, reactions, reply) = l.extra.as_ref().map_or((0, 0, 0), |e| {
-        (e.emotes.len() as u64, e.reactions.iter().map(|(_, n)| n.len() as u64).sum::<u64>(), e.reply_to.is_some() as u64)
+        (
+            e.emotes.len() as u64,
+            e.reactions.iter().map(|(_, n)| n.len() as u64).sum::<u64>(),
+            e.reply_to.is_some() as u64,
+        )
     });
     l.flags.0 as u64 | emotes << 16 | reactions << 24 | reply << 40 | (l.text.len() as u64) << 41
 }

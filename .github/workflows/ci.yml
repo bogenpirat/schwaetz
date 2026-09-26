@@ -39,8 +39,13 @@ jobs:
           path: tests/ergo/bin
           key: ergo-${{ hashFiles('tests/ergo/VERSION') }}
 
-      - name: Test
-        run: cargo test --workspace
+      - name: Test (with a local Ergo IRC server for end-to-end tests)
+        shell: pwsh
+        run: |
+          $ergo = & ./tests/ergo/start.ps1 -Port 16667
+          $env:SCHWAETZ_ERGO_PORT = "16667"
+          try { cargo test --workspace; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+          finally { $ergo | Stop-Process -Force -ErrorAction SilentlyContinue }
 
       - name: Build release
         run: cargo build --release --bin schwaetz
