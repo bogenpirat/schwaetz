@@ -1,0 +1,25 @@
+# Example theme — copy to %APPDATA%\schwaetz\themes and select with /set appearance.theme nord
+base = "dark"
+
+[colors]
+chat_bg = "#2e3440"
+topic_bg = "#2e3440"
+nicklist_bg = "#2b303b"
+input_bg = "#3b4252"
+panel_bg = "#3b4252"
+backdrop_opaque = "#272c36"
+text = "#eceff4"
+text_dim = "#9aa3b5"
+timestamp = "#6b7489"
+accent = "#88c0d0"
+accent_fg = "#1f242d"
+link = "#81a1c1"
+highlight_bg = "#ebcb8b22"
+highlight_bar = "#ebcb8b"
+error = "#bf616a"
+join = "#a3be8c"
+part = "#bf616a"
+notice = "#b48ead"
+own_nick = "#88c0d0"
+
+nick_colors = ["#bf616a", "#d08770", "#ebcb8b", "#a3be8c", "#8fbcbb", "#88c0d0", "#81a1c1", "#b48ead"]

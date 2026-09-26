@@ -2,14 +2,39 @@
 
 A fast, native IRC client for Windows, written in Rust.
 
-- Native Win32 UI rendered with Direct2D/DirectWrite — small single `.exe`, low memory, instant start.
-- RFC 1459/2812, Modern IRC and IRCv3 (CAP 302, SASL PLAIN/EXTERNAL/SCRAM-SHA-256, batches,
-  chathistory, echo-message, labeled-response, multiline, read markers, …).
-- Bouncer aware: ZNC (`*playback`, self-message, network import) and soju (bouncer-networks).
-- Twitch chat dialect (badges, emotes, moderation events).
-- Scriptable in JavaScript or TypeScript.
+- **Small and light.** One ~8 MB executable, no runtime. About 8 MB of memory when idle and a
+  first window in roughly 150 ms. It uses no CPU while nothing happens, and handles 1,000 msg/s
+  floods comfortably.
+- **Native UI.** Win32 with Direct2D/DirectWrite: crisp text, color emoji, Mica on Windows 11,
+  dark/light themes that follow Windows, per-monitor DPI.
+- **Modern IRC.** RFC 1459/2812, Modern IRC and IRCv3: CAP 302, SASL (PLAIN, EXTERNAL,
+  SCRAM-SHA-256), batches, chathistory with automatic gap-fill, echo-message, labeled-response,
+  multiline, read markers, message redaction, typing, replies and reactions, monitor, STS, WHOX, …
+- **Bouncers.** ZNC (`*playback`, self-message, importing your other ZNC networks) and soju
+  (`bouncer-networks`, chathistory, read markers).
+- **Twitch.** Badges, user colors, inline emotes, sub/raid notices, timeouts and deletions,
+  room modes. Works anonymously (read-only) or with an OAuth token.
+- **Comforts.** Quick switcher, tab completion, highlights, ignores, aliases, notifications, tray
+  icon, searchable history with scroll-back, logs, link previews (opt-in), session restore, raw
+  protocol log, channel list, network and settings dialogs.
+- **Scriptable** in JavaScript or TypeScript — see [docs/scripting.md](docs/scripting.md).
 
-> Status: under active development. See the milestones in `docs/`.
+## Getting started
+
+Run `schwaetz.exe`. On first start it creates a configuration with Libera.Chat; right-click it in
+the sidebar and choose **Connect**, or type `/connect irc.libera.chat`. Add networks with
+**Add network…** (right-click "schwätz" in the sidebar) or `/network add`.
+
+Useful keys: **Ctrl+J** quick switcher · **Alt+1…9** buffers · **Alt+A** next activity ·
+**Ctrl+W** close · **Ctrl+,** settings · **Ctrl+B/I/U/K** formatting · **Tab** completion ·
+**Shift+Enter** new line. `/help` lists all commands.
+
+Passwords and tokens are stored in the Windows Credential Manager, never in the config file
+(`/secret <network> sasl|pass|twitch <value>` or the network dialog).
+
+Configuration, themes and scripts live in `%APPDATA%\schwaetz`, history and caches in
+`%LOCALAPPDATA%\schwaetz`. Put an empty `portable.txt` next to the exe to keep everything in a
+`data` folder beside it instead. Details: [docs/configuration.md](docs/configuration.md).
 
 ## Building
 
@@ -20,24 +45,33 @@ cargo build --release
 .\target\release\schwaetz.exe
 ```
 
-If `cargo` reports `link.exe not found` even though Build Tools are installed, load the MSVC
+If `cargo` reports `link.exe not found` although Build Tools are installed, load the MSVC
 environment first: `. .\scripts\dev-env.ps1`.
 
-Run the same checks as CI with `.\scripts\check.ps1`.
+`.\scripts\check.ps1` runs the same checks as CI (format, clippy, tests). End-to-end tests run
+against a local [Ergo](https://ergo.chat) server:
+
+```powershell
+$ergo = .\tests\ergo\start.ps1 -Port 16667
+$env:SCHWAETZ_ERGO_PORT = 16667; cargo test --workspace
+```
+
+Other helpers: `scripts\send.ps1` (send input to a running instance), `scripts\screenshot.ps1`,
+`scripts\flood.ps1` (load test).
 
 ## Layout
 
-| Crate            | Purpose                                                              |
-|------------------|----------------------------------------------------------------------|
+| Crate            | Purpose                                                                |
+|------------------|------------------------------------------------------------------------|
 | `crates/proto`   | IRC wire format: parsing, tags, formatting codes, casemapping, ISUPPORT |
-| `crates/client`  | Sans-IO session: registration, CAP/SASL, state tracking, IRCv3        |
-| `crates/net`     | Transport: TCP/TLS, flood control, keepalive, reconnect               |
-| `crates/core`    | Application model: buffers, commands, config, highlights, Twitch      |
-| `crates/store`   | SQLite history + full-text search, text logs                          |
-| `crates/media`   | Link previews and inline images                                       |
-| `crates/script`  | JavaScript/TypeScript scripting host                                  |
-| `crates/ui`      | Win32 + Direct2D user interface                                       |
-| `crates/app`     | The `schwaetz.exe` binary                                             |
+| `crates/client`  | Sans-IO session: registration, CAP/SASL, state tracking, IRCv3         |
+| `crates/net`     | Transport: TCP/TLS, flood control, keepalive, reconnect, HTTPS helper  |
+| `crates/core`    | Application model: buffers, commands, config, highlights, Twitch, ZNC  |
+| `crates/store`   | SQLite history with full-text search, text logs                        |
+| `crates/media`   | Image decoding (WIC) and link previews                                 |
+| `crates/script`  | JavaScript/TypeScript scripting (QuickJS, oxc)                         |
+| `crates/ui`      | Win32 + Direct2D user interface                                        |
+| `crates/app`     | The `schwaetz.exe` binary                                              |
 
 ## License
 
