@@ -7,10 +7,16 @@ use crate::theme::Theme;
 use schwaetz_core::config::{NetworkKind, SaslMechanism};
 use schwaetz_core::secrets::{self, SecretKind};
 use schwaetz_core::{Config, NetworkConfig};
+use std::cell::Cell;
+use std::ops::Range;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
 const ROW_H: f32 = 40.0;
-const LABEL_W: f32 = 200.0;
+const LABEL_W: f32 = 190.0;
+/// Width of the page list on the left.
+const NAV_W: f32 = 190.0;
+const FOOTER_H: f32 = 68.0;
+const OPTION_H: f32 = 32.0;
 
 pub enum FieldKind {
     Header,
@@ -46,10 +52,27 @@ pub struct Form {
     pub kind: FormKind,
     pub fields: Vec<Field>,
     pub focus: usize,
+    /// One page per header: (title, field range). The left pane switches between them.
+    sections: Vec<(&'static str, Range<usize>)>,
+    section: usize,
     scroll: f32,
+    content_h: f32,
+    list_h: f32,
     pub error: Option<String>,
-    rows: Vec<(usize, Rect)>,
+    /// The field the last validation error is about (to show its page).
+    error_key: Cell<&'static str>,
+    /// Laid-out rows of the current page: (field, row, control).
+    rows: Vec<(usize, Rect, Rect)>,
+    nav: Vec<Rect>,
+    nav_hover: Option<usize>,
     buttons: Vec<(FormAction, Rect)>,
+    /// Open dropdown: (field, highlighted option) and its option rects.
+    dropdown: Option<(usize, usize)>,
+    popup: Vec<Rect>,
+    /// Scrollbar (track, thumb) when the page overflows; `grab` is the pointer's offset
+    /// into the thumb while dragging it.
+    scrollbar: Option<(Rect, Rect)>,
+    grab: Option<f32>,
 }
 
 fn text(key: &'static str, label: &'static str, hint: &'static str, value: &str) -> Field {
@@ -80,8 +103,66 @@ fn header(label: &'static str) -> Field {
 
 impl Form {
     fn new(title: String, kind: FormKind, fields: Vec<Field>) -> Form {
-        let focus = fields.iter().position(|f| !matches!(f.kind, FieldKind::Header)).unwrap_or(0);
-        Form { title, kind, fields, focus, scroll: 0.0, error: None, rows: Vec::new(), buttons: Vec::new() }
+        let mut sections: Vec<(&'static str, Range<usize>)> = Vec::new();
+        for (i, f) in fields.iter().enumerate() {
+            match (&f.kind, sections.last_mut()) {
+                (FieldKind::Header, _) => sections.push((f.label, i + 1..i + 1)),
+                (_, Some((_, r))) => r.end = i + 1,
+                (_, None) => sections.push(("General", i..i + 1)),
+            }
+        }
+        sections.retain(|(_, r)| !r.is_empty());
+        let focus = sections.first().map_or(0, |(_, r)| r.start);
+        Form {
+            title,
+            kind,
+            fields,
+            focus,
+            sections,
+            section: 0,
+            scroll: 0.0,
+            content_h: 0.0,
+            list_h: 400.0,
+            error: None,
+            error_key: Cell::new(""),
+            rows: Vec::new(),
+            nav: Vec::new(),
+            nav_hover: None,
+            buttons: Vec::new(),
+            dropdown: None,
+            popup: Vec::new(),
+            scrollbar: None,
+            grab: None,
+        }
+    }
+
+    /// Records which field a validation error is about and returns the message.
+    fn fail(&self, key: &'static str, msg: impl Into<String>) -> String {
+        self.error_key.set(key);
+        msg.into()
+    }
+
+    /// Shows an error and brings the offending field into view.
+    pub fn set_error(&mut self, msg: String) {
+        self.error = Some(msg);
+        let key = self.error_key.replace("");
+        if let Some(i) = self.fields.iter().position(|f| !key.is_empty() && f.key == key)
+            && let Some(s) = self.sections.iter().position(|(_, r)| r.contains(&i))
+        {
+            self.show_section(s);
+            self.focus = i;
+            self.reveal_focus();
+        }
+    }
+
+    fn show_section(&mut self, s: usize) {
+        if s == self.section || s >= self.sections.len() {
+            return;
+        }
+        self.section = s;
+        self.scroll = 0.0;
+        self.dropdown = None;
+        self.focus = self.sections[s].1.start;
     }
 
     pub fn network(cfg: Option<&NetworkConfig>) -> Form {
@@ -262,14 +343,14 @@ impl Form {
     ) -> Result<(NetworkConfig, Vec<(SecretKind, String)>), String> {
         let name = self.text("name");
         if name.is_empty() {
-            return Err("Give the network a name.".into());
+            return Err(self.fail("name", "Give the network a name."));
         }
         let servers = self.list("servers", ',');
         if servers.is_empty() {
-            return Err("Add at least one server.".into());
+            return Err(self.fail("servers", "Add at least one server."));
         }
         if let Some(bad) = servers.iter().find(|s| NetworkConfig::parse_server(s).is_none()) {
-            return Err(format!("\"{bad}\" is not a valid server address."));
+            return Err(self.fail("servers", format!("\"{bad}\" is not a valid server address.")));
         }
         let kind = match self.choice("kind") {
             "znc" => NetworkKind::Znc,
@@ -297,7 +378,7 @@ impl Form {
             && secrets.iter().all(|(k, _)| *k != SecretKind::Sasl)
             && !self.password_stored("sasl_password")
         {
-            return Err("SASL needs an account password.".into());
+            return Err(self.fail("sasl_password", "SASL needs an account password."));
         }
         let base = base.cloned().unwrap_or_else(|| {
             if kind == NetworkKind::Twitch { NetworkConfig::twitch() } else { NetworkConfig::default() }
@@ -330,17 +411,20 @@ impl Form {
     }
 
     pub fn apply_settings(&self, c: &mut Config) -> Result<(), String> {
-        let num = |key: &str, label: &str| -> Result<u64, String> {
-            self.text(key).parse::<u64>().map_err(|_| format!("{label} must be a whole number."))
+        let num = |key: &'static str, label: &str| -> Result<u64, String> {
+            self.text(key).parse::<u64>().map_err(|_| self.fail(key, format!("{label} must be a whole number.")))
         };
-        let font_size: f32 =
-            self.text("font_size").replace(',', ".").parse().map_err(|_| "Font size must be a number.".to_owned())?;
+        let font_size: f32 = self
+            .text("font_size")
+            .replace(',', ".")
+            .parse()
+            .map_err(|_| self.fail("font_size", "Font size must be a number."))?;
         if !(8.0..=40.0).contains(&font_size) {
-            return Err("Font size must be between 8 and 40.".into());
+            return Err(self.fail("font_size", "Font size must be between 8 and 40."));
         }
         let nick = self.text("nick");
         if nick.is_empty() || nick.contains(' ') {
-            return Err("Enter a nickname without spaces.".into());
+            return Err(self.fail("nick", "Enter a nickname without spaces."));
         }
         let scrollback = num("scrollback_lines", "Lines kept in memory")?.clamp(100, 100_000) as usize;
         let history_days = num("history_days", "History days")? as u32;
@@ -377,14 +461,24 @@ impl Form {
     }
 
     fn panel(&self, win: Rect) -> Rect {
-        let w = 640.0f32.min(win.w - 40.0);
-        let h = (win.h - 60.0).min(720.0);
+        let w = 820.0f32.min(win.w - 40.0);
+        let h = (win.h - 60.0).min(640.0);
         Rect::new(win.x + (win.w - w) / 2.0, win.y + (win.h - h) / 2.0, w, h)
+    }
+
+    fn nav_rect(&self, win: Rect) -> Rect {
+        let p = self.panel(win);
+        Rect::new(p.x + 12.0, p.y + 64.0, NAV_W - 12.0, p.h - 64.0 - FOOTER_H)
     }
 
     fn list_rect(&self, win: Rect) -> Rect {
         let p = self.panel(win);
-        Rect::new(p.x + 8.0, p.y + 60.0, p.w - 16.0, p.h - 60.0 - 64.0)
+        let x = p.x + NAV_W + 12.0;
+        Rect::new(x, p.y + 64.0 + 40.0, p.right() - 12.0 - x, p.h - 64.0 - 40.0 - FOOTER_H)
+    }
+
+    fn page(&self) -> Range<usize> {
+        self.sections.get(self.section).map_or(0..0, |(_, r)| r.clone())
     }
 
     pub fn render(&mut self, p: &Painter, text: &Text, th: &Theme, win: Rect, caret_on: bool) {
@@ -396,77 +490,124 @@ impl Form {
         let t = text.layout(&self.title, &f.title, panel.w - 40.0, 30.0);
         p.text(&t, panel.x + 24.0, panel.y + 20.0, th.text);
 
+        // Left pane: one entry per page.
+        let nav = self.nav_rect(win);
+        p.line(nav.right() + 6.0, nav.y, nav.right() + 6.0, nav.bottom(), th.border, 1.0);
+        self.nav.clear();
+        for (i, (label, _)) in self.sections.iter().enumerate() {
+            let r = Rect::new(nav.x, nav.y + i as f32 * 36.0, nav.w - 8.0, 32.0);
+            if i == self.section {
+                p.fill_round(r, 6.0, th.sidebar_selected);
+                p.fill_round(Rect::new(r.x, r.y + 8.0, 3.0, r.h - 16.0), 1.5, th.accent);
+            } else if self.nav_hover == Some(i) {
+                p.fill_round(r, 6.0, th.sidebar_hover);
+            }
+            let font = if i == self.section { &f.ui_semibold } else { &f.ui };
+            let l = text.layout(label, font, r.w - 24.0, 20.0);
+            p.text(&l, r.x + 14.0, r.y + 7.0, if i == self.section { th.text } else { th.text_dim });
+            self.nav.push(r);
+        }
+
+        // Page title and rows.
         let list = self.list_rect(win);
-        let content_h: f32 =
-            self.fields.iter().map(|f| if matches!(f.kind, FieldKind::Header) { 34.0 } else { ROW_H }).sum();
-        self.scroll = self.scroll.clamp(0.0, (content_h - list.h).max(0.0));
+        if let Some((label, _)) = self.sections.get(self.section) {
+            let l = text.layout(label, &f.title, list.w - 16.0, 30.0);
+            p.text(&l, list.x + 16.0, list.y - 36.0, th.text);
+        }
+        let page = self.page();
+        self.content_h = page.len() as f32 * ROW_H + 8.0;
+        self.list_h = list.h;
+        let overflow = self.content_h > list.h;
+        self.scroll = self.scroll.clamp(0.0, (self.content_h - list.h).max(0.0));
+        let ctl_w = list.w - LABEL_W - if overflow { 30.0 } else { 16.0 };
         p.clip(list);
         self.rows.clear();
-        let mut y = list.y - self.scroll;
-        for (i, field) in self.fields.iter_mut().enumerate() {
-            let h = if matches!(field.kind, FieldKind::Header) { 34.0 } else { ROW_H };
+        let mut y = list.y + 4.0 - self.scroll;
+        for i in page {
             let focused = i == self.focus;
+            let open = self.dropdown.is_some_and(|(d, _)| d == i);
+            let field = &mut self.fields[i];
+            let row = Rect::new(list.x, y, list.w, ROW_H);
+            let ctl = Rect::new(list.x + LABEL_W, y + 4.0, ctl_w, ROW_H - 8.0);
+            // Switches sit at the right edge, so their labels can use the whole row.
+            let label_w =
+                if matches!(field.kind, FieldKind::Check(_)) { ctl.right() - list.x - 76.0 } else { LABEL_W - 28.0 };
+            let l = text.layout(field.label, &f.ui, label_w, 20.0);
+            p.text(&l, list.x + 16.0, y + 11.0, th.text);
             match &mut field.kind {
-                FieldKind::Header => {
-                    let l = text.layout(&field.label.to_uppercase(), &f.ui_small, list.w, 20.0);
-                    p.text(&l, list.x + 16.0, y + 14.0, th.accent);
-                }
-                kind => {
-                    let l = text.layout(field.label, &f.ui, LABEL_W - 20.0, 20.0);
-                    p.text(&l, list.x + 16.0, y + 11.0, th.text);
-                    let ctl = Rect::new(list.x + LABEL_W, y + 4.0, list.w - LABEL_W - 16.0, ROW_H - 8.0);
-                    match kind {
-                        FieldKind::Text(ed) | FieldKind::Password(ed, _) => {
-                            p.fill_round(ctl, 6.0, th.input_bg);
-                            let border = if focused { with_alpha(th.accent, 0.8) } else { th.border };
-                            p.stroke_round(ctl, 6.0, border, if focused { 1.5 } else { 1.0 });
-                            let inner = ctl.inset(10.0, 0.0);
-                            let lay = ed.layout(text, &f.ui, inner.w).clone();
-                            let lh = text::metrics(&lay).height.max(16.0);
-                            let ty = ctl.y + (ctl.h - lh) / 2.0;
-                            let (cx, _, ch) = ed.caret();
-                            let dx = (cx - inner.w + 4.0).max(0.0);
-                            p.clip(inner);
-                            if ed.is_empty() && !field.hint.is_empty() {
-                                let hl = text.layout(field.hint, &f.ui, inner.w, 20.0);
-                                p.text(&hl, inner.x, ty, with_alpha(th.text_dim, 0.8));
-                            }
-                            for (sx, sy, sw, sh) in ed.selection_rects() {
-                                p.fill(Rect::new(inner.x + sx - dx, ty + sy, sw, sh), th.selection);
-                            }
-                            p.text(&lay, inner.x - dx, ty, th.text);
-                            if focused && caret_on {
-                                p.fill(Rect::new(inner.x + cx - dx, ty, 1.5, ch.max(lh)), th.accent);
-                            }
-                            p.unclip();
-                        }
-                        FieldKind::Choice(opts, idx) => {
-                            p.fill_round(ctl, 6.0, th.input_bg);
-                            p.stroke_round(ctl, 6.0, if focused { th.accent } else { th.border }, 1.0);
-                            let l = text.layout(&format!("{}   ▾", opts[*idx].1), &f.ui, ctl.w - 20.0, 20.0);
-                            p.text(&l, ctl.x + 10.0, ctl.y + 7.0, th.text);
-                        }
-                        FieldKind::Check(on) => {
-                            let bx = Rect::new(ctl.x, ctl.y + (ctl.h - 20.0) / 2.0, 36.0, 20.0);
-                            p.fill_round(bx, 10.0, if *on { th.accent } else { th.badge_bg });
-                            if focused {
-                                p.stroke_round(bx.inset(-2.0, -2.0), 12.0, with_alpha(th.accent, 0.6), 1.0);
-                            }
-                            let knob_x = if *on { bx.right() - 10.0 } else { bx.x + 10.0 };
-                            p.circle(knob_x, bx.y + 10.0, 7.0, if *on { th.accent_fg } else { th.text_dim });
-                        }
-                        FieldKind::Header => {}
+                FieldKind::Text(ed) | FieldKind::Password(ed, _) => {
+                    p.fill_round(ctl, 6.0, th.input_bg);
+                    let border = if focused { with_alpha(th.accent, 0.8) } else { th.border };
+                    p.stroke_round(ctl, 6.0, border, if focused { 1.5 } else { 1.0 });
+                    let inner = ctl.inset(10.0, 0.0);
+                    let lay = ed.layout(text, &f.ui, inner.w).clone();
+                    let lh = text::metrics(&lay).height.max(16.0);
+                    let ty = ctl.y + (ctl.h - lh) / 2.0;
+                    let (cx, _, ch) = ed.caret();
+                    let dx = (cx - inner.w + 4.0).max(0.0);
+                    p.clip(inner);
+                    if ed.is_empty() && !field.hint.is_empty() {
+                        let hl = text.layout(field.hint, &f.ui, inner.w, 20.0);
+                        p.text(&hl, inner.x, ty, with_alpha(th.text_dim, 0.8));
                     }
-                    self.rows.push((i, Rect::new(list.x, y, list.w, h)));
+                    for (sx, sy, sw, sh) in ed.selection_rects() {
+                        p.fill(Rect::new(inner.x + sx - dx, ty + sy, sw, sh), th.selection);
+                    }
+                    p.text(&lay, inner.x - dx, ty, th.text);
+                    if focused && caret_on {
+                        p.fill(Rect::new(inner.x + cx - dx, ty, 1.5, ch.max(lh)), th.accent);
+                    }
+                    p.unclip();
                 }
+                FieldKind::Choice(opts, idx) => {
+                    p.fill_round(ctl, 6.0, th.input_bg);
+                    let border = if focused || open { with_alpha(th.accent, 0.8) } else { th.border };
+                    p.stroke_round(ctl, 6.0, border, if focused || open { 1.5 } else { 1.0 });
+                    let l = text.layout(opts[*idx].1, &f.ui, ctl.w - 44.0, 20.0);
+                    p.text(&l, ctl.x + 10.0, ctl.y + 8.0, th.text);
+                    chevron(p, ctl.right() - 20.0, ctl.y + ctl.h / 2.0, open, th.text_dim);
+                }
+                FieldKind::Check(on) => {
+                    let bx = Rect::new(ctl.right() - 40.0, ctl.y + (ctl.h - 20.0) / 2.0, 36.0, 20.0);
+                    p.fill_round(bx, 10.0, if *on { th.accent } else { th.badge_bg });
+                    if focused {
+                        p.stroke_round(bx.inset(-2.0, -2.0), 12.0, with_alpha(th.accent, 0.6), 1.0);
+                    }
+                    let knob_x = if *on { bx.right() - 10.0 } else { bx.x + 10.0 };
+                    p.circle(knob_x, bx.y + 10.0, 7.0, if *on { th.accent_fg } else { th.text_dim });
+                }
+                FieldKind::Header => {}
             }
-            y += h;
+            self.rows.push((i, row, ctl));
+            y += ROW_H;
         }
         p.unclip();
+
+        // Scrollbar for pages taller than the dialog.
+        self.scrollbar = overflow.then(|| {
+            let track = Rect::new(list.right() - 10.0, list.y + 2.0, 6.0, list.h - 4.0);
+            let th_h = (track.h * list.h / self.content_h).max(28.0);
+            let max = (self.content_h - list.h).max(1.0);
+            let thumb = Rect::new(track.x, track.y + (track.h - th_h) * (self.scroll / max), track.w, th_h);
+            (track, thumb)
+        });
+        if let Some((track, thumb)) = self.scrollbar {
+            p.fill_round(track, 3.0, with_alpha(th.scrollbar, th.scrollbar.a * 0.35));
+            let c = if self.grab.is_some() { with_alpha(th.text_dim, 0.9) } else { th.scrollbar };
+            p.fill_round(thumb, 3.0, c);
+        }
 
         // Footer.
         self.buttons.clear();
         let by = panel.bottom() - 52.0;
+        p.line(
+            panel.x,
+            panel.bottom() - FOOTER_H + 0.5,
+            panel.right(),
+            panel.bottom() - FOOTER_H + 0.5,
+            th.border,
+            1.0,
+        );
         if let Some(e) = &self.error {
             let l = text.layout(e, &f.ui, panel.w - 300.0, 40.0);
             p.text(&l, panel.x + 24.0, by + 8.0, th.error);
@@ -488,27 +629,84 @@ impl Form {
             p.text(&dl, del.x + (del.w - text::metrics(&dl).width) / 2.0, del.y + 8.0, th.error);
             self.buttons.push((FormAction::Delete, del));
         }
+
+        // Open dropdown, drawn over everything else.
+        self.popup.clear();
+        if let Some((fi, hi)) = self.dropdown
+            && let Some(&(_, _, ctl)) = self.rows.iter().find(|(i, ..)| *i == fi)
+            && let FieldKind::Choice(opts, idx) = &self.fields[fi].kind
+        {
+            let h = opts.len() as f32 * OPTION_H + 8.0;
+            let below = ctl.bottom() + 4.0;
+            let y = if below + h <= win.bottom() - 8.0 { below } else { (ctl.y - 4.0 - h).max(win.y + 8.0) };
+            let r = Rect::new(ctl.x, y, ctl.w, h);
+            p.fill_round(Rect::new(r.x + 1.0, r.y + 3.0, r.w, r.h), 8.0, with_alpha(th.overlay_scrim, 0.6));
+            p.fill_round(r, 8.0, th.panel_bg);
+            p.fill_round(r, 8.0, th.sidebar_hover);
+            p.stroke_round(r, 8.0, th.border, 1.0);
+            for (i, (_, label)) in opts.iter().enumerate() {
+                let item = Rect::new(r.x + 4.0, r.y + 4.0 + i as f32 * OPTION_H, r.w - 8.0, OPTION_H);
+                if i == hi {
+                    p.fill_round(item, 5.0, th.sidebar_selected);
+                }
+                if i == *idx {
+                    let c = text.layout("✓", &f.ui_semibold, 20.0, 20.0);
+                    p.text(&c, item.x + 8.0, item.y + 7.0, th.accent);
+                }
+                let l = text.layout(label, &f.ui, item.w - 40.0, 20.0);
+                p.text(&l, item.x + 30.0, item.y + 7.0, th.text);
+                self.popup.push(item);
+            }
+        }
     }
 
     pub fn click(&mut self, win: Rect, x: f32, y: f32) -> FormAction {
+        // With a dropdown open, a click picks an option or just closes it.
+        if let Some((fi, _)) = self.dropdown.take() {
+            if let Some(i) = self.popup.iter().position(|r| r.contains(x, y))
+                && let FieldKind::Choice(_, idx) = &mut self.fields[fi].kind
+            {
+                *idx = i;
+            }
+            return FormAction::None;
+        }
         if !self.panel(win).contains(x, y) {
             return FormAction::None;
         }
         if let Some(i) = self.buttons.iter().position(|(_, r)| r.contains(x, y)) {
             return std::mem::replace(&mut self.buttons[i].0, FormAction::None);
         }
-        let Some(&(i, r)) = self.rows.iter().find(|(_, r)| r.contains(x, y)) else { return FormAction::None };
+        if let Some(s) = self.nav.iter().position(|r| r.contains(x, y)) {
+            self.show_section(s);
+            return FormAction::None;
+        }
+        if let Some((track, thumb)) = self.scrollbar
+            && x >= track.x - 6.0
+            && x <= track.right() + 6.0
+            && y >= track.y
+            && y <= track.bottom()
+        {
+            // Grab the thumb where it was hit; a click on the track centers the thumb there.
+            let grab = if thumb.contains(track.x, y) { y - thumb.y } else { thumb.h / 2.0 };
+            self.grab = Some(grab);
+            self.drag_to(y);
+            return FormAction::None;
+        }
         if !self.list_rect(win).contains(x, y) {
             return FormAction::None;
         }
+        let Some(&(i, _, ctl)) = self.rows.iter().find(|(_, r, _)| r.contains(x, y)) else { return FormAction::None };
         self.focus = i;
-        let ctl_x = r.x + LABEL_W;
         match &mut self.fields[i].kind {
             FieldKind::Check(on) => *on = !*on,
-            FieldKind::Choice(opts, idx) => *idx = (*idx + 1) % opts.len(),
+            FieldKind::Choice(_, idx) => {
+                if ctl.contains(x, y) {
+                    self.dropdown = Some((i, *idx));
+                }
+            }
             FieldKind::Text(ed) | FieldKind::Password(ed, _) => {
-                if x >= ctl_x {
-                    ed.click(x - ctl_x - 10.0, 10.0, false);
+                if x >= ctl.x {
+                    ed.click(x - ctl.x - 10.0, 10.0, false);
                 }
             }
             FieldKind::Header => {}
@@ -516,29 +714,70 @@ impl Form {
         FormAction::None
     }
 
+    /// Pointer movement; returns whether the dialog needs a repaint.
+    pub fn mouse_move(&mut self, x: f32, y: f32) -> bool {
+        if self.grab.is_some() {
+            self.drag_to(y);
+            return true;
+        }
+        let mut changed = false;
+        if let Some((fi, hi)) = self.dropdown
+            && let Some(i) = self.popup.iter().position(|r| r.contains(x, y))
+            && i != hi
+        {
+            self.dropdown = Some((fi, i));
+            changed = true;
+        }
+        let hover = self.nav.iter().position(|r| r.contains(x, y));
+        if hover != self.nav_hover {
+            self.nav_hover = hover;
+            changed = true;
+        }
+        changed
+    }
+
+    pub fn mouse_up(&mut self) -> bool {
+        self.grab.take().is_some()
+    }
+
+    fn drag_to(&mut self, y: f32) {
+        let (Some((track, thumb)), Some(grab)) = (self.scrollbar, self.grab) else { return };
+        let room = (track.h - thumb.h).max(1.0);
+        let t = ((y - grab - track.y) / room).clamp(0.0, 1.0);
+        self.scroll = t * (self.content_h - self.list_h).max(0.0);
+    }
+
+    /// Whether the pointer is over a text box (for the I-beam cursor).
+    pub fn text_at(&self, x: f32, y: f32) -> bool {
+        self.dropdown.is_none()
+            && self.rows.iter().any(|(i, _, ctl)| {
+                ctl.contains(x, y) && matches!(self.fields[*i].kind, FieldKind::Text(_) | FieldKind::Password(..))
+            })
+    }
+
     pub fn scroll_by(&mut self, dy: f32) {
+        self.dropdown = None;
         self.scroll -= dy;
     }
 
     fn move_focus(&mut self, delta: i32) {
-        let n = self.fields.len() as i32;
-        let mut i = self.focus as i32;
-        for _ in 0..n {
-            i = (i + delta).rem_euclid(n);
-            if !matches!(self.fields[i as usize].kind, FieldKind::Header) {
-                break;
-            }
+        let page = self.page();
+        if page.is_empty() {
+            return;
         }
-        self.focus = i as usize;
-        // Keep the focused row visible.
-        let top: f32 = self.fields[..self.focus]
-            .iter()
-            .map(|f| if matches!(f.kind, FieldKind::Header) { 34.0 } else { ROW_H })
-            .sum();
+        let n = page.len() as i32;
+        let i = (self.focus.saturating_sub(page.start) as i32 + delta).rem_euclid(n);
+        self.focus = page.start + i as usize;
+        self.reveal_focus();
+    }
+
+    /// Scrolls so the focused row is visible.
+    fn reveal_focus(&mut self) {
+        let top = self.focus.saturating_sub(self.page().start) as f32 * ROW_H;
         if top < self.scroll {
-            self.scroll = (top - 34.0).max(0.0);
-        } else if top + ROW_H > self.scroll + 480.0 {
-            self.scroll = top + ROW_H - 480.0;
+            self.scroll = top;
+        } else if top + ROW_H + 8.0 > self.scroll + self.list_h {
+            self.scroll = top + ROW_H + 8.0 - self.list_h;
         }
     }
 
@@ -550,9 +789,35 @@ impl Form {
         shift: bool,
         clipboard: impl FnOnce() -> Option<String>,
     ) -> FormAction {
+        if let Some((fi, hi)) = self.dropdown {
+            let n = match &self.fields[fi].kind {
+                FieldKind::Choice(o, _) => o.len(),
+                _ => 1,
+            };
+            match v {
+                VK_ESCAPE | VK_TAB => self.dropdown = None,
+                VK_UP => self.dropdown = Some((fi, hi.saturating_sub(1))),
+                VK_DOWN => self.dropdown = Some((fi, (hi + 1).min(n - 1))),
+                VK_HOME => self.dropdown = Some((fi, 0)),
+                VK_END => self.dropdown = Some((fi, n - 1)),
+                VK_RETURN | VK_SPACE => {
+                    if let FieldKind::Choice(_, idx) = &mut self.fields[fi].kind {
+                        *idx = hi;
+                    }
+                    self.dropdown = None;
+                }
+                _ => {}
+            }
+            return FormAction::None;
+        }
+        let pages = self.sections.len().max(1);
         match v {
             VK_ESCAPE => return FormAction::Cancel,
             VK_RETURN => return FormAction::Save,
+            VK_TAB | VK_NEXT | VK_PRIOR if ctrl => {
+                let back = if v == VK_TAB { shift } else { v == VK_PRIOR };
+                self.show_section((self.section + if back { pages - 1 } else { 1 }) % pages);
+            }
             VK_TAB => self.move_focus(if shift { -1 } else { 1 }),
             VK_DOWN => self.move_focus(1),
             VK_UP => self.move_focus(-1),
@@ -573,7 +838,8 @@ impl Form {
                     _ => {}
                 },
                 FieldKind::Check(on) if v == VK_SPACE => *on = !*on,
-                FieldKind::Choice(opts, idx) if v == VK_SPACE || v == VK_RIGHT => *idx = (*idx + 1) % opts.len(),
+                FieldKind::Choice(_, idx) if v == VK_SPACE || v == VK_F4 => self.dropdown = Some((self.focus, *idx)),
+                FieldKind::Choice(opts, idx) if v == VK_RIGHT => *idx = (*idx + 1) % opts.len(),
                 FieldKind::Choice(opts, idx) if v == VK_LEFT => *idx = (*idx + opts.len() - 1) % opts.len(),
                 _ => {}
             },
@@ -582,10 +848,20 @@ impl Form {
     }
 
     pub fn char(&mut self, s: &str) {
+        if self.dropdown.is_some() {
+            return;
+        }
         if let FieldKind::Text(ed) | FieldKind::Password(ed, _) = &mut self.fields[self.focus].kind {
             ed.insert(s);
         }
     }
+}
+
+/// A small "v" (or "^" while open) drawn with two strokes.
+fn chevron(p: &Painter, cx: f32, cy: f32, up: bool, c: crate::gfx::Color) {
+    let d = if up { -3.0 } else { 3.0 };
+    p.line(cx - 5.0, cy - d, cx, cy + d, c, 1.5);
+    p.line(cx, cy + d, cx + 5.0, cy - d, c, 1.5);
 }
 
 #[cfg(test)]
@@ -627,5 +903,30 @@ mod tests {
         assert_eq!(c.highlight.words, ["rust", "irc"]);
         set(&mut f, "font_size", "99");
         assert!(f.apply_settings(&mut c).is_err());
+    }
+
+    #[test]
+    fn settings_pages_errors_and_dropdown_keys() {
+        let mut c = Config::default();
+        let mut f = Form::settings(&c);
+        let pages: Vec<_> = f.sections.iter().map(|(t, _)| *t).collect();
+        assert_eq!(pages, ["Identity", "Appearance", "Chat", "Notifications", "Link previews", "History & window"]);
+
+        // An error on another page brings that page and field up.
+        set(&mut f, "nick", "");
+        f.show_section(2);
+        let e = f.apply_settings(&mut c).unwrap_err();
+        f.set_error(e);
+        assert_eq!((f.section, f.fields[f.focus].key), (0, "nick"));
+
+        // Keyboard: Ctrl+Tab to Appearance, Space opens the theme dropdown, Down + Enter picks.
+        f.key(VK_TAB, true, false, || None);
+        assert_eq!(f.fields[f.focus].key, "theme");
+        f.key(VK_SPACE, false, false, || None);
+        assert!(f.dropdown.is_some());
+        f.key(VK_DOWN, false, false, || None);
+        f.key(VK_RETURN, false, false, || None);
+        assert!(f.dropdown.is_none());
+        assert_eq!(f.choice("theme"), "dark");
     }
 }

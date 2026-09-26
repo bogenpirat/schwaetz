@@ -1120,7 +1120,7 @@ impl Ui {
                 FormKind::Settings => {
                     let mut c = self.app.config.clone();
                     match form.apply_settings(&mut c) {
-                        Err(e) => form.error = Some(e),
+                        Err(e) => form.set_error(e),
                         Ok(()) => {
                             self.app.config = c;
                             self.app.apply_config();
@@ -1136,7 +1136,7 @@ impl Ui {
                 FormKind::Network { original } => {
                     let base = original.as_deref().and_then(|o| self.app.config.network(o).cloned());
                     match form.to_network(base.as_ref()) {
-                        Err(e) => form.error = Some(e),
+                        Err(e) => form.set_error(e),
                         Ok((cfg, secrets)) => {
                             use schwaetz_core::secrets::{SecretKind, get, set};
                             if let Some(old) = original.as_deref().filter(|o| *o != cfg.name) {
@@ -1568,6 +1568,12 @@ impl Ui {
     }
 
     fn mouse_move(&mut self, x: f32, y: f32) {
+        if let Some(f) = self.form.as_mut() {
+            if f.mouse_move(x, y) {
+                self.invalidate();
+            }
+            return;
+        }
         match self.drag {
             Drag::Splitter => {
                 self.sidebar_w = x.clamp(SIDEBAR_MIN, self.win_rect.w * 0.4);
@@ -1616,6 +1622,11 @@ impl Ui {
         unsafe {
             let _ = ReleaseCapture();
         }
+        if let Some(f) = self.form.as_mut()
+            && f.mouse_up()
+        {
+            self.invalidate();
+        }
         if self.drag == Drag::Chat {
             self.chat.selecting = false;
             if let Some((a, b)) = self.chat.selection
@@ -1629,8 +1640,8 @@ impl Ui {
     }
 
     fn cursor_for(&self, x: f32, y: f32) -> PCWSTR {
-        if self.form.is_some() {
-            return IDC_ARROW;
+        if let Some(f) = &self.form {
+            return if f.text_at(x, y) { IDC_IBEAM } else { IDC_ARROW };
         }
         if self.overlay.is_some() {
             return IDC_ARROW;
@@ -1950,7 +1961,7 @@ impl Ui {
     }
 
     /// Scripted UI actions for automated checks (`scripts/send.ps1 "!click 500 640"`), in DIPs:
-    /// `!move x y`, `!click x y`, `!key <vk>`, `!submit <text>` (types and presses Enter).
+    /// `!move x y`, `!click x y`, `!drag x0 y0 x1 y1`, `!key <vk>`, `!submit <text>` (types and presses Enter).
     fn automation(&mut self, cmd: &str) -> bool {
         let (verb, arg) = cmd.split_once(' ').unwrap_or((cmd, ""));
         let xy = || -> Option<(f32, f32)> {
@@ -1967,6 +1978,15 @@ impl Ui {
                 if let Some((x, y)) = xy() {
                     self.mouse_move(x, y);
                     self.mouse_down(x, y, false);
+                    self.mouse_up();
+                }
+            }
+            "drag" => {
+                let v: Vec<f32> = arg.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+                if let [x0, y0, x1, y1] = v[..] {
+                    self.mouse_move(x0, y0);
+                    self.mouse_down(x0, y0, false);
+                    self.mouse_move(x1, y1);
                     self.mouse_up();
                 }
             }

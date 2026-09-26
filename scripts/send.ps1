@@ -3,7 +3,7 @@
 #
 # Usage: .\scripts\send.ps1 "/join #test" ["hello"] [...]
 #        Special lines: "irc://host/#chan" opens a link, "!show" restores the window;
-#        "!move x y", "!click x y", "!key <vk>", "!submit <text>" drive the UI (DIP coordinates).
+#        "!move x y", "!click x y", "!drag x0 y0 x1 y1", "!key <vk>", "!submit <text>" drive the UI (DIP coordinates).
 
 param([Parameter(Mandatory, ValueFromRemainingArguments)][string[]]$Lines)
 $ErrorActionPreference = 'Stop'
