@@ -702,18 +702,23 @@ impl Ui {
         if let Some(b) = self.app.buffer_mut(id) {
             b.input.draft.clear();
         }
-        let consumed = match self.services.scripts.as_mut() {
-            Some(h) => h.on_input(&mut self.app, id, &text),
-            None => false,
-        };
-        if !consumed {
-            self.app.input(id, &text);
-        }
+        self.run_input(id, &text);
         if self.last_typing_sent > 0 {
             self.last_typing_sent = 0;
         }
         self.chat.scroll_to_bottom();
         self.after_update();
+    }
+
+    /// Input from the user (typed or forwarded): scripts first, then the model.
+    fn run_input(&mut self, buffer: BufferId, text: &str) {
+        let consumed = match self.services.scripts.as_mut() {
+            Some(h) => h.on_input(&mut self.app, buffer, text),
+            None => false,
+        };
+        if !consumed {
+            self.app.input(buffer, text);
+        }
     }
 
     fn typed(&mut self) {
@@ -1493,7 +1498,7 @@ impl Ui {
                 self.restore();
             } else {
                 let id = self.app.active;
-                self.app.input(id, line);
+                self.run_input(id, line);
             }
         }
         self.after_update();

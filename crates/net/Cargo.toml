@@ -15,6 +15,7 @@ rustls-platform-verifier.workspace = true
 rustls-pki-types.workspace = true
 tracing.workspace = true
 getrandom.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "sync", "macros"] }

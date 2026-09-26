@@ -11,6 +11,7 @@
 //! jittered exponential backoff across multiple server addresses.
 
 mod conn;
+pub mod http;
 mod tls;
 
 use schwaetz_proto::Message;

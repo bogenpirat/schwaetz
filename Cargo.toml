@@ -16,7 +16,7 @@ schwaetz-net = { path = "crates/net" }
 schwaetz-core = { path = "crates/core" }
 schwaetz-store = { path = "crates/store" }
 schwaetz-media = { path = "crates/media" }
-schwaetz-script = { path = "crates/script" }
+schwaetz-script = { path = "crates/script", default-features = false }
 schwaetz-ui = { path = "crates/ui" }
 
 memchr = "2.7"
@@ -41,6 +41,7 @@ windows = "0.62"
 windows-sys = "0.61"
 regex-lite = "0.1"
 linkify = "0.11"
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier", "gzip"] }
 
 [profile.release]
 opt-level = 3

@@ -138,6 +138,8 @@ pub struct App {
     pub track_new_lines: bool,
     /// Mirror raw protocol traffic into per-network "raw log" buffers.
     pub rawlog: bool,
+    /// Commands registered by scripts (completion and /help).
+    pub extra_commands: Vec<(String, String)>,
     /// Persistent history (logging, scroll-back, search).
     history: Option<Box<dyn HistoryStore>>,
 }
@@ -166,6 +168,7 @@ impl App {
             new_lines: Vec::new(),
             track_new_lines: false,
             rawlog: false,
+            extra_commands: Vec::new(),
             history: None,
             config,
         };
@@ -1374,7 +1377,7 @@ impl App {
         self.ignores.is_ignored(net.display_name(), channel, src, kind, net.session.casemapping())
     }
 
-    pub(crate) fn notify(&mut self, buffer: BufferId, title: String, body: String) {
+    pub fn notify(&mut self, buffer: BufferId, title: String, body: String) {
         let n = &self.config.notifications;
         let is_active = self.active == buffer;
         if self.focused && (is_active || !n.when_focused) {
@@ -2016,4 +2019,35 @@ fn looks_like_netsplit(reason: &str) -> bool {
 
 fn excerpt(s: &str) -> String {
     if s.chars().count() > 80 { s.chars().take(77).chain("…".chars()).collect() } else { s.to_owned() }
+}
+
+impl App {
+    /// A client-side buffer not tied to a network (e.g. "scripts"), created on demand.
+    pub fn ensure_special(&mut self, name: &str) -> BufferId {
+        match self.buffers.iter().find(|b| b.network.is_none() && b.kind == BufferKind::Special && b.name == name) {
+            Some(b) => b.id,
+            None => self.create_buffer(None, BufferKind::Special, name),
+        }
+    }
+
+    pub fn network_by_name(&self, name: &str) -> Option<NetworkId> {
+        self.networks
+            .values()
+            .find(|n| n.display_name().eq_ignore_ascii_case(name) || n.cfg.name.eq_ignore_ascii_case(name))
+            .map(|n| n.id)
+    }
+
+    /// Sends a raw message on a network (scripts, automation).
+    pub fn send_raw(&mut self, net: NetworkId, msg: Message) {
+        self.send(net, msg);
+    }
+
+    /// The buffer for `name` on `net`, creating a query or channel buffer if needed.
+    pub fn buffer_for(&mut self, net: NetworkId, name: &str) -> BufferId {
+        let kind = match self.networks.get(&net) {
+            Some(n) if n.session.is_channel(name) => BufferKind::Channel,
+            _ => BufferKind::Query,
+        };
+        self.ensure_buffer(net, kind, name)
+    }
 }

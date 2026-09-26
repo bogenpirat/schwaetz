@@ -73,7 +73,18 @@ fn main() {
                 None
             }
         };
-    let services = Services { history, scripts: None };
+    schwaetz_net::http::install_crypto();
+    let scripts_dir = paths.scripts_dir();
+    schwaetz_script::prepare_dir(&scripts_dir);
+    let scripts: Option<Box<dyn schwaetz_core::services::ScriptHost>> =
+        match schwaetz_script::Host::new(scripts_dir, Some(paths.cache_dir.join("script-cache"))) {
+            Ok(h) => Some(Box::new(h)),
+            Err(e) => {
+                notes.push(format!("Scripting is unavailable: {e}"));
+                None
+            }
+        };
+    let services = Services { history, scripts };
     if let Err(e) = schwaetz_ui::run(config, paths, services, notes) {
         schwaetz_ui::win::error_box("schwätz", &format!("schwätz could not start:\n\n{e}"));
     }

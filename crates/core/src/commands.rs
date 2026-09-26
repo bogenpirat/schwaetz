@@ -226,6 +226,7 @@ impl App {
         }
         let mut commands: Vec<String> = COMMANDS.iter().map(|c| c.name.to_owned()).collect();
         commands.extend(self.config.aliases.keys().cloned());
+        commands.extend(self.extra_commands.iter().map(|(n, _)| n.clone()));
         commands.sort();
         commands.dedup();
         let c = Candidates { nicks: &nicks, channels: &channels, commands: &commands };
@@ -806,6 +807,10 @@ impl App {
         if topic.is_empty() {
             let names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
             self.status(buffer, LineKind::Status, format!("Commands: {}", names.join(" ")));
+            if !self.extra_commands.is_empty() {
+                let s: Vec<&str> = self.extra_commands.iter().map(|(n, _)| n.as_str()).collect();
+                self.status(buffer, LineKind::Status, format!("Script commands: {}", s.join(" ")));
+            }
             self.status(
                 buffer,
                 LineKind::Status,
@@ -818,7 +823,10 @@ impl App {
                 self.status(buffer, LineKind::Status, c.usage);
                 self.status(buffer, LineKind::Status, c.help);
             }
-            None => self.status(buffer, LineKind::Error, format!("No help for /{topic}")),
+            None => match self.extra_commands.iter().find(|(n, _)| n == topic).map(|(_, h)| h.clone()) {
+                Some(h) => self.status(buffer, LineKind::Status, format!("/{topic} (script): {h}")),
+                None => self.status(buffer, LineKind::Error, format!("No help for /{topic}")),
+            },
         }
     }
 

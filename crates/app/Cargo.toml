@@ -15,6 +15,12 @@ path = "src/main.rs"
 schwaetz-core.workspace = true
 schwaetz-ui.workspace = true
 schwaetz-store.workspace = true
+schwaetz-script.workspace = true
+schwaetz-net.workspace = true
 
 [build-dependencies]
 embed-resource = "3"
+
+[features]
+default = ["typescript"]
+typescript = ["schwaetz-script/typescript"]
