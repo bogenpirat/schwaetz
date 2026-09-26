@@ -61,11 +61,12 @@ A theme file (`themes\mytheme.toml`) overrides any subset of the built-in colors
 
 ```toml
 base = "dark"            # or "light"
+nick_colors = ["#f38ba8", "#fab387", "#a6e3a1", "#89b4fa"]   # before any [table]
+
 [colors]
 accent = "#ff79c6"
 chat_bg = "#1e1e2e"
 highlight_bg = "#f9e2af22"   # #rrggbbaa
-nick_colors = ["#f38ba8", "#fab387", "#a6e3a1", "#89b4fa"]
 ```
 
 Color keys: `backdrop`, `backdrop_opaque`, `sidebar_fg`, `sidebar_dim`, `sidebar_header`,

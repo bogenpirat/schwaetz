@@ -1,5 +1,6 @@
 # Example theme — copy to %APPDATA%\schwaetz\themes and select with /set appearance.theme nord
 base = "dark"
+nick_colors = ["#bf616a", "#d08770", "#ebcb8b", "#a3be8c", "#8fbcbb", "#88c0d0", "#81a1c1", "#b48ead"]
 
 [colors]
 chat_bg = "#2e3440"
@@ -21,5 +22,3 @@ join = "#a3be8c"
 part = "#bf616a"
 notice = "#b48ead"
 own_nick = "#88c0d0"
-
-nick_colors = ["#bf616a", "#d08770", "#ebcb8b", "#a3be8c", "#8fbcbb", "#88c0d0", "#81a1c1", "#b48ead"]

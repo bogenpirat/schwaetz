@@ -329,3 +329,16 @@ mod tests {
         assert!(Theme::from_toml("[colors]\nbogus = \"#000000\"").is_err());
     }
 }
+
+#[cfg(test)]
+mod bundled {
+    #[test]
+    fn bundled_themes_load() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes");
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            super::Theme::from_toml(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        }
+    }
+}
