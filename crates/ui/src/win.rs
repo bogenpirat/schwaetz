@@ -173,6 +173,49 @@ fn build_menu(items: &[MenuItem]) -> HMENU {
 }
 
 /// Shows a context menu at the cursor; returns the chosen id (0 = cancelled).
+/// Asks for an existing file with the Windows file dialog, starting in the folder of `current`
+/// (if any). `filters` are (description, patterns) pairs such as ("Text (*.txt)", "*.txt").
+/// Returns the chosen path, or `None` if the dialog was cancelled.
+pub fn pick_file(hwnd: HWND, title: &str, filters: &[(&str, &str)], current: &str) -> Option<String> {
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+    };
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{
+        FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FileOpenDialog, IFileOpenDialog, IShellItem,
+        SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
+    };
+    unsafe {
+        // The dialog needs COM on this thread; initializing it again is harmless.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let names: Vec<(HSTRING, HSTRING)> =
+            filters.iter().map(|(n, p)| (HSTRING::from(*n), HSTRING::from(*p))).collect();
+        let specs: Vec<COMDLG_FILTERSPEC> = names
+            .iter()
+            .map(|(n, p)| COMDLG_FILTERSPEC { pszName: PCWSTR(n.as_ptr()), pszSpec: PCWSTR(p.as_ptr()) })
+            .collect();
+        if !specs.is_empty() {
+            let _ = dlg.SetFileTypes(&specs);
+        }
+        let _ = dlg.SetTitle(&HSTRING::from(title));
+        if let Ok(o) = dlg.GetOptions() {
+            let _ = dlg.SetOptions(o | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+        }
+        let dir = std::path::Path::new(current).parent().filter(|d| !d.as_os_str().is_empty() && d.is_dir());
+        if let Some(dir) = dir
+            && let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(dir.as_os_str()), None)
+        {
+            let _ = dlg.SetFolder(&item);
+        }
+        dlg.Show(Some(hwnd)).ok()?;
+        let name = dlg.GetResult().ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok();
+        CoTaskMemFree(Some(name.0 as *const _));
+        path
+    }
+}
+
 pub fn popup_menu(hwnd: HWND, items: &[MenuItem]) -> u32 {
     let mut pt = POINT::default();
     unsafe {

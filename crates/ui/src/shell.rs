@@ -1469,6 +1469,19 @@ impl Ui {
                 }
                 self.after_update();
             }
+            FormAction::Browse(key) => {
+                let (title, filters): (&str, &[(&str, &str)]) = match key {
+                    "client_cert" => (
+                        "Choose a client certificate",
+                        &[("Certificates (*.pem, *.crt, *.key)", "*.pem;*.crt;*.key"), ("All files", "*.*")],
+                    ),
+                    _ => ("Choose a file", &[("All files", "*.*")]),
+                };
+                let current = form.text(key);
+                if let Some(path) = win::pick_file(self.hwnd, title, filters, &current) {
+                    form.set_text(key, &path);
+                }
+            }
             FormAction::Button("scripts_folder") => {
                 let dir = self.paths.scripts_dir();
                 let _ = std::fs::create_dir_all(&dir);

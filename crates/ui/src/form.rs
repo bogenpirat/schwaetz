@@ -13,6 +13,8 @@ use std::cell::Cell;
 use std::ops::Range;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
+/// Width of the "Browse…" button of file path fields.
+const BROWSE_W: f32 = 96.0;
 const ROW_H: f32 = 40.0;
 const LABEL_W: f32 = 190.0;
 /// Width of the page list on the left.
@@ -47,6 +49,8 @@ pub struct Field {
     pub label: &'static str,
     pub hint: &'static str,
     pub kind: FieldKind,
+    /// A text field for a file path, with a "Browse…" button that opens a file dialog.
+    pub browse: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +73,8 @@ pub enum FormAction {
     Delete,
     /// A button field was pressed (its key).
     Button(&'static str),
+    /// The "Browse…" button of a file path field was pressed (its key).
+    Browse(&'static str),
     /// A script's switch was flipped (takes effect immediately, not on Save).
     ScriptSwitch {
         name: String,
@@ -92,6 +98,8 @@ pub struct Form {
     error_key: Cell<&'static str>,
     /// Laid-out rows of the current page: (field, row, control, horizontal text scroll).
     rows: Vec<(usize, Rect, Rect, f32)>,
+    /// "Browse…" buttons of file path fields on the current page: (field, bounds).
+    browse: Vec<(usize, Rect)>,
     /// Text field being drag-selected with the mouse.
     selecting: Option<usize>,
     /// Button or switch under a pressed left button (it acts on release).
@@ -111,33 +119,44 @@ pub struct Form {
 fn text(key: &'static str, label: &'static str, hint: &'static str, value: &str) -> Field {
     let mut e = Editor::single_line();
     e.set_text(value, None);
-    Field { key, label, hint, kind: FieldKind::Text(e) }
+    Field { browse: false, key, label, hint, kind: FieldKind::Text(e) }
+}
+
+/// A text field for a file path, with a "Browse…" button.
+fn file(key: &'static str, label: &'static str, hint: &'static str, value: &str) -> Field {
+    Field { browse: true, ..text(key, label, hint, value) }
 }
 
 fn password(key: &'static str, label: &'static str, stored: bool) -> Field {
     let mut e = Editor::single_line();
     e.masked = true;
     let hint = if stored { "stored — leave empty to keep" } else { "not set" };
-    Field { key, label, hint, kind: FieldKind::Password(e, stored) }
+    Field { browse: false, key, label, hint, kind: FieldKind::Password(e, stored) }
 }
 
 fn check(key: &'static str, label: &'static str, value: bool) -> Field {
-    Field { key, label, hint: "", kind: FieldKind::Check(value) }
+    Field { browse: false, key, label, hint: "", kind: FieldKind::Check(value) }
 }
 
 fn choice(key: &'static str, label: &'static str, options: Vec<(&'static str, &'static str)>, value: &str) -> Field {
     let idx = options.iter().position(|(v, _)| *v == value).unwrap_or(0);
-    Field { key, label, hint: "", kind: FieldKind::Choice(options, idx) }
+    Field { browse: false, key, label, hint: "", kind: FieldKind::Choice(options, idx) }
 }
 
 fn button(key: &'static str, label: &'static str, caption: &str) -> Field {
-    Field { key, label, hint: "", kind: FieldKind::Button { caption: caption.into(), note: String::new() } }
+    Field {
+        browse: false,
+        key,
+        label,
+        hint: "",
+        kind: FieldKind::Button { caption: caption.into(), note: String::new() },
+    }
 }
 
 fn script_row(s: &ScriptInfo) -> Field {
     let (note, failed) = script_note(s);
     let kind = FieldKind::Script { name: s.name.clone(), file: s.file.clone(), enabled: s.enabled, note, failed };
-    Field { key: "script", label: "", hint: "", kind }
+    Field { browse: false, key: "script", label: "", hint: "", kind }
 }
 
 /// One line about a script's state, and whether it is an error.
@@ -198,7 +217,7 @@ fn sections(fields: &[Field]) -> Vec<(&'static str, Range<usize>)> {
 }
 
 fn header(label: &'static str) -> Field {
-    Field { key: "", label, hint: "", kind: FieldKind::Header }
+    Field { browse: false, key: "", label, hint: "", kind: FieldKind::Header }
 }
 
 impl Form {
@@ -218,6 +237,7 @@ impl Form {
             error: None,
             error_key: Cell::new(""),
             rows: Vec::new(),
+            browse: Vec::new(),
             selecting: None,
             pressed: None,
             nav: Vec::new(),
@@ -337,7 +357,7 @@ impl Form {
             check("auto_connect", "Connect on startup", c.auto_connect),
             check("reconnect", "Reconnect automatically", c.reconnect),
             check("accept_invalid_certs", "Accept invalid certificates", c.accept_invalid_certs),
-            text(
+            file(
                 "client_cert",
                 "Client certificate",
                 "PEM file for CertFP / SASL EXTERNAL",
@@ -479,6 +499,13 @@ impl Form {
 
     fn field(&self, key: &str) -> Option<&Field> {
         self.fields.iter().find(|f| f.key == key)
+    }
+
+    /// Replaces a text field's value (e.g. with a path picked in a file dialog).
+    pub fn set_text(&mut self, key: &str, value: &str) {
+        if let Some(FieldKind::Text(e)) = self.fields.iter_mut().find(|f| f.key == key).map(|f| &mut f.kind) {
+            e.set_text(value, None);
+        }
     }
 
     pub fn text(&self, key: &str) -> String {
@@ -719,6 +746,7 @@ impl Form {
         let ctl_w = list.w - LABEL_W - if overflow { 30.0 } else { 16.0 };
         p.clip(list);
         self.rows.clear();
+        self.browse.clear();
         let mut y = list.y + 4.0 - self.scroll;
         for i in page {
             let focused = i == self.focus;
@@ -726,7 +754,13 @@ impl Form {
             let field = &mut self.fields[i];
             let row = Rect::new(list.x, y, list.w, ROW_H);
             let mut text_dx = 0.0;
-            let ctl = Rect::new(list.x + LABEL_W, y + 4.0, ctl_w, ROW_H - 8.0);
+            let mut ctl = Rect::new(list.x + LABEL_W, y + 4.0, ctl_w, ROW_H - 8.0);
+            // File path fields: the text box leaves room for "Browse…" at its right.
+            let browse = field.browse.then(|| {
+                let b = Rect::new(ctl.right() - BROWSE_W, ctl.y, BROWSE_W, ctl.h);
+                ctl.w -= BROWSE_W + 8.0;
+                b
+            });
             // Switches sit at the right edge, so their labels can use the whole row.
             let label_w =
                 if matches!(field.kind, FieldKind::Check(_)) { ctl.right() - list.x - 76.0 } else { LABEL_W - 28.0 };
@@ -799,6 +833,18 @@ impl Form {
                     }
                 }
                 FieldKind::Header => {}
+            }
+            if let Some(b) = browse {
+                let c = Control::DialogField(i);
+                let face = button_face(p, b, 6.0, th.badge_bg, th, anims.hover(c), anims.press(c));
+                let bl = text.layout("Browse…", &f.ui_semibold, b.w, 20.0);
+                p.text(
+                    &bl,
+                    face.x + (face.w - text::metrics(&bl).width) / 2.0,
+                    face.y + (face.h - 18.0) / 2.0,
+                    th.text,
+                );
+                self.browse.push((i, b));
             }
             self.rows.push((i, row, ctl, text_dx));
             y += ROW_H;
@@ -903,6 +949,9 @@ impl Form {
         if !self.list_rect(win).contains(x, y) {
             return None;
         }
+        if let Some(&(i, _)) = self.browse.iter().find(|(_, r)| r.contains(x, y)) {
+            return Some(Target::Field(i));
+        }
         let &(i, _, ctl, _) = self.rows.iter().find(|(_, r, ..)| r.contains(x, y))?;
         match self.fields[i].kind {
             FieldKind::Button { .. } if ctl.contains(x, y) => Some(Target::Field(i)),
@@ -1003,6 +1052,8 @@ impl Form {
         let Some(t) = pressed.filter(|t| self.target_at(win, x, y) == Some(*t)) else { return FormAction::None };
         match t {
             Target::Footer(i) => std::mem::replace(&mut self.buttons[i].0, FormAction::None),
+            // File path fields are targets only through their "Browse…" button.
+            Target::Field(i) if self.fields[i].browse => FormAction::Browse(self.fields[i].key),
             Target::Field(i) => match &mut self.fields[i].kind {
                 FieldKind::Check(on) => {
                     *on = !*on;
