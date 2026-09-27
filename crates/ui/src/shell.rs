@@ -80,6 +80,8 @@ const TIMER_UI_ANIM: usize = 5;
 const SIDEBAR_MIN: f32 = 160.0;
 const TOPIC_H: f32 = 56.0;
 const NICKLIST_W: f32 = 210.0;
+/// Narrowest the member list can be dragged.
+const NICKLIST_MIN: f32 = 120.0;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Drag {
@@ -87,6 +89,8 @@ enum Drag {
     Chat,
     Input,
     Splitter,
+    /// The edge between the chat and the member list.
+    NickSplitter,
     /// A channel row pressed in the sidebar; it becomes a rearranging drag once the pointer has
     /// moved a few pixels (`row_drag_from`).
     Row(BufferId),
@@ -117,6 +121,8 @@ pub struct Ui {
     input: Editor,
     overlay: Option<Overlay>,
     sidebar_w: f32,
+    /// Member list width (dragged at its left edge).
+    nicklist_w: f32,
     show_nicklist: bool,
     topic_rect: Rect,
     input_rect: Rect,
@@ -272,6 +278,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         input: Editor::default(),
         overlay: None,
         sidebar_w: 230.0,
+        nicklist_w: NICKLIST_W,
         show_nicklist: false,
         topic_rect: Rect::default(),
         input_rect: Rect::default(),
@@ -316,6 +323,9 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
         ui.sidebar_w = w;
+    }
+    if let Some(w) = session.nicklist_width {
+        ui.nicklist_w = w;
     }
     ui.restore_active = session.active.clone();
     let placed = session.apply_window(hwnd);
@@ -461,8 +471,10 @@ impl Ui {
         let active = self.app.active_buffer();
         let is_channel = active.kind == BufferKind::Channel;
         self.show_nicklist = is_channel && self.app.config.appearance.show_nicklist && w - sw > 640.0;
-        let nick_w = if self.show_nicklist { NICKLIST_W } else { 0.0 };
         let main_w = w - sw;
+        // The chat keeps at least 400 DIPs.
+        self.nicklist_w = self.nicklist_w.clamp(NICKLIST_MIN, (main_w - 400.0).max(NICKLIST_MIN));
+        let nick_w = if self.show_nicklist { self.nicklist_w } else { 0.0 };
         self.topic_rect = Rect::new(sw, 0.0, main_w, TOPIC_H);
         // Input grows with its content (up to ~8 lines).
         let lh = self.text.fonts.line_height;
@@ -998,7 +1010,11 @@ impl Ui {
     }
 
     fn save_session(&self) {
-        let mut s = crate::session::Session { sidebar_width: Some(self.sidebar_w), ..Default::default() };
+        let mut s = crate::session::Session {
+            sidebar_width: Some(self.sidebar_w),
+            nicklist_width: Some(self.nicklist_w),
+            ..Default::default()
+        };
         s.capture_window(self.hwnd);
         let b = self.app.active_buffer();
         if let Some(net) = b.network.and_then(|n| self.app.network(n)) {
@@ -1839,6 +1855,13 @@ impl Ui {
         (x - self.sidebar_w).abs() <= 4.0
     }
 
+    /// Whether a point is on the edge between the chat and the member list.
+    fn on_nick_splitter(&self, x: f32, y: f32) -> bool {
+        // Mostly on the list's side, clear of the chat's scrollbar.
+        let dx = x - self.nicklist.rect.x;
+        self.show_nicklist && y >= self.nicklist.rect.y && (-2.0..=5.0).contains(&dx)
+    }
+
     fn mouse_down(&mut self, x: f32, y: f32, double: bool) {
         unsafe {
             SetCapture(self.hwnd);
@@ -1878,6 +1901,10 @@ impl Ui {
         }
         if self.on_splitter(x) {
             self.drag = Drag::Splitter;
+            return;
+        }
+        if self.on_nick_splitter(x, y) {
+            self.drag = Drag::NickSplitter;
             return;
         }
         if let Some((sb, _)) = self.sidebar.network_button_at(x, y) {
@@ -2040,6 +2067,11 @@ impl Ui {
             Drag::Splitter => {
                 self.sidebar_w = x.clamp(SIDEBAR_MIN, self.win_rect.w * 0.4);
                 self.chat.invalidate_styles();
+                self.invalidate();
+            }
+            Drag::NickSplitter => {
+                // Clamped to what fits in `layout`.
+                self.nicklist_w = (self.win_rect.w - x).max(NICKLIST_MIN);
                 self.invalidate();
             }
             Drag::Chat => {
@@ -2304,7 +2336,10 @@ impl Ui {
         if self.overlay.is_some() {
             return IDC_ARROW;
         }
-        if self.on_splitter(x) || self.drag == Drag::Splitter {
+        if self.on_splitter(x)
+            || self.on_nick_splitter(x, y)
+            || matches!(self.drag, Drag::Splitter | Drag::NickSplitter)
+        {
             return IDC_SIZEWE;
         }
         if self.sidebar.drag.is_some() {

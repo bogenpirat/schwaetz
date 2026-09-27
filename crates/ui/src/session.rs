@@ -14,6 +14,8 @@ pub struct Session {
     pub window: Option<[i32; 4]>,
     pub maximized: bool,
     pub sidebar_width: Option<f32>,
+    /// Width of the member list, as dragged at its left edge.
+    pub nicklist_width: Option<f32>,
     /// Network display name and buffer name of the buffer that was active on exit.
     pub active: Option<(String, String)>,
 }
