@@ -8,8 +8,18 @@ use schwaetz_core::{Activity, App, BufferId, BufferKind};
 use schwaetz_net::NetworkId;
 
 pub enum ConfirmAction {
-    Paste { buffer: BufferId, text: String },
-    AddZncNetworks { net: NetworkId, names: Vec<String> },
+    Paste {
+        buffer: BufferId,
+        text: String,
+    },
+    AddZncNetworks {
+        net: NetworkId,
+        names: Vec<String>,
+    },
+    /// Remove a network with its settings and stored secrets.
+    RemoveNetwork {
+        name: String,
+    },
 }
 
 pub enum Overlay {

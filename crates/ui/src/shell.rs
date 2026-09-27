@@ -631,9 +631,6 @@ impl Ui {
         {
             self.draw_emote_tip(&p, &th, code, url, *anchor);
         }
-        if let Some(o) = self.overlay.as_mut() {
-            o.render(&p, &self.text, &th, &self.app, self.win_rect, self.caret_on);
-        }
         if let Some(f) = self.form.as_mut() {
             if let crate::form::FormKind::Network { original } = &f.kind {
                 let net = original.as_deref().and_then(|n| self.app.network_by_name(n));
@@ -641,6 +638,10 @@ impl Ui {
                 f.set_button("twitch_signin", caption, &note);
             }
             f.render(&p, &self.text, &th, self.win_rect, self.caret_on);
+        }
+        // Overlays (confirmations) sit on top of an open dialog.
+        if let Some(o) = self.overlay.as_mut() {
+            o.render(&p, &self.text, &th, &self.app, self.win_rect, self.caret_on);
         }
         let _ = draw_field;
         let _ = with_alpha;
@@ -951,6 +952,55 @@ impl Ui {
             self.last_typing_sent = 0;
         }
         self.chat.scroll_to_bottom();
+        self.after_update();
+    }
+
+    /// Asks before removing a network (from its dialog or the sidebar menu).
+    fn confirm_remove_network(&mut self, name: String) {
+        let connected = self
+            .app
+            .network_by_name(&name)
+            .and_then(|id| self.app.network(id))
+            .is_some_and(|n| n.conn != ConnState::Disconnected);
+        let mut body =
+            String::from("This deletes its settings, its join list and the passwords and tokens stored for it.");
+        if connected {
+            body.push_str(" It will be disconnected.");
+        }
+        body.push_str(" This cannot be undone.");
+        self.overlay = Some(Overlay::Confirm {
+            title: format!("Remove network \"{name}\"?"),
+            body,
+            yes: "Remove network".into(),
+            action: ConfirmAction::RemoveNetwork { name },
+        });
+        self.invalidate();
+    }
+
+    /// Removes a network: disconnects it, forgets its buffers and settings, signs out of Twitch
+    /// (revoking the token) and deletes its stored secrets.
+    fn remove_network(&mut self, name: &str) {
+        use schwaetz_core::secrets::{self, SecretKind};
+        if let Some(id) = self.app.network_by_name(name) {
+            self.app.twitch_sign_out(id);
+            self.app.remove_network(id);
+        }
+        for kind in [
+            SecretKind::Sasl,
+            SecretKind::ServerPassword,
+            SecretKind::TwitchToken,
+            SecretKind::TwitchApi,
+            SecretKind::TwitchOAuth,
+        ] {
+            secrets::delete(name, kind);
+        }
+        self.app.config.networks.retain(|c| c.name != name);
+        let _ = self.app.config.save(&self.paths.config_file());
+        // The dialog of the removed network (if open) goes away with it.
+        if matches!(self.form.as_deref().map(|f| &f.kind), Some(crate::form::FormKind::Network { original: Some(n) }) if n == name)
+        {
+            self.form = None;
+        }
         self.after_update();
     }
 
@@ -1283,13 +1333,7 @@ impl Ui {
             FormAction::Button(_) => {}
             FormAction::Delete => {
                 if let FormKind::Network { original: Some(name) } = form.kind.clone() {
-                    if let Some(id) = self.app.network_by_name(&name) {
-                        self.app.remove_network(id);
-                    }
-                    self.app.config.networks.retain(|c| c.name != name);
-                    let _ = self.app.config.save(&self.paths.config_file());
-                    self.form = None;
-                    self.after_update();
+                    self.confirm_remove_network(name);
                 }
             }
         }
@@ -1302,7 +1346,9 @@ impl Ui {
         let alt = win::key_down(VK_MENU.0);
         let v = VIRTUAL_KEY(vk);
 
-        if let Some(f) = self.form.as_mut() {
+        if self.overlay.is_none()
+            && let Some(f) = self.form.as_mut()
+        {
             let hwnd = self.hwnd;
             let action = f.key(v, ctrl, shift, || win::get_clipboard(hwnd));
             self.form_action(action);
@@ -1477,6 +1523,7 @@ impl Ui {
                     self.after_update();
                 }
                 ConfirmAction::AddZncNetworks { net, names } => self.add_znc_networks(net, names),
+                ConfirmAction::RemoveNetwork { name } => self.remove_network(&name),
             },
             Overlay::ChannelList { net, rows, selected, .. } => {
                 let name = self.app.network(net).and_then(|n| rows.get(selected).map(|&i| n.channel_list[i].0.clone()));
@@ -1538,7 +1585,9 @@ impl Ui {
         }
         let mut buf = [0u8; 4];
         let s = c.encode_utf8(&mut buf);
-        if let Some(f) = self.form.as_mut() {
+        if self.overlay.is_none()
+            && let Some(f) = self.form.as_mut()
+        {
             f.char(s);
             self.caret_on = true;
             self.invalidate();
@@ -1573,7 +1622,9 @@ impl Ui {
             SetCapture(self.hwnd);
         }
         self.tooltip = None;
-        if let Some(f) = self.form.as_mut() {
+        if self.overlay.is_none()
+            && let Some(f) = self.form.as_mut()
+        {
             let action = f.click(self.win_rect, x, y, double, win::key_down(VK_SHIFT.0));
             self.form_action(action);
             self.invalidate();
@@ -1705,7 +1756,9 @@ impl Ui {
     }
 
     fn mouse_move(&mut self, x: f32, y: f32) {
-        if let Some(f) = self.form.as_mut() {
+        if self.overlay.is_none()
+            && let Some(f) = self.form.as_mut()
+        {
             if f.mouse_move(x, y) {
                 self.invalidate();
             }
@@ -1787,7 +1840,9 @@ impl Ui {
     }
 
     fn cursor_for(&self, x: f32, y: f32) -> PCWSTR {
-        if let Some(f) = &self.form {
+        if self.overlay.is_none()
+            && let Some(f) = &self.form
+        {
             return if f.text_at(x, y) { IDC_IBEAM } else { IDC_ARROW };
         }
         if self.overlay.is_some() {
@@ -1832,7 +1887,9 @@ impl Ui {
         // Line positions change; hover state comes back with the next mouse move.
         self.tooltip = None;
         self.chat.hover = None;
-        if let Some(f) = self.form.as_mut() {
+        if self.overlay.is_none()
+            && let Some(f) = self.form.as_mut()
+        {
             f.scroll_by(dy);
             self.invalidate();
             return;
@@ -1852,7 +1909,9 @@ impl Ui {
 
     fn right_click(&mut self, x: f32, y: f32) {
         // A dialog covers the window: only its own text boxes get a (text editing) menu.
-        if let Some(f) = self.form.as_mut() {
+        if self.overlay.is_none()
+            && let Some(f) = self.form.as_mut()
+        {
             if let Some(ed) = f.editor_at(self.win_rect, x, y) {
                 edit_menu(self.hwnd, ed);
             }
@@ -1997,12 +2056,9 @@ impl Ui {
             _ => None,
         };
         if choice == 14
-            && let Some(n) = net
+            && let Some(name) = net.and_then(|n| self.app.network(n)).map(|n| n.cfg.name.clone())
         {
-            let name = self.app.network(n).map(|n| n.cfg.name.clone()).unwrap_or_default();
-            self.app.config.networks.retain(|c| c.name != name);
-            self.app.remove_network(n);
-            let _ = self.app.config.save(&self.paths.config_file());
+            self.confirm_remove_network(name);
         }
         match choice {
             15 => self.app.input(id, "/network edit"),
