@@ -862,7 +862,7 @@ impl Ui {
             }
             Effect::Quit => self.begin_quit(),
             Effect::OpenSettings => {
-                self.form = Some(Box::new(crate::form::Form::settings(&self.app.config)));
+                self.open_settings();
                 self.invalidate();
             }
             Effect::OpenNetwork(name) => {
@@ -952,6 +952,14 @@ impl Ui {
         }
         self.chat.scroll_to_bottom();
         self.after_update();
+    }
+
+    /// Opens the settings dialog (the Scripts page lists the script host's files).
+    fn open_settings(&mut self) {
+        let dir = self.paths.scripts_dir().display().to_string();
+        let infos = self.services.scripts.as_ref().map(|h| h.list(&self.app));
+        let scripts = infos.as_deref().map(|i| (i, dir.as_str()));
+        self.form = Some(Box::new(crate::form::Form::settings(&self.app.config, scripts)));
     }
 
     /// Runs blocking work (HTTPS) on its own thread; the result comes back through `WM_APP_LIVE`.
@@ -1162,6 +1170,10 @@ impl Ui {
                                 form.error = Some(format!("Could not save: {e}"));
                                 return;
                             }
+                            // Scripts switched on or off start or stop now.
+                            if let Some(h) = self.services.scripts.as_mut() {
+                                h.refresh(&mut self.app);
+                            }
                             self.form = None;
                             self.after_update();
                         }
@@ -1215,6 +1227,43 @@ impl Ui {
                 }
                 self.after_update();
             }
+            FormAction::Button("scripts_folder") => {
+                let dir = self.paths.scripts_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                win::open_folder(&dir);
+            }
+            FormAction::Button("scripts_reload") => {
+                if let Some(h) = self.services.scripts.as_mut() {
+                    h.reload(&mut self.app);
+                    form.set_scripts(&h.list(&self.app));
+                }
+                self.after_update();
+            }
+            FormAction::Button("scripts_examples") => {
+                if let Some(h) = self.services.scripts.as_mut() {
+                    match h.install_examples() {
+                        Ok(added) => {
+                            // New examples start switched off; the user decides what runs.
+                            for name in &added {
+                                if self.app.config.scripts.is_enabled(name) {
+                                    self.app.config.scripts.disabled.push(name.clone());
+                                }
+                            }
+                            if !added.is_empty() {
+                                let _ = self.app.config.save(&self.paths.config_file());
+                            }
+                            h.refresh(&mut self.app);
+                            form.set_scripts(&h.list(&self.app));
+                            let note = match added.len() {
+                                0 => "All examples are already there".to_owned(),
+                                n => format!("Added {n} example(s), switched off"),
+                            };
+                            form.set_button("scripts_examples", "Add example scripts", &note);
+                        }
+                        Err(e) => form.set_error(format!("Could not add the examples: {e}")),
+                    }
+                }
+            }
             FormAction::Button(_) => {}
             FormAction::Delete => {
                 if let FormKind::Network { original: Some(name) } = form.kind.clone() {
@@ -1247,7 +1296,7 @@ impl Ui {
         }
         if ctrl && vk == 0xBC {
             // Ctrl+, opens the settings.
-            self.form = Some(Box::new(crate::form::Form::settings(&self.app.config)));
+            self.open_settings();
             self.invalidate();
             return true;
         }

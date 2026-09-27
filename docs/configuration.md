@@ -118,6 +118,9 @@ Per buffer: `/notify all|default|highlights|mute` or the sidebar menu.
 `allow_hosts` (only auto-load from these domains), `max_bytes`, `max_dimension`.
 Only HTTPS is fetched.
 
+`[scripts]`: `disabled` (script file names without extension that are switched off; see
+[scripting](scripting.md)).
+
 ## Files
 
 | Path | Contents |

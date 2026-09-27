@@ -13,7 +13,7 @@ pub use ts::{transpile, transpile_cached};
 use rquickjs::prelude::{Opt, Rest};
 use rquickjs::{Array, CatchResultExt, Coerced, Context, Ctx, Function, Object, Persistent, Runtime, Value};
 use schwaetz_core::buffer::{BufferKind, Emote, LineFlags, LineKind};
-use schwaetz_core::services::ScriptHost;
+use schwaetz_core::services::{ScriptHost, ScriptInfo};
 use schwaetz_core::{App, BufferId};
 use schwaetz_proto::Message;
 use std::cell::{Cell, RefCell};
@@ -113,6 +113,32 @@ pub struct Host {
     http_rx: mpsc::Receiver<HttpResult>,
     pending_http: HashMap<u32, (u32, Persistent<Function<'static>>)>,
     next_req: u32,
+    /// Outcome of the last load of each file, so failed scripts are only retried after they
+    /// change and the settings page can show why.
+    status: HashMap<PathBuf, FileStatus>,
+    /// Latest runtime error per script name.
+    last_error: RefCell<HashMap<String, String>>,
+}
+
+struct FileStatus {
+    mtime: Option<SystemTime>,
+    error: Option<String>,
+    network: bool,
+}
+
+/// Example scripts bundled into the executable (offered on the settings page).
+const EXAMPLES: &[(&str, &str)] = &[
+    ("7tv-emotes.ts", include_str!("../../../scripts/examples/7tv-emotes.ts")),
+    ("classic.js", include_str!("../../../scripts/examples/classic.js")),
+    ("highlights.ts", include_str!("../../../scripts/examples/highlights.ts")),
+];
+
+fn stem(p: &Path) -> &str {
+    p.file_stem().and_then(|s| s.to_str()).unwrap_or("script")
+}
+
+fn grants_http(source: &str) -> bool {
+    source.lines().take(30).any(|l| l.trim_start().starts_with("//") && l.contains("@grant http"))
 }
 
 fn script_files(dir: &Path) -> Vec<PathBuf> {
@@ -155,6 +181,8 @@ impl Host {
             http_rx,
             pending_http: HashMap::new(),
             next_req: 1,
+            status: HashMap::new(),
+            last_error: RefCell::new(HashMap::new()),
         })
     }
 
@@ -191,8 +219,13 @@ impl Host {
         sh.active = (net, b.name.clone(), b.id.0);
     }
 
+    /// Script files that are switched on.
+    fn enabled_files(&self, app: &App) -> Vec<PathBuf> {
+        script_files(&self.dir).into_iter().filter(|p| app.config.scripts.is_enabled(stem(p))).collect()
+    }
+
     fn load_all(&mut self, app: &mut App) {
-        for path in script_files(&self.dir) {
+        for path in self.enabled_files(app) {
             self.load(app, &path);
         }
         app.extra_commands = self.shared.borrow().commands.iter().map(|c| (c.name.clone(), c.help.clone())).collect();
@@ -213,20 +246,20 @@ impl Host {
         let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("script").to_owned();
         let source = match std::fs::read_to_string(path) {
             Ok(s) => s,
-            Err(e) => return self.report(app, &name, &format!("cannot read: {e}")),
+            Err(e) => return self.failed(app, path, &name, &format!("cannot read: {e}"), false),
         };
         let js = if path.extension().is_some_and(|e| e == "ts") {
             match transpile_cached(&source, path, self.cache.as_deref()) {
                 Ok(js) => js,
-                Err(e) => return self.report(app, &name, &e),
+                Err(e) => return self.failed(app, path, &name, &e, grants_http(&source)),
             }
         } else {
             source.clone()
         };
-        let http = source.lines().take(30).any(|l| l.trim_start().starts_with("//") && l.contains("@grant http"));
+        let http = grants_http(&source);
         let ctx = match Context::full(&self.rt) {
             Ok(c) => c,
-            Err(e) => return self.report(app, &name, &e.to_string()),
+            Err(e) => return self.failed(app, path, &name, &e.to_string(), http),
         };
         let id = self.next_id;
         self.next_id += 1;
@@ -246,6 +279,8 @@ impl Host {
         self.run_jobs();
         let mtime = mtime(path);
         self.scripts.push(Script { id, name: name.clone(), path: path.to_owned(), ctx, mtime });
+        self.status.insert(path.to_owned(), FileStatus { mtime, error: result.as_ref().err().cloned(), network: http });
+        self.last_error.borrow_mut().remove(&name);
         match result {
             Ok(()) => {
                 let msg =
@@ -261,9 +296,20 @@ impl Host {
         self.apply(app);
     }
 
+    /// A script could not be loaded: remember why (until the file changes) and say so.
+    fn failed(&mut self, app: &mut App, path: &Path, name: &str, error: &str, network: bool) {
+        self.status.insert(path.to_owned(), FileStatus { mtime: mtime(path), error: Some(error.to_owned()), network });
+        self.report(app, name, error);
+    }
+
     fn report(&self, app: &mut App, script: &str, text: &str) {
+        if !script.is_empty() {
+            self.last_error.borrow_mut().insert(script.to_owned(), text.to_owned());
+        }
         let b = app.ensure_special(SCRIPTS_BUFFER);
-        app.print(b, LineKind::Error, script, text);
+        // Error lines show no nick column, so name the script in the text.
+        let text = if script.is_empty() { text.to_owned() } else { format!("{script}: {text}") };
+        app.print(b, LineKind::Error, script, &text);
     }
 
     /// Calls `f` from script `sid` with an argument built in its context. Returns the result
@@ -879,6 +925,8 @@ impl ScriptHost for Host {
         for id in ids {
             self.unload(id);
         }
+        self.status.clear();
+        self.last_error.borrow_mut().clear();
         self.load_all(app);
         let b = app.ensure_special(SCRIPTS_BUFFER);
         let n = self.scripts.len();
@@ -888,13 +936,67 @@ impl ScriptHost for Host {
     fn commands(&self) -> Vec<String> {
         self.shared.borrow().commands.iter().map(|c| c.name.clone()).collect()
     }
+
+    fn list(&self, app: &App) -> Vec<ScriptInfo> {
+        let shared = self.shared.borrow();
+        script_files(&self.dir)
+            .into_iter()
+            .map(|path| {
+                let name = stem(&path).to_owned();
+                let running = self.scripts.iter().find(|s| s.path == path);
+                let status = self.status.get(&path);
+                let network = match status {
+                    Some(s) => s.network,
+                    None => std::fs::read_to_string(&path).is_ok_and(|s| grants_http(&s)),
+                };
+                let error = status
+                    .and_then(|s| s.error.clone())
+                    .filter(|_| running.is_none())
+                    .or_else(|| running.and_then(|_| self.last_error.borrow().get(&name).cloned()));
+                let commands = running
+                    .map(|s| shared.commands.iter().filter(|c| c.script == s.id).map(|c| c.name.clone()).collect())
+                    .unwrap_or_default();
+                ScriptInfo {
+                    enabled: app.config.scripts.is_enabled(&name),
+                    file: path.file_name().and_then(|f| f.to_str()).unwrap_or_default().to_owned(),
+                    name,
+                    running: running.is_some(),
+                    error,
+                    network,
+                    commands,
+                }
+            })
+            .collect()
+    }
+
+    fn refresh(&mut self, app: &mut App) {
+        self.last_scan = app.now.max(1);
+        self.hot_reload(app);
+    }
+
+    fn dir(&self) -> PathBuf {
+        self.dir.clone()
+    }
+
+    fn install_examples(&mut self) -> Result<Vec<String>, String> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        let mut added = Vec::new();
+        for (file, source) in EXAMPLES {
+            let path = self.dir.join(file);
+            if !path.exists() {
+                std::fs::write(&path, source).map_err(|e| format!("{}: {e}", path.display()))?;
+                added.push(stem(&path).to_owned());
+            }
+        }
+        Ok(added)
+    }
 }
 
 impl Host {
     fn hot_reload(&mut self, app: &mut App) {
-        let files = script_files(&self.dir);
+        let files = self.enabled_files(app);
         let mut changed = false;
-        // Removed or modified scripts.
+        // Removed, switched off or modified scripts.
         let stale: Vec<u32> = self
             .scripts
             .iter()
@@ -906,7 +1008,9 @@ impl Host {
             changed = true;
         }
         for f in files {
-            if !self.scripts.iter().any(|s| s.path == f) {
+            // A script that failed is retried once its file changes, not on every scan.
+            let failed_unchanged = self.status.get(&f).is_some_and(|s| s.error.is_some() && s.mtime == mtime(&f));
+            if !failed_unchanged && !self.scripts.iter().any(|s| s.path == f) {
                 self.load(app, &f);
                 changed = true;
             }

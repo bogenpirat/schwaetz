@@ -132,3 +132,42 @@ fn hot_reload_picks_up_changes() {
     let t = texts(&app, "schwätz");
     assert!(t.contains(&"v1".to_string()) && t.contains(&"v2".to_string()), "{t:?}");
 }
+
+#[test]
+fn list_switch_off_and_failed_scripts() {
+    let (mut host, mut app, dir) = setup(
+        "manage",
+        &[("good.js", "// @grant http\nschwaetz.command(\"hi\", () => {});"), ("bad.js", "this is not javascript")],
+    );
+    host.tick(&mut app, 1_000);
+    let list = host.list(&app);
+    let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["bad", "good"]);
+    let (bad, good) = (&list[0], &list[1]);
+    assert!(good.running && good.network && good.error.is_none());
+    assert_eq!(good.commands, ["hi"]);
+    assert!(!bad.running && bad.error.is_some());
+
+    // A failed script is not retried until its file changes.
+    let errors = |app: &App| texts(app, "scripts").iter().filter(|t| t.starts_with("bad: ")).count();
+    assert_eq!(errors(&app), 1);
+    host.tick(&mut app, 5_000);
+    host.tick(&mut app, 9_000);
+    assert_eq!(errors(&app), 1);
+
+    // Switching a script off stops it; the list still shows it.
+    app.config.scripts.disabled = vec!["good".into()];
+    host.refresh(&mut app);
+    let good = host.list(&app).into_iter().find(|s| s.name == "good").unwrap();
+    assert!(!good.enabled && !good.running);
+    assert!(app.extra_commands.iter().all(|(n, _)| n != "hi"));
+    app.config.scripts.disabled.clear();
+    host.refresh(&mut app);
+    assert!(host.list(&app).iter().any(|s| s.name == "good" && s.running));
+
+    // Examples are added once.
+    let added = host.install_examples().unwrap();
+    assert!(added.contains(&"7tv-emotes".to_string()), "{added:?}");
+    assert!(dir.join("classic.js").exists());
+    assert!(host.install_examples().unwrap().is_empty());
+}

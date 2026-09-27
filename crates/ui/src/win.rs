@@ -62,6 +62,17 @@ pub fn set_clipboard(hwnd: HWND, text: &str) {
 }
 
 /// Opens a URL with the default handler. Only web/IRC/mail schemes are allowed.
+/// Opens a folder in Explorer (only existing directories).
+pub fn open_folder(path: &std::path::Path) {
+    if !path.is_dir() {
+        return;
+    }
+    let p = HSTRING::from(path);
+    unsafe {
+        ShellExecuteW(None, w!("explore"), &p, None, None, SW_SHOWNORMAL);
+    }
+}
+
 pub fn open_url(url: &str) {
     let lower = url.to_ascii_lowercase();
     if !["http://", "https://", "irc://", "ircs://", "mailto:"].iter().any(|s| lower.starts_with(s)) {

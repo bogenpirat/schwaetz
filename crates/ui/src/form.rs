@@ -6,6 +6,7 @@ use crate::text::{self, Text};
 use crate::theme::Theme;
 use schwaetz_core::config::{NetworkKind, SaslMechanism};
 use schwaetz_core::secrets::{self, SecretKind};
+use schwaetz_core::services::ScriptInfo;
 use schwaetz_core::{Config, NetworkConfig};
 use std::cell::Cell;
 use std::ops::Range;
@@ -29,6 +30,14 @@ pub enum FieldKind {
     Button {
         caption: String,
         note: String,
+    },
+    /// A script file with an on/off switch and its state.
+    Script {
+        name: String,
+        file: String,
+        enabled: bool,
+        note: String,
+        failed: bool,
     },
 }
 
@@ -108,21 +117,59 @@ fn button(key: &'static str, label: &'static str, caption: &str) -> Field {
     Field { key, label, hint: "", kind: FieldKind::Button { caption: caption.into(), note: String::new() } }
 }
 
+fn script_row(s: &ScriptInfo) -> Field {
+    let (note, failed) = script_note(s);
+    let kind = FieldKind::Script { name: s.name.clone(), file: s.file.clone(), enabled: s.enabled, note, failed };
+    Field { key: "script", label: "", hint: "", kind }
+}
+
+/// One line about a script's state, and whether it is an error.
+fn script_note(s: &ScriptInfo) -> (String, bool) {
+    if !s.enabled {
+        return ("Off".into(), false);
+    }
+    if !s.running {
+        return match &s.error {
+            Some(e) => (format!("Failed: {}", e.lines().next().unwrap_or_default()), true),
+            None => ("Starting…".into(), false),
+        };
+    }
+    let mut parts = vec!["Running".to_owned()];
+    if s.network {
+        parts.push("network access".into());
+    }
+    if !s.commands.is_empty() {
+        let shown: Vec<String> = s.commands.iter().take(3).map(|c| format!("/{c}")).collect();
+        let more = if s.commands.len() > 3 { " …" } else { "" };
+        parts.push(format!("{}{more}", shown.join(" ")));
+    }
+    if let Some(e) = &s.error {
+        parts.push(format!("last error: {}", e.lines().next().unwrap_or_default()));
+    }
+    (parts.join(" · "), false)
+}
+
+/// One page per header: (title, field range).
+fn sections(fields: &[Field]) -> Vec<(&'static str, Range<usize>)> {
+    let mut sections: Vec<(&'static str, Range<usize>)> = Vec::new();
+    for (i, f) in fields.iter().enumerate() {
+        match (&f.kind, sections.last_mut()) {
+            (FieldKind::Header, _) => sections.push((f.label, i + 1..i + 1)),
+            (_, Some((_, r))) => r.end = i + 1,
+            (_, None) => sections.push(("General", i..i + 1)),
+        }
+    }
+    sections.retain(|(_, r)| !r.is_empty());
+    sections
+}
+
 fn header(label: &'static str) -> Field {
     Field { key: "", label, hint: "", kind: FieldKind::Header }
 }
 
 impl Form {
     fn new(title: String, kind: FormKind, fields: Vec<Field>) -> Form {
-        let mut sections: Vec<(&'static str, Range<usize>)> = Vec::new();
-        for (i, f) in fields.iter().enumerate() {
-            match (&f.kind, sections.last_mut()) {
-                (FieldKind::Header, _) => sections.push((f.label, i + 1..i + 1)),
-                (_, Some((_, r))) => r.end = i + 1,
-                (_, None) => sections.push(("General", i..i + 1)),
-            }
-        }
-        sections.retain(|(_, r)| !r.is_empty());
+        let sections = sections(&fields);
         let focus = sections.first().map_or(0, |(_, r)| r.start);
         Form {
             title,
@@ -145,6 +192,40 @@ impl Form {
             scrollbar: None,
             grab: None,
         }
+    }
+
+    /// Replaces the script rows with the host's current list, keeping on/off changes that are
+    /// not saved yet.
+    pub fn set_scripts(&mut self, infos: &[ScriptInfo]) {
+        let pending: Vec<(String, bool)> = self
+            .fields
+            .iter()
+            .filter_map(|f| match &f.kind {
+                FieldKind::Script { name, enabled, .. } => Some((name.clone(), *enabled)),
+                _ => None,
+            })
+            .collect();
+        let focused = self.fields.get(self.focus).map(|f| f.key);
+        self.fields.retain(|f| !matches!(f.kind, FieldKind::Script { .. }));
+        let at = self.fields.iter().rposition(|f| f.key.starts_with("scripts_")).map_or(self.fields.len(), |i| i + 1);
+        let rows = infos.iter().map(|s| {
+            let mut s = s.clone();
+            if let Some((_, on)) = pending.iter().find(|(n, _)| *n == s.name) {
+                s.enabled = *on;
+            }
+            script_row(&s)
+        });
+        self.fields.splice(at..at, rows);
+        self.sections = sections(&self.fields);
+        self.section = self.section.min(self.sections.len().saturating_sub(1));
+        if focused != Some("script")
+            && let Some(i) = self.fields.iter().position(|f| Some(f.key) == focused)
+        {
+            self.focus = i;
+        } else if !self.page().contains(&self.focus) {
+            self.focus = self.page().start;
+        }
+        self.dropdown = None;
     }
 
     /// Updates a button field's caption and note.
@@ -273,7 +354,7 @@ impl Form {
         Form::new(title, FormKind::Network { original: cfg.map(|c| c.name.clone()) }, fields)
     }
 
-    pub fn settings(c: &Config) -> Form {
+    pub fn settings(c: &Config, scripts: Option<(&[ScriptInfo], &str)>) -> Form {
         let g = &c.general;
         let a = &c.appearance;
         let fields = vec![
@@ -328,6 +409,22 @@ impl Form {
             check("minimize_to_tray", "Minimize to tray", g.minimize_to_tray),
             check("close_to_tray", "Close to tray", g.close_to_tray),
         ];
+        let mut fields = fields;
+        if let Some((infos, dir)) = scripts {
+            fields.push(header("Scripts"));
+            let mut folder = button("scripts_folder", "Folder", "Open scripts folder");
+            if let FieldKind::Button { note, .. } = &mut folder.kind {
+                *note = dir.to_owned();
+            }
+            fields.push(folder);
+            fields.push(button("scripts_reload", "Reload", "Reload all scripts"));
+            let mut examples = button("scripts_examples", "Examples", "Add example scripts");
+            if let (true, FieldKind::Button { note, .. }) = (infos.is_empty(), &mut examples.kind) {
+                *note = "No scripts yet: start with the examples".into();
+            }
+            fields.push(examples);
+            fields.extend(infos.iter().map(script_row));
+        }
         Form::new("Settings".into(), FormKind::Settings, fields)
     }
 
@@ -501,6 +598,26 @@ impl Form {
         c.general.history_days = history_days;
         c.general.minimize_to_tray = self.check("minimize_to_tray");
         c.general.close_to_tray = self.check("close_to_tray");
+        // Scripts switched off; entries for files that are gone are kept.
+        let rows: Vec<(&str, bool)> = self
+            .fields
+            .iter()
+            .filter_map(|f| match &f.kind {
+                FieldKind::Script { name, enabled, .. } => Some((name.as_str(), *enabled)),
+                _ => None,
+            })
+            .collect();
+        if self.fields.iter().any(|f| f.key == "scripts_folder") {
+            let mut disabled: Vec<String> = c
+                .scripts
+                .disabled
+                .iter()
+                .filter(|d| !rows.iter().any(|(n, _)| n.eq_ignore_ascii_case(d)))
+                .cloned()
+                .collect();
+            disabled.extend(rows.iter().filter(|(_, on)| !on).map(|(n, _)| (*n).to_owned()));
+            c.scripts.disabled = disabled;
+        }
         Ok(())
     }
 
@@ -619,6 +736,20 @@ impl Form {
                     }
                     let knob_x = if *on { bx.right() - 10.0 } else { bx.x + 10.0 };
                     p.circle(knob_x, bx.y + 10.0, 7.0, if *on { th.accent_fg } else { th.text_dim });
+                }
+                FieldKind::Script { file, enabled, note, failed, .. } => {
+                    // File name in the label column, state beside it, switch at the right edge.
+                    let fl = text.layout(file, &f.ui_semibold, LABEL_W - 28.0, 20.0);
+                    p.text(&fl, list.x + 16.0, y + 11.0, th.text);
+                    let nl = text.layout(note, &f.ui, (ctl.w - 56.0).max(1.0), 20.0);
+                    p.text(&nl, ctl.x, ctl.y + 8.0, if *failed { th.error } else { th.text_dim });
+                    let bx = Rect::new(ctl.right() - 40.0, ctl.y + (ctl.h - 20.0) / 2.0, 36.0, 20.0);
+                    p.fill_round(bx, 10.0, if *enabled { th.accent } else { th.badge_bg });
+                    if focused {
+                        p.stroke_round(bx.inset(-2.0, -2.0), 12.0, with_alpha(th.accent, 0.6), 1.0);
+                    }
+                    let knob_x = if *enabled { bx.right() - 10.0 } else { bx.x + 10.0 };
+                    p.circle(knob_x, bx.y + 10.0, 7.0, if *enabled { th.accent_fg } else { th.text_dim });
                 }
                 FieldKind::Button { caption, note } => {
                     let cl = text.layout(caption, &f.ui_semibold, ctl.w, 20.0);
@@ -759,7 +890,7 @@ impl Form {
             return if ctl.contains(x, y) { FormAction::Button(self.fields[i].key) } else { FormAction::None };
         }
         match &mut self.fields[i].kind {
-            FieldKind::Check(on) => *on = !*on,
+            FieldKind::Check(on) | FieldKind::Script { enabled: on, .. } => *on = !*on,
             FieldKind::Choice(_, idx) => {
                 if ctl.contains(x, y) {
                     self.dropdown = Some((i, *idx));
@@ -901,7 +1032,7 @@ impl Form {
                     }
                     _ => {}
                 },
-                FieldKind::Check(on) if v == VK_SPACE => *on = !*on,
+                FieldKind::Check(on) | FieldKind::Script { enabled: on, .. } if v == VK_SPACE => *on = !*on,
                 FieldKind::Choice(_, idx) if v == VK_SPACE || v == VK_F4 => self.dropdown = Some((self.focus, *idx)),
                 FieldKind::Choice(opts, idx) if v == VK_RIGHT => *idx = (*idx + 1) % opts.len(),
                 FieldKind::Choice(opts, idx) if v == VK_LEFT => *idx = (*idx + opts.len() - 1) % opts.len(),
@@ -959,7 +1090,7 @@ mod tests {
     #[test]
     fn settings_form_applies() {
         let mut c = Config::default();
-        let mut f = Form::settings(&c);
+        let mut f = Form::settings(&c, None);
         set(&mut f, "font_size", "15,5");
         set(&mut f, "highlight_words", "rust, irc");
         f.apply_settings(&mut c).unwrap();
@@ -970,9 +1101,36 @@ mod tests {
     }
 
     #[test]
+    fn scripts_page_saves_switched_off_scripts() {
+        let info = |name: &str, enabled: bool| ScriptInfo {
+            name: name.into(),
+            file: format!("{name}.js"),
+            enabled,
+            running: enabled,
+            error: None,
+            network: false,
+            commands: Vec::new(),
+        };
+        let mut c = Config::default();
+        c.scripts.disabled = vec!["gone".into(), "b".into()];
+        let mut f = Form::settings(&c, Some((&[info("a", true), info("b", false)], r"C:\scripts")));
+        assert_eq!(f.sections.last().unwrap().0, "Scripts");
+        // Switch "a" off and "b" on.
+        for field in &mut f.fields {
+            if let FieldKind::Script { enabled, .. } = &mut field.kind {
+                *enabled = !*enabled;
+            }
+        }
+        // A reload keeps unsaved switches and adds new files.
+        f.set_scripts(&[info("a", true), info("b", false), info("c", true)]);
+        f.apply_settings(&mut c).unwrap();
+        assert_eq!(c.scripts.disabled, ["gone", "a"]);
+    }
+
+    #[test]
     fn settings_pages_errors_and_dropdown_keys() {
         let mut c = Config::default();
-        let mut f = Form::settings(&c);
+        let mut f = Form::settings(&c, None);
         let pages: Vec<_> = f.sections.iter().map(|(t, _)| *t).collect();
         assert_eq!(pages, ["Identity", "Appearance", "Chat", "Notifications", "Link previews", "History & window"]);
 

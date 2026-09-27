@@ -15,12 +15,32 @@ pub struct Config {
     pub notifications: Notifications,
     pub highlight: Highlight,
     pub previews: Previews,
+    #[serde(default, skip_serializing_if = "Scripts::is_default")]
+    pub scripts: Scripts,
     #[serde(rename = "ignore", skip_serializing_if = "Vec::is_empty")]
     pub ignores: Vec<IgnoreRule>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub aliases: BTreeMap<String, String>,
     #[serde(rename = "network", skip_serializing_if = "Vec::is_empty")]
     pub networks: Vec<NetworkConfig>,
+}
+
+/// `[scripts]`: which script files stay switched off.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Scripts {
+    /// File names without extension (e.g. "7tv-emotes").
+    pub disabled: Vec<String>,
+}
+
+impl Scripts {
+    fn is_default(&self) -> bool {
+        self.disabled.is_empty()
+    }
+
+    pub fn is_enabled(&self, name: &str) -> bool {
+        !self.disabled.iter().any(|d| d.eq_ignore_ascii_case(name))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

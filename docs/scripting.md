@@ -4,6 +4,12 @@ Scripts are `.js` or `.ts` files in the `scripts` folder (`%APPDATA%\schwaetz\sc
 loaded at startup and reloaded automatically when you save them; `/reload` reloads everything.
 Messages and errors from scripts appear in the **scripts** buffer.
 
+**Settings → Scripts** lists every script with its state (running, off, or why it failed, plus
+its network access and commands). Switch scripts on or off there (applied on Save; stored as
+`[scripts] disabled` in `config.toml`), open the scripts folder, reload everything, or add the
+bundled example scripts (they arrive switched off). A script that fails to load is retried when
+you save the file again.
+
 TypeScript is supported by stripping types (it is not type-checked at runtime). The scripts folder
 contains `schwaetz.d.ts` and a `tsconfig.json`, so editors like VS Code type-check your scripts
 as you write them. The full API is documented in [schwaetz.d.ts](schwaetz.d.ts).
@@ -67,5 +73,6 @@ The scripts buffer shows which scripts have network access when they load.
 
 ## Examples
 
-See `scripts/examples` in the repository: a highlight collector, third-party emotes for Twitch
-(7TV/BTTV/FFZ), and classic `/slap`.
+Settings → Scripts → *Add example scripts* copies them into your scripts folder (switched off),
+or see `scripts/examples` in the repository: a highlight collector, third-party emotes for
+Twitch (7TV/BTTV/FFZ), and classic `/slap`.
