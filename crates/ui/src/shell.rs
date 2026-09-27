@@ -439,6 +439,7 @@ impl Ui {
         self.nicklist.rect = Rect::new(w - nick_w, chat_top, nick_w, h - chat_top);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn chat_ctx<'a>(
         text: &'a Text,
         theme: &'a Theme,
