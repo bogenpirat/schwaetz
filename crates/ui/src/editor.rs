@@ -410,6 +410,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn standard_editing_keys() {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::Input::KeyboardAndMouse::*;
+        let key = |c: u8| VIRTUAL_KEY(c as u16);
+        let mut ed = Editor::single_line();
+        ed.insert("hello");
+        ed.insert(" world");
+        assert!(edit_key(&mut ed, key(b'Z'), true, false, HWND::default()));
+        assert_eq!(ed.text(), "hello");
+        assert!(edit_key(&mut ed, key(b'Y'), true, false, HWND::default()));
+        assert_eq!(ed.text(), "hello world");
+        assert!(edit_key(&mut ed, key(b'Z'), true, false, HWND::default()));
+        assert!(edit_key(&mut ed, key(b'Z'), true, true, HWND::default()), "Ctrl+Shift+Z redoes");
+        assert_eq!(ed.text(), "hello world");
+        assert!(edit_key(&mut ed, key(b'A'), true, false, HWND::default()));
+        assert_eq!(ed.selected_text(), "hello world");
+        assert!(edit_key(&mut ed, VK_BACK, false, false, HWND::default()));
+        assert_eq!(ed.text(), "");
+        assert!(!edit_key(&mut ed, VK_F5, false, false, HWND::default()), "other keys are left alone");
+    }
+
+    #[test]
     fn editing_and_undo() {
         let mut e = Editor::default();
         for c in "hello world".chars() {
@@ -452,4 +474,49 @@ mod tests {
         e.toggle_format('\x02');
         assert_eq!(e.text(), "\x02aé\x02");
     }
+}
+
+/// The standard Windows editing keys, shared by every single-line text box (dialog fields,
+/// quick switcher and filter boxes). Returns `false` for keys it does not handle. Password
+/// boxes (`masked`) never put their text on the clipboard.
+pub fn edit_key(
+    ed: &mut Editor,
+    v: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
+    ctrl: bool,
+    shift: bool,
+    hwnd: windows::Win32::Foundation::HWND,
+) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    let letter = |c: u8| ctrl && v.0 == c as u16;
+    let copyable = ed.has_selection() && !ed.masked;
+    match v {
+        _ if letter(b'A') => ed.select_all(),
+        _ if letter(b'C') || (ctrl && v == VK_INSERT) => {
+            if copyable {
+                crate::win::set_clipboard(hwnd, ed.selected_text());
+            }
+        }
+        _ if letter(b'X') || (shift && v == VK_DELETE) => {
+            if copyable {
+                crate::win::set_clipboard(hwnd, ed.selected_text());
+                ed.backspace(false);
+            }
+        }
+        _ if letter(b'V') || (shift && v == VK_INSERT) => {
+            if let Some(t) = crate::win::get_clipboard(hwnd) {
+                ed.insert(&t);
+            }
+        }
+        _ if letter(b'Z') && shift => ed.redo(),
+        _ if letter(b'Z') => ed.undo(),
+        _ if letter(b'Y') => ed.redo(),
+        VK_LEFT => ed.move_h(false, ctrl, shift),
+        VK_RIGHT => ed.move_h(true, ctrl, shift),
+        VK_HOME => ed.home(shift, true),
+        VK_END => ed.end(shift, true),
+        VK_BACK => ed.backspace(ctrl),
+        VK_DELETE => ed.delete(ctrl),
+        _ => return false,
+    }
+    true
 }

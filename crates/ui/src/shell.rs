@@ -1349,8 +1349,7 @@ impl Ui {
         if self.overlay.is_none()
             && let Some(f) = self.form.as_mut()
         {
-            let hwnd = self.hwnd;
-            let action = f.key(v, ctrl, shift, || win::get_clipboard(hwnd));
+            let action = f.key(v, ctrl, shift, self.hwnd);
             self.form_action(action);
             self.caret_on = true;
             self.invalidate();
@@ -1486,21 +1485,10 @@ impl Ui {
                 }
             }
             _ => {
+                let hwnd = self.hwnd;
                 let Some(ed) = o.editor() else { return false };
-                match v {
-                    VK_LEFT => ed.move_h(false, ctrl, shift),
-                    VK_RIGHT => ed.move_h(true, ctrl, shift),
-                    VK_HOME => ed.home(shift, true),
-                    VK_END => ed.end(shift, true),
-                    VK_BACK => ed.backspace(ctrl),
-                    VK_DELETE => ed.delete(ctrl),
-                    _ if ctrl && v.0 == b'V' as u16 => {
-                        if let Some(t) = win::get_clipboard(self.hwnd) {
-                            ed.insert(&t);
-                        }
-                    }
-                    _ if ctrl && v.0 == b'A' as u16 => ed.select_all(),
-                    _ => return false,
+                if !crate::editor::edit_key(ed, v, ctrl, shift, hwnd) {
+                    return false;
                 }
                 o.refresh(&self.app);
             }

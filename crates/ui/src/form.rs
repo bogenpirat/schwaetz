@@ -998,7 +998,7 @@ impl Form {
         v: VIRTUAL_KEY,
         ctrl: bool,
         shift: bool,
-        clipboard: impl FnOnce() -> Option<String>,
+        hwnd: windows::Win32::Foundation::HWND,
     ) -> FormAction {
         if let Some((fi, hi)) = self.dropdown {
             let n = match &self.fields[fi].kind {
@@ -1036,21 +1036,9 @@ impl Form {
             VK_DOWN => self.move_focus(1),
             VK_UP => self.move_focus(-1),
             _ => match &mut self.fields[self.focus].kind {
-                FieldKind::Text(ed) | FieldKind::Password(ed, _) => match v {
-                    VK_LEFT => ed.move_h(false, ctrl, shift),
-                    VK_RIGHT => ed.move_h(true, ctrl, shift),
-                    VK_HOME => ed.home(shift, true),
-                    VK_END => ed.end(shift, true),
-                    VK_BACK => ed.backspace(ctrl),
-                    VK_DELETE => ed.delete(ctrl),
-                    _ if ctrl && v.0 == b'A' as u16 => ed.select_all(),
-                    _ if ctrl && v.0 == b'V' as u16 => {
-                        if let Some(t) = clipboard() {
-                            ed.insert(&t);
-                        }
-                    }
-                    _ => {}
-                },
+                FieldKind::Text(ed) | FieldKind::Password(ed, _) => {
+                    crate::editor::edit_key(ed, v, ctrl, shift, hwnd);
+                }
                 FieldKind::Check(on) if v == VK_SPACE => *on = !*on,
                 FieldKind::Script { name, enabled, .. } if v == VK_SPACE => {
                     return FormAction::ScriptSwitch { name: name.clone(), enabled: !*enabled };
@@ -1084,6 +1072,7 @@ fn chevron(p: &Painter, cx: f32, cy: f32, up: bool, c: crate::gfx::Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Foundation::HWND;
 
     fn set(form: &mut Form, key: &str, value: &str) {
         let f = form.fields.iter_mut().find(|f| f.key == key).unwrap();
@@ -1142,7 +1131,7 @@ mod tests {
         // Space on a script row asks to switch it right away instead of waiting for Save.
         f.focus =
             f.fields.iter().position(|x| matches!(&x.kind, FieldKind::Script { name, .. } if name == "b")).unwrap();
-        let action = f.key(VK_SPACE, false, false, || None);
+        let action = f.key(VK_SPACE, false, false, HWND::default());
         assert!(matches!(action, FormAction::ScriptSwitch { ref name, enabled: true } if name == "b"));
 
         // The rows then show what the host reports, and the focus stays on the same script.
@@ -1170,12 +1159,12 @@ mod tests {
         assert_eq!((f.section, f.fields[f.focus].key), (0, "nick"));
 
         // Keyboard: Ctrl+Tab to Appearance, Space opens the theme dropdown, Down + Enter picks.
-        f.key(VK_TAB, true, false, || None);
+        f.key(VK_TAB, true, false, HWND::default());
         assert_eq!(f.fields[f.focus].key, "theme");
-        f.key(VK_SPACE, false, false, || None);
+        f.key(VK_SPACE, false, false, HWND::default());
         assert!(f.dropdown.is_some());
-        f.key(VK_DOWN, false, false, || None);
-        f.key(VK_RETURN, false, false, || None);
+        f.key(VK_DOWN, false, false, HWND::default());
+        f.key(VK_RETURN, false, false, HWND::default());
         assert!(f.dropdown.is_none());
         assert_eq!(f.choice("theme"), "dark");
     }
