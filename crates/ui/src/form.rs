@@ -918,6 +918,22 @@ impl Form {
         self.scroll = t * (self.content_h - self.list_h).max(0.0);
     }
 
+    /// The text box under a right-click (focused for its edit menu).
+    pub fn editor_at(&mut self, win: Rect, x: f32, y: f32) -> Option<&mut Editor> {
+        if self.dropdown.is_some() || !self.list_rect(win).contains(x, y) {
+            return None;
+        }
+        let &(i, _, _) = self.rows.iter().find(|(_, _, ctl)| ctl.contains(x, y))?;
+        if !matches!(self.fields[i].kind, FieldKind::Text(_) | FieldKind::Password(..)) {
+            return None;
+        }
+        self.focus = i;
+        match &mut self.fields[i].kind {
+            FieldKind::Text(ed) | FieldKind::Password(ed, _) => Some(ed),
+            _ => None,
+        }
+    }
+
     /// Whether the pointer is over a text box (for the I-beam cursor).
     pub fn text_at(&self, x: f32, y: f32) -> bool {
         self.dropdown.is_none()

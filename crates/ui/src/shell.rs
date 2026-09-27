@@ -1851,7 +1851,22 @@ impl Ui {
     }
 
     fn right_click(&mut self, x: f32, y: f32) {
+        // A dialog covers the window: only its own text boxes get a (text editing) menu.
+        if let Some(f) = self.form.as_mut() {
+            if let Some(ed) = f.editor_at(self.win_rect, x, y) {
+                edit_menu(self.hwnd, ed);
+            }
+            self.caret_on = true;
+            self.invalidate();
+            return;
+        }
         if self.overlay.is_some() {
+            return;
+        }
+        if self.input_rect.contains(x, y) {
+            edit_menu(self.hwnd, &mut self.input);
+            self.caret_on = true;
+            self.invalidate();
             return;
         }
         if let Some((SidebarButton::Status, _)) = self.sidebar.button_at(x, y) {
@@ -2685,5 +2700,34 @@ fn twitch_account_button(app: &App, net: Option<schwaetz_net::NetworkId>) -> (&'
         Some("") => ("Sign out", "Signed in".into()),
         Some(login) => ("Sign out", format!("Signed in as {login}")),
         None => ("Sign in with Twitch", "Used for live status".into()),
+    }
+}
+
+/// Undo / Cut / Copy / Paste / Select all for a text box. Password boxes never put their text on
+/// the clipboard.
+fn edit_menu(hwnd: HWND, ed: &mut Editor) {
+    let copyable = ed.has_selection() && !ed.masked;
+    let mut items = vec![MenuItem::Item(1, "Undo"), MenuItem::Separator];
+    if copyable {
+        items.push(MenuItem::Item(2, "Cut"));
+        items.push(MenuItem::Item(3, "Copy"));
+    }
+    items.push(MenuItem::Item(4, "Paste"));
+    items.push(MenuItem::Separator);
+    items.push(MenuItem::Item(5, "Select all"));
+    match win::popup_menu(hwnd, &items) {
+        1 => ed.undo(),
+        2 => {
+            win::set_clipboard(hwnd, ed.selected_text());
+            ed.backspace(false);
+        }
+        3 => win::set_clipboard(hwnd, ed.selected_text()),
+        4 => {
+            if let Some(t) = win::get_clipboard(hwnd) {
+                ed.insert(&t);
+            }
+        }
+        5 => ed.select_all(),
+        _ => {}
     }
 }
