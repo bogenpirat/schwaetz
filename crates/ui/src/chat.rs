@@ -2,7 +2,7 @@
 
 use crate::gfx::{Painter, Rect, with_alpha};
 use crate::text::{self, BgRun, Brushes, Text, U16Map};
-use crate::theme::{Theme, ensure_contrast};
+use crate::theme::Theme;
 use schwaetz_core::buffer::{Buffer, BufferId, Line, LineFlags, LineKind};
 use schwaetz_core::time;
 use std::collections::HashMap;
@@ -1110,11 +1110,12 @@ pub fn pick_nick_color(
     twitch: Option<u32>,
     nick: &str,
 ) -> crate::gfx::Color {
+    // The color from the `color` tag, exactly as sent (own lines carry the one from USERSTATE).
+    if twitch_colors && let Some(rgb) = twitch {
+        return crate::gfx::hex(rgb);
+    }
     if own {
         return th.own_nick;
-    }
-    if twitch_colors && let Some(rgb) = twitch {
-        return ensure_contrast(crate::gfx::hex(rgb), th.chat_bg, 3.0);
     }
     if palette { th.nick_color(nick) } else { th.text }
 }
@@ -1127,7 +1128,7 @@ mod tests {
     fn twitch_colors_and_palette_are_separate() {
         let th = Theme::dark();
         let red = Some(0xff0000);
-        let twitch_red = ensure_contrast(crate::gfx::hex(0xff0000), th.chat_bg, 3.0);
+        let twitch_red = crate::gfx::hex(0xff0000);
         // Twitch colors on: used whatever the palette setting says.
         assert_eq!(pick_nick_color(&th, false, true, false, red, "alice"), twitch_red);
         assert_eq!(pick_nick_color(&th, true, true, false, red, "alice"), twitch_red);
@@ -1137,6 +1138,12 @@ mod tests {
         // Users without a Twitch color, and yourself.
         assert_eq!(pick_nick_color(&th, true, true, false, None, "bob"), th.nick_color("bob"));
         assert_eq!(pick_nick_color(&th, false, true, false, None, "bob"), th.text);
-        assert_eq!(pick_nick_color(&th, true, true, true, red, "me"), th.own_nick);
+        // Your own lines use your Twitch color too; the theme's own-nick color without one.
+        assert_eq!(pick_nick_color(&th, true, true, true, red, "me"), twitch_red);
+        assert_eq!(pick_nick_color(&th, true, false, true, red, "me"), th.own_nick);
+        assert_eq!(pick_nick_color(&th, true, true, true, None, "me"), th.own_nick);
+        // Dark colors are not lightened.
+        let navy = Some(0x000080);
+        assert_eq!(pick_nick_color(&th, true, true, false, navy, "carol"), crate::gfx::hex(0x000080));
     }
 }

@@ -30,7 +30,7 @@ auto_connect = true
 | `rejoin_on_kick`, `sasl_required`, `previews` | As named |
 | `flood_burst`, `flood_interval_ms` | Flood control: burst size, then one line per interval |
 | `live_check_secs` | Twitch: seconds between live checks (default 120, at least 30) |
-| `twitch_colors` | Twitch: show the name colors users picked in the chat (default on), whatever `colored_nicks` says |
+| `twitch_colors` | Twitch: show the name colors users picked in the chat, exactly as Twitch sends them (your own included; default on), whatever `colored_nicks` says |
 | `twitch_popout` | Twitch: "Open stream" (topic bar button, channel menu) opens the popout player instead of the channel page |
 | `twitch_live_first` | Twitch: list live channels before offline ones in the sidebar, each group in your arranged order |
 | `channel_order` | Sidebar order of the channels; drag channels in the sidebar to arrange them (empty = alphabetical, unlisted channels go last) |
