@@ -52,6 +52,9 @@ pub struct Sidebar {
     content_h: f32,
     buttons: Vec<(SidebarButton, Rect)>,
     pub button_hover: Option<SidebarButton>,
+    /// Settings buttons at the right end of network rows: (server buffer, bounds).
+    net_buttons: Vec<(BufferId, Rect)>,
+    pub net_button_hover: Option<BufferId>,
 }
 
 impl Sidebar {
@@ -63,6 +66,7 @@ impl Sidebar {
     pub fn render(&mut self, p: &Painter, text: &Text, th: &Theme, app: &App) {
         let f = &text.fonts;
         self.rows.clear();
+        self.net_buttons.clear();
         let list = self.list_rect();
         p.clip(list);
         let x = list.x;
@@ -82,7 +86,23 @@ impl Sidebar {
             let r = Rect::new(x + 8.0 + indent, row_y, w - 16.0 - indent, row_h);
             let active = app.active == id;
             row_background(p, th, r, active, self.hover == Some(id));
-            let right = badge(p, text, th, b, active, r);
+            // Networks have a settings button at the very right; the unread badge sits before it.
+            let badge_area = if is_net {
+                let gear = Rect::new(r.right() - 30.0, r.y + (r.h - 26.0) / 2.0, 26.0, 26.0);
+                let hovered = self.net_button_hover == Some(id);
+                if hovered {
+                    p.fill_round(gear, 5.0, th.sidebar_hover);
+                }
+                let g = text.layout(ICON_SETTINGS, &f.icons, gear.w, gear.h);
+                let m = text::metrics(&g);
+                let color = if hovered { th.sidebar_header } else { th.sidebar_dim };
+                p.text(&g, gear.x + (gear.w - m.width) / 2.0, gear.y + (gear.h - m.height) / 2.0, color);
+                self.net_buttons.push((id, gear));
+                Rect::new(r.x, r.y, gear.x - 2.0 - r.x, r.h)
+            } else {
+                r
+            };
+            let right = badge(p, text, th, b, active, badge_area);
 
             if is_net {
                 let net = b.network.and_then(|n| app.network(n));
@@ -189,6 +209,14 @@ impl Sidebar {
             return None;
         }
         self.rows.iter().find(|r| y >= r.y && y < r.y + r.h).map(|r| r.id)
+    }
+
+    /// The settings button of a network row under the pointer: (server buffer, bounds).
+    pub fn network_button_at(&self, x: f32, y: f32) -> Option<(BufferId, Rect)> {
+        if !self.list_rect().contains(x, y) {
+            return None;
+        }
+        self.net_buttons.iter().find(|(_, r)| r.contains(x, y)).copied()
     }
 
     /// The footer button under the pointer, with its bounds.
