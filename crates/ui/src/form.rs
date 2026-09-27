@@ -385,7 +385,7 @@ impl Form {
             text("highlight_words", "Highlight words", "comma-separated", &c.highlight.words.join(", ")),
             text("scrollback_lines", "Lines kept in memory", "", &g.scrollback_lines.to_string()),
             check("ctcp_replies", "Answer CTCP requests", g.ctcp_replies),
-            check("remember_channels", "Rejoin channels after restart", g.remember_channels),
+            check("remember_channels", "Keep \"Join on connect\" in sync with joins and parts", g.remember_channels),
             header("Notifications"),
             check("on_highlight", "Notify on highlights", c.notifications.on_highlight),
             check("on_private", "Notify on private messages", c.notifications.on_private),

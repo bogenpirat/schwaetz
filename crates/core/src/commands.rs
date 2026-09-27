@@ -330,6 +330,7 @@ impl App {
                     Some(b) => (b.kind, b.name.clone(), b.network, b.joined),
                     None => return,
                 };
+                let channel = name.clone();
                 if kind == BufferKind::Channel
                     && joined
                     && let Some(net) = net
@@ -341,6 +342,12 @@ impl App {
                         p.push(reason);
                     }
                     self.raw(net, Message::new("PART", p), buffer);
+                }
+                // Closing a channel (joined or not, e.g. after a kick) takes it off "Join on connect".
+                if kind == BufferKind::Channel
+                    && let Some(net) = net
+                {
+                    self.remember_channel(net, &channel, false);
                 }
                 self.close_buffer(buffer);
             }
@@ -368,6 +375,7 @@ impl App {
                 let Some(net) = self.require_net(buffer) else { return };
                 let (chan, reason) = self.channel_arg(buffer, args);
                 let Some(chan) = chan else { return self.usage(buffer, "part") };
+                let chan_name = chan.clone();
                 let reason =
                     if reason.is_empty() { self.config.general.part_message.clone() } else { reason.to_owned() };
                 let mut p = vec![chan];
@@ -375,6 +383,8 @@ impl App {
                     p.push(reason);
                 }
                 self.raw(net, Message::new("PART", p), buffer);
+                // Leaving by hand takes the channel off "Join on connect" (not waiting for the echo).
+                self.remember_channel(net, &chan_name, false);
             }
             "cycle" | "rejoin" => {
                 let Some(net) = self.require_net(buffer) else { return };

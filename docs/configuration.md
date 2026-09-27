@@ -60,6 +60,10 @@ and going live, going offline and title or game changes are printed in the chann
 `smart_filter_secs`, `ctcp_replies`, `log_to_files`, `history_days` (0 = keep forever),
 `confirm_paste_lines`, `remember_channels`, `minimize_to_tray`, `close_to_tray`.
 
+With `remember_channels` (on by default) each network's `autojoin` list ("Join on connect") follows
+what you do: channels you join are added, and channels you leave with `/part` or by closing their
+window are removed. Being kicked or `/cycle` keeps a channel on the list.
+
 ## Appearance (`[appearance]`)
 
 `theme` (`system`, `dark`, `light`, or the name of a file in `themes\`), `font`, `font_size`,

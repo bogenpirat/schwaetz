@@ -645,3 +645,40 @@ fn twitch_sign_in_feeds_live_checks_and_refreshes_on_401() {
     h.app.reload_twitch_auth(h.net);
     assert_eq!(h.app.twitch_auth(h.net).unwrap().access_token(), None);
 }
+
+#[test]
+fn join_on_connect_list_follows_manual_joins_and_parts() {
+    let mut h = Harness::new(NetworkKind::Irc, &["#keep"]);
+    h.register();
+    h.lines(&[":me!u@h JOIN #keep"]);
+    let list = |h: &Harness| h.app.config.networks[0].autojoin.clone();
+
+    // Joining adds; the confirmation of a /part removes (and /part removes right away).
+    h.app.input(h.buffer("#keep"), "/join #new");
+    h.lines(&[":me!u@h JOIN #new"]);
+    assert_eq!(list(&h), ["#keep", "#new"]);
+    let new = h.buffer("#new");
+    h.app.input(new, "/part");
+    assert_eq!(list(&h), ["#keep"]);
+    h.lines(&[":me!u@h PART #new"]);
+    assert_eq!(list(&h), ["#keep"]);
+
+    // Closing a joined channel removes it, even though its buffer is gone before the echo.
+    h.lines(&[":me!u@h JOIN #closeme"]);
+    assert_eq!(list(&h), ["#keep", "#closeme"]);
+    h.app.input(h.buffer("#closeme"), "/close");
+    h.lines(&[":me!u@h PART #closeme"]);
+    assert_eq!(list(&h), ["#keep"]);
+
+    // A kick is not the user leaving; closing the buffer afterwards is.
+    h.lines(&[":me!u@h JOIN #kicked", ":op!o@h KICK #kicked me :bye"]);
+    assert_eq!(list(&h), ["#keep", "#kicked"]);
+    h.app.input(h.buffer("#kicked"), "/close");
+    assert_eq!(list(&h), ["#keep"]);
+
+    // /cycle parts and rejoins: the channel stays.
+    h.app.input(h.buffer("#keep"), "/cycle");
+    h.lines(&[":me!u@h PART #keep", ":me!u@h JOIN #keep"]);
+    assert_eq!(list(&h), ["#keep"]);
+    assert!(h.app.take_effects().iter().any(|e| matches!(e, Effect::SaveConfig)), "changes are saved");
+}

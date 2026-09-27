@@ -1005,13 +1005,15 @@ impl App {
                 self.on_join(net_id, &channel, &user, account, own, time, false)
             }
             Event::Part { channel, user, reason, own } => {
+                // Before the buffer lookup: closing a channel removes its buffer before the
+                // server confirms the part.
+                if own {
+                    self.remember_channel(net_id, &channel, false);
+                }
                 let bid = self.find_buffer(net_id, &channel);
                 let Some(bid) = bid else { return };
                 if own && let Some(b) = self.buffer_mut(bid) {
                     b.joined = false;
-                }
-                if own {
-                    self.remember_channel(net_id, &channel, false);
                 }
                 let text = format!(
                     "{} has left {channel}{}",
@@ -2160,7 +2162,7 @@ impl App {
 impl App {
     /// Keeps the network's autojoin list in sync with the channels the user is in, so they are
     /// rejoined after a restart (`general.remember_channels`).
-    fn remember_channel(&mut self, net: NetworkId, channel: &str, joined: bool) {
+    pub(crate) fn remember_channel(&mut self, net: NetworkId, channel: &str, joined: bool) {
         if !self.config.general.remember_channels {
             return;
         }
