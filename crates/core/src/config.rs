@@ -105,8 +105,11 @@ pub struct Appearance {
     pub ui_font: String,
     /// strftime-like: %H %M %S %d %m %Y are supported.
     pub timestamp_format: String,
-    /// Right-align nicks in a fixed column (weechat style).
+    /// Right-align nicks in a column (weechat style).
     pub nick_column: bool,
+    /// Fit the nick column to the longest name (with badges) in the buffer; otherwise it is
+    /// `nick_column_width` characters wide.
+    pub nick_column_auto: bool,
     pub nick_column_width: u32,
     pub show_nicklist: bool,
     pub colored_nicks: bool,
@@ -129,6 +132,7 @@ impl Default for Appearance {
             ui_font: "Segoe UI Variable Text".into(),
             timestamp_format: "%H:%M".into(),
             nick_column: true,
+            nick_column_auto: true,
             nick_column_width: 14,
             show_nicklist: true,
             colored_nicks: true,

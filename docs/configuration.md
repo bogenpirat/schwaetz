@@ -82,7 +82,9 @@ window are removed. Being kicked or `/cycle` keeps a channel on the list.
 
 `theme` (`system`, `dark`, `light`, or the name of a file in `themes\`), `font`, `font_size`,
 `ui_font`, `timestamp_format` (`%H %M %S %d %m %Y %y %A %B`), `nick_column`,
-`nick_column_width`, `show_nicklist`, `colored_nicks`, `show_mirc_colors`, `unread_badges`, `mica`,
+`nick_column_auto` (fit the nick column to the longest name in the buffer, badges included, up
+to 40% of the chat's width; on by default), `nick_column_width` (the column's width in
+characters when `nick_column_auto` is off), `show_nicklist`, `colored_nicks`, `show_mirc_colors`, `unread_badges`, `mica`,
 `gpu_acceleration` (off by default: the CPU rasterizer is fast enough for text and saves the GPU
 driver's ~50 MB). `colored_nicks` colors names from the theme's palette: in the member list, and
 in the chat for names without a Twitch color (see the network setting `twitch_colors`).

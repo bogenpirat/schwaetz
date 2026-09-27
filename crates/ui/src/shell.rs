@@ -503,6 +503,7 @@ impl Ui {
             gfx_gen: dgen,
             ts_format: &a.timestamp_format,
             nick_column: a.nick_column,
+            nick_column_auto: a.nick_column_auto,
             nick_column_chars: a.nick_column_width,
             colors: a.show_mirc_colors,
             colored_nicks: a.colored_nicks,

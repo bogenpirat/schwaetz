@@ -106,7 +106,8 @@ pub struct ChatView {
     /// Bottom edge of the anchor line, relative to `rect.y`.
     anchor_y: f32,
     cache: HashMap<u64, Cached>,
-    cache_key: (u32, u64, u64),
+    /// Chat width, nick column width, graphics and style generation the cache was built for.
+    cache_key: (u32, u32, u64, u64),
     frame: u64,
     drawn: Vec<Drawn>,
     pub selection: Option<(Pos, Pos)>,
@@ -123,6 +124,22 @@ pub struct ChatView {
     order: HashMap<u64, usize>,
     /// Line id → sender nick for drawn lines (nick-column clicks).
     nicks: HashMap<u64, String>,
+    /// The nick column fitted to the buffer's names (`Ctx::nick_column_auto`).
+    nick_fit: NickFit,
+    /// Measured widths of nick column texts (badges, status prefix and name).
+    nick_widths: HashMap<String, f32>,
+}
+
+/// Width of the widest nick column text in a buffer, kept up to date as lines arrive.
+#[derive(Default)]
+struct NickFit {
+    /// Buffer, graphics generation, style generation and filter setting it was measured for.
+    key: (Option<BufferId>, u64, u64, bool),
+    /// Buffer generation last scanned.
+    seen: Option<u64>,
+    /// Lines up to this id were measured.
+    upto: u64,
+    width: f32,
 }
 
 pub struct Ctx<'a> {
@@ -135,6 +152,8 @@ pub struct Ctx<'a> {
     pub gfx_gen: u64,
     pub ts_format: &'a str,
     pub nick_column: bool,
+    /// Fit the nick column to the names in the buffer instead of `nick_column_chars`.
+    pub nick_column_auto: bool,
     pub nick_column_chars: u32,
     pub colors: bool,
     pub colored_nicks: bool,
@@ -159,7 +178,7 @@ impl Default for ChatView {
             anchor: None,
             anchor_y: 0.0,
             cache: HashMap::new(),
-            cache_key: (0, 0, 0),
+            cache_key: (0, 0, 0, 0),
             frame: 0,
             drawn: Vec::new(),
             selection: None,
@@ -171,6 +190,8 @@ impl Default for ChatView {
             hover: None,
             order: HashMap::new(),
             nicks: HashMap::new(),
+            nick_fit: NickFit::default(),
+            nick_widths: HashMap::new(),
         }
     }
 }
@@ -200,7 +221,15 @@ impl ChatView {
         let f = &c.text.fonts;
         let sample = time::format(c.ts_format, time::breakdown(0));
         let ts_w = if c.ts_format.is_empty() { 0.0 } else { sample.chars().count() as f32 * f.char_width * 0.95 + 4.0 };
-        let nick_w = if c.nick_column { c.nick_column_chars.clamp(4, 40) as f32 * f.char_width } else { 0.0 };
+        let nick_w = if !c.nick_column {
+            0.0
+        } else if c.nick_column_auto {
+            // Room for the longest name, but never most of the pane (longer ones get an ellipsis).
+            let max = (self.rect.w * 0.4).max(f.char_width * 8.0);
+            (self.nick_fit.width.ceil() + 1.0).clamp(f.char_width * 3.0, max)
+        } else {
+            c.nick_column_chars.clamp(4, 40) as f32 * f.char_width
+        };
         let msg_x = PAD_X + ts_w + if c.nick_column { nick_w + 12.0 } else { 6.0 };
         Metrics { ts_w, nick_w, msg_x }
     }
@@ -374,36 +403,7 @@ impl ChatView {
 
         // Nick column.
         let nick = if c.nick_column {
-            let (sym, name) = match line.kind {
-                LineKind::Message => (String::new(), nick_display.clone()),
-                LineKind::Action => (String::new(), "•".to_owned()),
-                LineKind::Notice => (String::new(), format!("-{nick_display}-")),
-                LineKind::Join => (String::new(), "→".into()),
-                LineKind::Part | LineKind::Quit | LineKind::Kick | LineKind::Netsplit => (String::new(), "←".into()),
-                LineKind::Nick => (String::new(), "⇄".into()),
-                LineKind::Error => (String::new(), "!".into()),
-                LineKind::System => (String::new(), "★".into()),
-                LineKind::Topic | LineKind::Mode | LineKind::Invite => (String::new(), "–".into()),
-                LineKind::Server | LineKind::Status | LineKind::Ctcp if !line.nick.is_empty() => {
-                    (String::new(), nick_display.clone())
-                }
-                _ => (String::new(), "·".into()),
-            };
-            let mut full = sym;
-            let badges: String = line
-                .extra
-                .as_ref()
-                .map(|e| {
-                    e.badges.iter().map(|b| schwaetz_core::twitch::badge_label(b)).filter(|s| !s.is_empty()).collect()
-                })
-                .unwrap_or_default();
-            if matches!(line.kind, LineKind::Message) {
-                full.push_str(&badges);
-                if let Some(p) = line.prefix {
-                    full.push(p);
-                }
-            }
-            full.push_str(&name);
+            let (full, pre16) = nick_column_text(line);
             let l = c.text.layout(&full, &f.nick, m.nick_w, 100.0);
             let color = match line.kind {
                 LineKind::Message | LineKind::Action => nick_color,
@@ -417,8 +417,6 @@ impl ChatView {
             let br = c.brushes.get(c.dc, c.gfx_gen, color);
             let n16 = full.encode_utf16().count() as u32;
             text::set_color(&l, &br, 0, n16);
-            let pre16 = (badges.encode_utf16().count()
-                + usize::from(line.prefix.is_some() && line.kind == LineKind::Message)) as u32;
             if pre16 > 0 {
                 let dim = c.brushes.get(c.dc, c.gfx_gen, th.text_dim);
                 text::set_color(&l, &dim, 0, pre16);
@@ -600,7 +598,8 @@ impl ChatView {
     }
 
     fn check_cache_key(&mut self, c: &Ctx) {
-        let key = (self.rect.w.round() as u32, c.gfx_gen, self.style_gen);
+        // Message text wraps at a width that depends on the chat and nick column widths.
+        let key = (self.rect.w.round() as u32, self.metrics(c).nick_w.round() as u32, c.gfx_gen, self.style_gen);
         if key != self.cache_key {
             self.cache.clear();
             self.cache_key = key;
@@ -609,6 +608,7 @@ impl ChatView {
 
     /// Scrolls by `dy` DIPs (positive = towards older lines).
     pub fn scroll(&mut self, c: &mut Ctx, b: &Buffer, dy: f32) {
+        self.fit_nicks(c, b);
         self.check_cache_key(c);
         let vis: Vec<usize> = (0..b.lines.len()).filter(|&i| visible(&b.lines[i], self.show_filtered)).collect();
         if vis.is_empty() {
@@ -661,6 +661,44 @@ impl ChatView {
         self.anchor = Some(b.lines[vis[ai]].id);
     }
 
+    /// Widens the fitted nick column for lines added since the last call (all lines after a
+    /// buffer switch or a font change). While a buffer is shown it only grows, so the messages
+    /// don't shift back and forth as lines arrive and scroll out.
+    fn fit_nicks(&mut self, c: &Ctx, b: &Buffer) {
+        if !c.nick_column || !c.nick_column_auto {
+            return;
+        }
+        let key = (self.buffer, c.gfx_gen, self.style_gen, self.show_filtered);
+        if key != self.nick_fit.key || b.lines.is_empty() {
+            self.nick_fit = NickFit { key, ..Default::default() };
+        }
+        if self.nick_fit.seen == Some(b.generation) {
+            return;
+        }
+        self.nick_fit.seen = Some(b.generation);
+        if self.nick_widths.len() > 20_000 {
+            self.nick_widths.clear();
+        }
+        let upto = self.nick_fit.upto;
+        for line in b.lines.iter().filter(|l| l.id > upto) {
+            self.nick_fit.upto = self.nick_fit.upto.max(line.id);
+            if !visible(line, self.show_filtered) {
+                continue;
+            }
+            let (full, _) = nick_column_text(line);
+            let w = match self.nick_widths.get(&full) {
+                Some(w) => *w,
+                None => {
+                    let l = c.text.layout(&full, &c.text.fonts.nick, 10_000.0, 100.0);
+                    let w = text::metrics(&l).widthIncludingTrailingWhitespace;
+                    self.nick_widths.insert(full, w);
+                    w
+                }
+            };
+            self.nick_fit.width = self.nick_fit.width.max(w);
+        }
+    }
+
     fn anchor_index(&self, b: &Buffer, vis: &[usize]) -> usize {
         match self.anchor {
             Some(id) => vis.iter().rposition(|&i| b.lines[i].id == id).unwrap_or(vis.len() - 1),
@@ -675,6 +713,7 @@ impl ChatView {
 
     pub fn render(&mut self, p: &Painter, c: &mut Ctx, b: &Buffer) {
         self.frame += 1;
+        self.fit_nicks(c, b);
         self.check_cache_key(c);
         let th = c.theme;
         p.fill(self.rect, th.chat_bg);
@@ -1102,6 +1141,38 @@ impl ChatView {
 /// The color of a nick in the chat. Your own nick keeps its color. A Twitch user's chosen color
 /// (made readable on the background) is used when the network shows Twitch colors
 /// (`twitch_colors`); otherwise "Colored nicks" (`palette`) picks a theme color, or the text color.
+/// What the nick column shows for a line: Twitch badges and the status prefix (messages only),
+/// then the name or a symbol for the line kind. Also returns the length (UTF-16) of the part
+/// before the name, which is drawn dimmed.
+fn nick_column_text(line: &Line) -> (String, u32) {
+    let nick = line.display_nick();
+    let name = match line.kind {
+        LineKind::Message => nick.to_owned(),
+        LineKind::Action => "•".to_owned(),
+        LineKind::Notice => format!("-{nick}-"),
+        LineKind::Join => "→".into(),
+        LineKind::Part | LineKind::Quit | LineKind::Kick | LineKind::Netsplit => "←".into(),
+        LineKind::Nick => "⇄".into(),
+        LineKind::Error => "!".into(),
+        LineKind::System => "★".into(),
+        LineKind::Topic | LineKind::Mode | LineKind::Invite => "–".into(),
+        LineKind::Server | LineKind::Status | LineKind::Ctcp if !line.nick.is_empty() => nick.to_owned(),
+        _ => "·".into(),
+    };
+    let mut full = String::new();
+    if line.kind == LineKind::Message {
+        if let Some(e) = line.extra.as_ref() {
+            full.extend(e.badges.iter().map(|b| schwaetz_core::twitch::badge_label(b)));
+        }
+        if let Some(p) = line.prefix {
+            full.push(p);
+        }
+    }
+    let pre16 = full.encode_utf16().count() as u32;
+    full.push_str(&name);
+    (full, pre16)
+}
+
 pub fn pick_nick_color(
     th: &Theme,
     palette: bool,

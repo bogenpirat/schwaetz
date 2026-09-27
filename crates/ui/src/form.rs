@@ -415,6 +415,7 @@ impl Form {
             text("font_size", "Font size", "", &a.font_size.to_string()),
             text("timestamp_format", "Timestamp format", "%H:%M, %H:%M:%S; empty hides", &a.timestamp_format),
             check("nick_column", "Align nicks in a column", a.nick_column),
+            check("nick_column_auto", "Fit the nick column to the names", a.nick_column_auto),
             check("colored_nicks", "Colored nicks (theme palette)", a.colored_nicks),
             check("show_mirc_colors", "Show mIRC colors", a.show_mirc_colors),
             check("show_nicklist", "Show member list", a.show_nicklist),
@@ -629,6 +630,7 @@ impl Form {
         c.appearance.font_size = font_size;
         c.appearance.timestamp_format = self.text("timestamp_format");
         c.appearance.nick_column = self.check("nick_column");
+        c.appearance.nick_column_auto = self.check("nick_column_auto");
         c.appearance.colored_nicks = self.check("colored_nicks");
         c.appearance.show_mirc_colors = self.check("show_mirc_colors");
         c.appearance.show_nicklist = self.check("show_nicklist");
