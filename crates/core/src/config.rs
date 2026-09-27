@@ -289,6 +289,8 @@ pub struct NetworkConfig {
     /// Twitch: show the name colors users picked (the `color` tag) in the chat, independently of
     /// `appearance.colored_nicks`.
     pub twitch_colors: bool,
+    /// Twitch: "Open stream" opens the popout player instead of the channel page.
+    pub twitch_popout: bool,
 }
 
 impl Default for NetworkConfig {
@@ -322,6 +324,7 @@ impl Default for NetworkConfig {
             twitch_client_id: None,
             live_check_secs: 120,
             twitch_colors: true,
+            twitch_popout: false,
         }
     }
 }

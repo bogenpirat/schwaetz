@@ -29,6 +29,8 @@ pub enum Control {
     Reply(u64),
     ReplyClose,
     JumpPill,
+    /// "Open stream" in the topic bar of Twitch channels.
+    OpenStream,
 }
 
 impl Control {

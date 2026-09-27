@@ -2096,6 +2096,19 @@ impl App {
         }
     }
 
+    /// Where "Open stream" goes for a Twitch channel buffer: the channel page, or the popout player
+    /// when the network is set to `twitch_popout`.
+    pub fn twitch_stream_url(&self, buffer: BufferId) -> Option<String> {
+        let b = self.buffer(buffer).filter(|b| b.kind == BufferKind::Channel)?;
+        let n = self.networks.get(&b.network?).filter(|n| n.is_twitch())?;
+        let login = b.name.trim_start_matches('#').to_ascii_lowercase();
+        Some(if n.cfg.twitch_popout {
+            format!("https://player.twitch.tv/?channel={login}&parent=twitch.tv&player=popout")
+        } else {
+            format!("https://www.twitch.tv/{login}")
+        })
+    }
+
     /// The Twitch channel page of a user (the login name), when `buffer` is on Twitch.
     pub fn twitch_profile_url(&self, buffer: BufferId, login: &str) -> Option<String> {
         let net = self.buffer(buffer)?.network?;

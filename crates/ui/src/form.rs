@@ -374,6 +374,7 @@ impl Form {
             password("twitch_api", "Manual API token", has(SecretKind::TwitchApi)),
             text("live_check_secs", "Live check every (seconds)", "at least 30", &c.live_check_secs.to_string()),
             check("twitch_colors", "Show Twitch name colors in the chat", c.twitch_colors),
+            check("twitch_popout", "Open streams in the popout player", c.twitch_popout),
         ];
         let title = match cfg {
             Some(c) => format!("Edit network — {}", c.name),
@@ -575,6 +576,7 @@ impl Form {
             previews: self.check("previews"),
             live_check_secs,
             twitch_colors: self.check("twitch_colors"),
+            twitch_popout: self.check("twitch_popout"),
             ..base
         };
         Ok((cfg, secrets))

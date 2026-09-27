@@ -682,3 +682,24 @@ fn join_on_connect_list_follows_manual_joins_and_parts() {
     assert_eq!(list(&h), ["#keep"]);
     assert!(h.app.take_effects().iter().any(|e| matches!(e, Effect::SaveConfig)), "changes are saved");
 }
+
+#[test]
+fn twitch_stream_link_follows_the_popout_setting() {
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.connect();
+    h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>", ":me!me@me.tmi.twitch.tv JOIN #SomeStreamer"]);
+    let c = h.buffer("#SomeStreamer");
+    assert_eq!(h.app.twitch_stream_url(c).as_deref(), Some("https://www.twitch.tv/somestreamer"));
+    h.app.networks.get_mut(&h.net).unwrap().cfg.twitch_popout = true;
+    assert_eq!(
+        h.app.twitch_stream_url(c).as_deref(),
+        Some("https://player.twitch.tv/?channel=somestreamer&parent=twitch.tv&player=popout")
+    );
+    // Only Twitch channels have a stream.
+    let server = h.app.network(h.net).unwrap().server_buffer;
+    assert_eq!(h.app.twitch_stream_url(server), None);
+    let mut irc = Harness::new(NetworkKind::Irc, &[]);
+    irc.register();
+    irc.lines(&[":me!u@h JOIN #chan"]);
+    assert_eq!(irc.app.twitch_stream_url(irc.buffer("#chan")), None);
+}

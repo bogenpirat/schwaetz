@@ -31,6 +31,7 @@ auto_connect = true
 | `flood_burst`, `flood_interval_ms` | Flood control: burst size, then one line per interval |
 | `live_check_secs` | Twitch: seconds between live checks (default 120, at least 30) |
 | `twitch_colors` | Twitch: show the name colors users picked in the chat (default on), whatever `colored_nicks` says |
+| `twitch_popout` | Twitch: "Open stream" (topic bar button, channel menu) opens the popout player instead of the channel page |
 
 Secrets: `/secret <network> sasl <password>`, `/secret <network> pass <password>`,
 `/secret Twitch twitch oauth:<token>`, `/secret Twitch twitch-api <token>` — or the network dialog. They go to the Windows Credential

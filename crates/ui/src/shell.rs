@@ -43,6 +43,7 @@ enum Pressed {
     Sidebar(SidebarButton),
     ReplyClose,
     JumpPill,
+    OpenStream,
     Chat(Hit),
 }
 
@@ -131,6 +132,8 @@ pub struct Ui {
     pressed: Option<Pressed>,
     /// Hover/press/switch transitions of buttons.
     pub(crate) anims: crate::anim::Anims,
+    /// "Open stream" button in the topic bar (Twitch channels), as last drawn.
+    stream_btn: Option<Rect>,
 }
 
 thread_local! {
@@ -267,6 +270,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         tooltip: None,
         pressed: None,
         anims: Default::default(),
+        stream_btn: None,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -575,10 +579,34 @@ impl Ui {
         p.line(tr.x, tr.bottom() - 0.5, tr.right(), tr.bottom() - 0.5, th.border, 1.0);
         let (title, sub) = self.app.topic_for(self.app.active);
         let f = &self.text.fonts;
-        let tl = self.text.layout(&title, &f.title, tr.w - 40.0, 30.0);
+        // Twitch channels: "Open stream" at the right end (with a red dot while live).
+        self.stream_btn = None;
+        let mut text_w = tr.w - 40.0;
+        if self.app.twitch_stream_url(self.app.active).is_some() {
+            let live = self.app.active_buffer().stream.as_ref().is_some_and(|s| s.live);
+            let label = self.text.layout("Open stream", &f.ui_semibold, 200.0, 20.0);
+            let lw = text::metrics(&label).width;
+            let icon = self.text.layout("\u{E768}", &f.icons, 20.0, 20.0);
+            let lead = if live { 14.0 } else { 0.0 };
+            let w = 14.0 + lead + 18.0 + lw + 14.0;
+            let r = Rect::new(tr.right() - 16.0 - w, tr.y + (tr.h - 32.0) / 2.0, w, 32.0);
+            let c = crate::anim::Control::OpenStream;
+            let face = crate::anim::button_face(&p, r, 6.0, th.badge_bg, &th, self.anims.hover(c), self.anims.press(c));
+            let mut x = face.x + 14.0;
+            if live {
+                p.circle(x + 4.0, face.y + face.h / 2.0, 4.0, th.live);
+                x += lead;
+            }
+            let im = text::metrics(&icon);
+            p.text(&icon, x, face.y + (face.h - im.height) / 2.0, th.text);
+            p.text(&label, x + 18.0, face.y + (face.h - text::metrics(&label).height) / 2.0, th.text);
+            self.stream_btn = Some(r);
+            text_w -= w + 16.0;
+        }
+        let tl = self.text.layout(&title, &f.title, text_w, 30.0);
         p.text(&tl, tr.x + 18.0, tr.y + 9.0, th.text);
         let sub = schwaetz_proto::format::strip(&sub).replace(['\n', '\r'], " ");
-        let sl = self.text.layout(&sub, &f.ui, tr.w - 40.0, 20.0);
+        let sl = self.text.layout(&sub, &f.ui, text_w, 20.0);
         p.text(&sl, tr.x + 18.0, tr.y + 32.0, th.text_dim);
 
         // Chat.
@@ -1681,6 +1709,10 @@ impl Ui {
             self.pressed = Some(Pressed::Sidebar(button));
             return;
         }
+        if self.stream_btn.is_some_and(|r| r.contains(x, y)) {
+            self.pressed = Some(Pressed::OpenStream);
+            return;
+        }
         if let Some(id) = self.sidebar.hit(x, y) {
             self.switch_to(id);
             return;
@@ -1900,6 +1932,9 @@ impl Ui {
         if self.reply_rect.h > 0.0 && self.reply_close_rect().contains(x, y) {
             return Some(Control::ReplyClose);
         }
+        if self.stream_btn.is_some_and(|r| r.contains(x, y)) {
+            return Some(Control::OpenStream);
+        }
         if self.chat.rect.contains(x, y) {
             if self.chat.jump_pill(x, y) {
                 return Some(Control::JumpPill);
@@ -1921,6 +1956,9 @@ impl Ui {
         }
         if let Some((b, _)) = self.sidebar.button_at(x, y) {
             return Some(Pressed::Sidebar(b));
+        }
+        if self.stream_btn.is_some_and(|r| r.contains(x, y)) {
+            return Some(Pressed::OpenStream);
         }
         if self.reply_rect.h > 0.0 && self.reply_close_rect().contains(x, y) {
             return Some(Pressed::ReplyClose);
@@ -1970,6 +2008,11 @@ impl Ui {
                 self.layout();
             }
             Pressed::JumpPill => self.chat.scroll_to_bottom(),
+            Pressed::OpenStream => {
+                if let Some(url) = self.app.twitch_stream_url(self.app.active) {
+                    win::open_url(&url);
+                }
+            }
             Pressed::Chat(Hit::Link(target)) => self.open_link(target),
             Pressed::Chat(Hit::Reply(line)) => self.start_reply(line),
             Pressed::Chat(Hit::LoadPreview(url)) => {
@@ -1993,7 +2036,9 @@ impl Ui {
         if self.on_splitter(x) || self.drag == Drag::Splitter {
             return IDC_SIZEWE;
         }
-        if self.reply_rect.h > 0.0 && self.reply_close_rect().contains(x, y) {
+        if (self.reply_rect.h > 0.0 && self.reply_close_rect().contains(x, y))
+            || self.stream_btn.is_some_and(|r| r.contains(x, y))
+        {
             return IDC_HAND;
         }
         if self.input_rect.contains(x, y) {
@@ -2131,7 +2176,7 @@ impl Ui {
         let net = b.network;
         let conn = net.and_then(|n| self.app.network(n)).map(|n| n.conn);
         let twitch = net.and_then(|n| self.app.network(n)).is_some_and(|n| n.is_twitch());
-        let stream = format!("https://www.twitch.tv/{}", b.name.trim_start_matches('#').to_ascii_lowercase());
+        let stream = self.app.twitch_stream_url(id).unwrap_or_default();
         let mut items = Vec::new();
         match kind {
             BufferKind::Server => {
