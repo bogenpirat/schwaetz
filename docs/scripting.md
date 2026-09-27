@@ -2,7 +2,8 @@
 
 Scripts are `.js` or `.ts` files in the `scripts` folder (`%APPDATA%\schwaetz\scripts`). They are
 loaded at startup and reloaded automatically when you save them; `/reload` reloads everything.
-Messages and errors from scripts appear in the **scripts** buffer.
+Messages and errors from scripts appear in the **Status** window (the button at the bottom of the
+sidebar).
 
 **Settings → Scripts** lists every script with its state (running, off, or why it failed, plus
 its network access and commands). Switch scripts on or off there (this takes effect and is saved
@@ -61,7 +62,7 @@ scripts that declare it in their first 30 lines:
 // @grant http
 ```
 
-The scripts buffer shows which scripts have network access when they load.
+Settings → Scripts (and the Status window, when they load) shows which scripts have network access.
 
 ## Limits
 

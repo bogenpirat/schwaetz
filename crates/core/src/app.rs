@@ -302,7 +302,13 @@ impl App {
 
     /// Prints a client-side line into a buffer (scripts, /echo).
     pub fn print(&mut self, buffer: BufferId, kind: LineKind, nick: &str, text: &str) -> u64 {
-        let line = self.new_line(self.now, kind, nick, text);
+        self.print_flagged(buffer, kind, nick, text, 0)
+    }
+
+    /// [`App::print`] with [`LineFlags`] set on the line.
+    pub fn print_flagged(&mut self, buffer: BufferId, kind: LineKind, nick: &str, text: &str, flags: u16) -> u64 {
+        let mut line = self.new_line(self.now, kind, nick, text);
+        line.flags.set(flags, flags != 0);
         let id = line.id;
         self.add_line(buffer, line, Activity::Events);
         id
@@ -2009,6 +2015,13 @@ impl App {
     pub fn topic_for(&self, id: BufferId) -> (String, String) {
         let Some(b) = self.buffer(id) else { return Default::default() };
         let Some(net) = b.network.and_then(|n| self.networks.get(&n)) else {
+            if id == self.status_buffer {
+                // Opened from the "Status" button at the bottom of the sidebar.
+                return (
+                    "Status".into(),
+                    format!("schwätz {} · client and script messages", env!("CARGO_PKG_VERSION")),
+                );
+            }
             return (b.name.clone(), format!("schwätz {}", env!("CARGO_PKG_VERSION")));
         };
         match b.kind {
@@ -2114,7 +2127,7 @@ fn excerpt(s: &str) -> String {
 }
 
 impl App {
-    /// A client-side buffer not tied to a network (e.g. "scripts"), created on demand.
+    /// A client-side buffer not tied to a network (e.g. "search"), created on demand.
     pub fn ensure_special(&mut self, name: &str) -> BufferId {
         match self.buffers.iter().find(|b| b.network.is_none() && b.kind == BufferKind::Special && b.name == name) {
             Some(b) => b.id,

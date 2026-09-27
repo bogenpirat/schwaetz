@@ -45,6 +45,8 @@ pub struct Theme {
     pub online: Color,
     pub connecting: Color,
     pub offline: Color,
+    /// Twitch: the dot marking live channels in the sidebar.
+    pub live: Color,
     pub nick_colors: Vec<Color>,
     /// mIRC colors 0..=15 as rendered in this theme.
     pub mirc: [Color; 16],
@@ -90,6 +92,7 @@ impl Theme {
             online: hex(0x73b97e),
             connecting: hex(0xe0af68),
             offline: hex(0x6d717b),
+            live: hex(0xf2555a),
             nick_colors: [
                 0xe06c75, 0xe5c07b, 0x98c379, 0x56b6c2, 0x61afef, 0xc678dd, 0xd19a66, 0x7ec8a9, 0xf2a2c0, 0x9aa5ff,
                 0xffb86c, 0x8be9fd, 0xb8e986, 0xff79c6, 0xa3be8c, 0x88c0d0,
@@ -140,6 +143,7 @@ impl Theme {
             online: hex(0x2f8a45),
             connecting: hex(0xc58a00),
             offline: hex(0x9a9ea6),
+            live: hex(0xe02d33),
             nick_colors: [
                 0xb3261e, 0x9a6700, 0x2f7d32, 0x00796b, 0x1565c0, 0x7b1fa2, 0xbf5b04, 0x2e7d67, 0xad1457, 0x4550c4,
                 0xa05a00, 0x00838f, 0x558b2f, 0xc2185b, 0x5d7a3a, 0x3f6f87,
@@ -228,6 +232,7 @@ impl Theme {
                 "online" => &mut t.online,
                 "connecting" => &mut t.connecting,
                 "offline" => &mut t.offline,
+                "live" => &mut t.live,
                 _ => return Err(format!("unknown color key {k:?}")),
             };
             *slot = c;

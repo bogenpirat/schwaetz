@@ -3,7 +3,7 @@
 use crate::chat::{ChatView, Ctx, Hit, LinkTarget};
 use crate::editor::Editor;
 use crate::gfx::{Gfx, Painter, Rect, rgba, with_alpha};
-use crate::lists::{NickList, Sidebar};
+use crate::lists::{NickList, Sidebar, SidebarButton};
 use crate::overlay::{ConfirmAction, Overlay, OverlayClick, draw_field};
 use crate::text::{self, Brushes, Text};
 use crate::theme::Theme;
@@ -1592,6 +1592,18 @@ impl Ui {
             self.drag = Drag::Splitter;
             return;
         }
+        if let Some((button, _)) = self.sidebar.button_at(x, y) {
+            match button {
+                SidebarButton::Status => {
+                    let sb = self.app.status_buffer;
+                    self.switch_to(sb);
+                }
+                SidebarButton::AddNetwork => self.form = Some(Box::new(crate::form::Form::network(None))),
+                SidebarButton::Settings => self.open_settings(),
+            }
+            self.invalidate();
+            return;
+        }
         if let Some(id) = self.sidebar.hit(x, y) {
             self.switch_to(id);
             return;
@@ -1724,6 +1736,11 @@ impl Ui {
                     self.sidebar.hover = hover;
                     self.invalidate();
                 }
+                let button = self.sidebar.button_at(x, y);
+                if button.map(|b| b.0) != self.sidebar.button_hover {
+                    self.sidebar.button_hover = button.map(|b| b.0);
+                    self.invalidate();
+                }
                 let nh = if self.show_nicklist { self.nicklist.hit(x, y) } else { None };
                 if nh != self.nicklist.hover {
                     self.nicklist.hover = nh;
@@ -1734,7 +1751,12 @@ impl Ui {
                     self.chat.hover = ch;
                     self.invalidate();
                 }
-                let tip = if self.chat.rect.contains(x, y) { self.chat.emote_at(x, y) } else { None };
+                let tip = if self.chat.rect.contains(x, y) {
+                    self.chat.emote_at(x, y)
+                } else {
+                    // Icon buttons in the sidebar footer explain themselves on hover.
+                    button.and_then(|(b, r)| b.tooltip().map(|t| (t.to_owned(), String::new(), r)))
+                };
                 if tip.as_ref().map(|t| t.2) != self.tooltip.as_ref().map(|t| t.2) {
                     self.tooltip = tip;
                     self.invalidate();
@@ -1829,7 +1851,10 @@ impl Ui {
         if self.overlay.is_some() {
             return;
         }
-        if let Some(id) = self.sidebar.hit(x, y) {
+        if let Some((SidebarButton::Status, _)) = self.sidebar.button_at(x, y) {
+            let sb = self.app.status_buffer;
+            self.buffer_menu(sb);
+        } else if let Some(id) = self.sidebar.hit(x, y) {
             self.buffer_menu(id);
         } else if self.show_nicklist
             && let Some(n) = self.nicklist.hit(x, y).and_then(|i| self.nicklist.nick(i)).map(str::to_owned)
@@ -2403,12 +2428,14 @@ impl Ui {
                 if self.drag == Drag::None
                     && (self.chat.hover.is_some()
                         || self.sidebar.hover.is_some()
+                        || self.sidebar.button_hover.is_some()
                         || self.nicklist.hover.is_some()
                         || self.tooltip.is_some())
                 {
                     self.tooltip = None;
                     self.chat.hover = None;
                     self.sidebar.hover = None;
+                    self.sidebar.button_hover = None;
                     self.nicklist.hover = None;
                     self.invalidate();
                 }

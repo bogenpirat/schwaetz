@@ -24,7 +24,8 @@ A fast, native IRC client for Windows, written in Rust.
 
 Run `schwaetz.exe`. On first start it creates a configuration with Libera.Chat; right-click it in
 the sidebar and choose **Connect**, or type `/connect irc.libera.chat`. Add networks with
-**Add network…** (right-click "schwätz" in the sidebar) or `/network add`.
+the **＋** button at the bottom of the sidebar or `/network add`; the **⚙** button next to it opens
+the settings, and **Status** shows messages from the client and your scripts.
 
 Useful keys: **Ctrl+J** quick switcher · **Alt+1…9** buffers · **Alt+A** next activity ·
 **Ctrl+W** close · **Ctrl+,** settings · **Ctrl+B/I/U/K** formatting · **Tab** completion ·

@@ -12,7 +12,7 @@ pub enum BufferKind {
     Server,
     Channel,
     Query,
-    /// Client-side views: "schwätz" (global status), "scripts", "search", channel list …
+    /// Client-side views: "schwätz" (global status, also script output), "search", channel list …
     Special,
 }
 
@@ -87,6 +87,8 @@ impl LineFlags {
     pub const FIRST_MESSAGE: u16 = 1 << 6;
     /// Message addressed only to channel members with a given status (STATUSMSG).
     pub const STATUSMSG: u16 = 1 << 7;
+    /// Written by a script (scripts never receive these, so a script cannot loop on its own output).
+    pub const SCRIPT: u16 = 1 << 8;
 
     pub fn has(self, f: u16) -> bool {
         self.0 & f != 0

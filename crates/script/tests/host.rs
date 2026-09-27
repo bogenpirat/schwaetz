@@ -92,7 +92,7 @@ fn timers_storage_and_errors() {
         ],
     );
     host.tick(&mut app, 1_000);
-    let scripts = texts(&app, "scripts");
+    let scripts = texts(&app, "schwätz");
     assert!(scripts.iter().any(|t| t.contains("SyntaxError") || t.contains("expecting")), "{scripts:?}");
 
     for t in [1_200, 1_400, 1_600, 1_800] {
@@ -106,13 +106,13 @@ fn timers_storage_and_errors() {
     let start = std::time::Instant::now();
     assert!(host.on_input(&mut app, status, "/spin"));
     assert!(start.elapsed() < std::time::Duration::from_secs(2), "runaway loop must be interrupted");
-    assert!(texts(&app, "scripts").iter().any(|t| t.contains("stopped")));
+    assert!(texts(&app, "schwätz").iter().any(|t| t.contains("stopped")));
 
     assert!(host.on_input(&mut app, status, "/boom"));
-    assert!(texts(&app, "scripts").iter().any(|t| t.contains("kaboom")));
+    assert!(texts(&app, "schwätz").iter().any(|t| t.contains("kaboom")));
 
     assert!(host.on_input(&mut app, status, "/net"));
-    assert!(texts(&app, "scripts").iter().any(|t| t.contains("@grant http")));
+    assert!(texts(&app, "schwätz").iter().any(|t| t.contains("@grant http")));
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn list_switch_off_and_failed_scripts() {
     assert!(!bad.running && bad.error.is_some());
 
     // A failed script is not retried until its file changes.
-    let errors = |app: &App| texts(app, "scripts").iter().filter(|t| t.starts_with("bad: ")).count();
+    let errors = |app: &App| texts(app, "schwätz").iter().filter(|t| t.starts_with("Script bad: ")).count();
     assert_eq!(errors(&app), 1);
     host.tick(&mut app, 5_000);
     host.tick(&mut app, 9_000);

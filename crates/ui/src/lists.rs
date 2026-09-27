@@ -3,11 +3,39 @@
 use crate::gfx::{Painter, Rect, with_alpha};
 use crate::text::{self, Text};
 use crate::theme::Theme;
-use schwaetz_core::{Activity, App, BufferId, BufferKind, ConnState, NotifyLevel};
+use schwaetz_core::{Activity, App, Buffer, BufferId, BufferKind, ConnState, NotifyLevel};
 
 const NET_ROW_H: f32 = 32.0;
 const ROW_H: f32 = 28.0;
-const HEADER_H: f32 = 44.0;
+/// Channels and queries sit this far right of their network.
+const INDENT: f32 = 12.0;
+/// The bar at the bottom with the status, add-network and settings buttons.
+pub const FOOTER_H: f32 = 52.0;
+
+/// Segoe Fluent Icons / MDL2 Assets code points.
+const ICON_STATUS: &str = "\u{E8BD}";
+const ICON_ADD: &str = "\u{E710}";
+const ICON_SETTINGS: &str = "\u{E713}";
+
+/// Buttons in the sidebar footer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarButton {
+    /// The global status buffer (client messages, script output).
+    Status,
+    AddNetwork,
+    Settings,
+}
+
+impl SidebarButton {
+    /// Hover text for the icon-only buttons.
+    pub fn tooltip(self) -> Option<&'static str> {
+        match self {
+            SidebarButton::Status => None,
+            SidebarButton::AddNetwork => Some("Add network"),
+            SidebarButton::Settings => Some("Settings"),
+        }
+    }
+}
 
 struct Row {
     id: BufferId,
@@ -22,59 +50,41 @@ pub struct Sidebar {
     rows: Vec<Row>,
     pub hover: Option<BufferId>,
     content_h: f32,
+    buttons: Vec<(SidebarButton, Rect)>,
+    pub button_hover: Option<SidebarButton>,
 }
 
 impl Sidebar {
+    /// The scrolling buffer list (everything above the footer).
+    fn list_rect(&self) -> Rect {
+        Rect::new(self.rect.x, self.rect.y, self.rect.w, (self.rect.h - FOOTER_H).max(0.0))
+    }
+
     pub fn render(&mut self, p: &Painter, text: &Text, th: &Theme, app: &App) {
         let f = &text.fonts;
         self.rows.clear();
-        p.clip(self.rect);
-        let x = self.rect.x;
-        let w = self.rect.w;
-        // App title row (the global status buffer).
-        let mut y = self.rect.y + 10.0 - self.scroll;
-        let order = app.sidebar_order();
-        for id in order {
+        let list = self.list_rect();
+        p.clip(list);
+        let x = list.x;
+        let w = list.w;
+        let mut y = list.y + 10.0 - self.scroll;
+        for id in app.sidebar_order() {
+            // The status buffer lives in the footer.
+            if id == app.status_buffer {
+                continue;
+            }
             let Some(b) = app.buffer(id) else { continue };
             let is_net = b.kind == BufferKind::Server;
-            let is_status = id == app.status_buffer;
-            let h = if is_status {
-                HEADER_H
-            } else if is_net {
-                NET_ROW_H + 6.0
-            } else {
-                ROW_H
-            };
+            let indent = if is_net || b.network.is_none() { 0.0 } else { INDENT };
+            let h = if is_net { NET_ROW_H + 6.0 } else { ROW_H };
             let row_y = if is_net { y + 6.0 } else { y };
             let row_h = if is_net { NET_ROW_H } else { h };
-            let r = Rect::new(x + 8.0, row_y, w - 16.0, row_h);
+            let r = Rect::new(x + 8.0 + indent, row_y, w - 16.0 - indent, row_h);
             let active = app.active == id;
-            if active {
-                p.fill_round(r, 6.0, th.sidebar_selected);
-                p.fill_round(Rect::new(r.x, r.y + 7.0, 3.0, r.h - 14.0), 1.5, th.accent);
-            } else if self.hover == Some(id) {
-                p.fill_round(r, 6.0, th.sidebar_hover);
-            }
+            row_background(p, th, r, active, self.hover == Some(id));
+            let right = badge(p, text, th, b, active, r);
 
-            // Badge.
-            let mut right = r.right() - 8.0;
-            if b.unread > 0 && !active {
-                let label = if b.unread > 999 { "999+".to_owned() } else { b.unread.to_string() };
-                let l = text.layout(&label, &f.ui_small, 60.0, 20.0);
-                let tw = text::metrics(&l).width;
-                let bw = (tw + 12.0).max(20.0);
-                let br = Rect::new(right - bw, r.y + (r.h - 18.0) / 2.0, bw, 18.0);
-                let (bg, fg) =
-                    if b.highlights > 0 { (th.badge_highlight, th.accent_fg) } else { (th.badge_bg, th.badge_fg) };
-                p.fill_round(br, 9.0, bg);
-                p.text(&l, br.x + (bw - tw) / 2.0, br.y + 2.0, fg);
-                right = br.x - 6.0;
-            }
-
-            if is_status {
-                let l = text.layout("schwätz", &f.title, w, 30.0);
-                p.text(&l, r.x + 12.0, r.y + 10.0, th.sidebar_header);
-            } else if is_net {
+            if is_net {
                 let net = b.network.and_then(|n| app.network(n));
                 let (dot, name) = match net {
                     Some(n) => (
@@ -92,6 +102,7 @@ impl Sidebar {
                 let lh = text::metrics(&l).height;
                 p.text(&l, r.x + 28.0, r.y + (r.h - lh) / 2.0, th.sidebar_header);
             } else {
+                let live = b.stream.as_ref().is_some_and(|s| s.live);
                 let (glyph, dim) = match b.kind {
                     BufferKind::Channel => ("#", !b.joined),
                     BufferKind::Query => ("@", false),
@@ -111,9 +122,14 @@ impl Sidebar {
                     th.sidebar_dim
                 };
                 let fmt = if b.activity >= Activity::Messages && !active { &f.ui_semibold } else { &f.ui };
-                let g = text.layout(glyph, &f.ui, 20.0, 30.0);
-                let gh = text::metrics(&g).height;
-                p.text(&g, r.x + 14.0, r.y + (r.h - gh) / 2.0, th.sidebar_dim);
+                if live {
+                    // Twitch: a red dot instead of "#" while the stream is live.
+                    p.circle(r.x + 17.5, r.y + r.h / 2.0, 4.0, th.live);
+                } else {
+                    let g = text.layout(glyph, &f.ui, 20.0, 30.0);
+                    let gh = text::metrics(&g).height;
+                    p.text(&g, r.x + 14.0, r.y + (r.h - gh) / 2.0, th.sidebar_dim);
+                }
                 let l = text.layout(&name, fmt, (right - r.x - 30.0).max(10.0), 30.0);
                 let lh = text::metrics(&l).height;
                 p.text(&l, r.x + 28.0, r.y + (r.h - lh) / 2.0, color);
@@ -124,21 +140,92 @@ impl Sidebar {
             self.rows.push(Row { id, y: row_y, h: row_h });
             y += h;
         }
-        self.content_h = y + self.scroll - self.rect.y;
+        self.content_h = y + self.scroll - list.y;
         p.unclip();
+        self.render_footer(p, text, th, app);
+    }
+
+    /// Status button (with the status buffer's unread count), then the icon buttons.
+    fn render_footer(&mut self, p: &Painter, text: &Text, th: &Theme, app: &App) {
+        let f = &text.fonts;
+        self.buttons.clear();
+        let fy = self.rect.bottom() - FOOTER_H;
+        p.line(self.rect.x + 12.0, fy + 0.5, self.rect.right() - 12.0, fy + 0.5, th.border, 1.0);
+        let icon = 32.0;
+        let settings = Rect::new(self.rect.right() - 8.0 - icon, fy + 10.0, icon, icon);
+        let add = Rect::new(settings.x - 4.0 - icon, fy + 10.0, icon, icon);
+        let status = Rect::new(self.rect.x + 8.0, fy + 8.0, (add.x - 8.0 - self.rect.x - 8.0).max(40.0), 36.0);
+
+        let sb = app.status_buffer;
+        let active = app.active == sb;
+        row_background(p, th, status, active, self.button_hover == Some(SidebarButton::Status));
+        let right = match app.buffer(sb) {
+            Some(b) => badge(p, text, th, b, active, status),
+            None => status.right() - 8.0,
+        };
+        let g = text.layout(ICON_STATUS, &f.icons, 24.0, 24.0);
+        let gm = text::metrics(&g);
+        p.text(&g, status.x + 12.0, status.y + (status.h - gm.height) / 2.0, th.sidebar_fg);
+        let l = text.layout("Status", &f.ui_semibold, (right - status.x - 40.0).max(10.0), 24.0);
+        let lh = text::metrics(&l).height;
+        p.text(&l, status.x + 36.0, status.y + (status.h - lh) / 2.0, th.sidebar_header);
+        self.buttons.push((SidebarButton::Status, status));
+
+        for (button, r, glyph) in
+            [(SidebarButton::AddNetwork, add, ICON_ADD), (SidebarButton::Settings, settings, ICON_SETTINGS)]
+        {
+            if self.button_hover == Some(button) {
+                p.fill_round(r, 6.0, th.sidebar_hover);
+            }
+            let g = text.layout(glyph, &f.icons, r.w, r.h);
+            let m = text::metrics(&g);
+            p.text(&g, r.x + (r.w - m.width) / 2.0, r.y + (r.h - m.height) / 2.0, th.sidebar_fg);
+            self.buttons.push((button, r));
+        }
     }
 
     pub fn hit(&self, x: f32, y: f32) -> Option<BufferId> {
-        if !self.rect.contains(x, y) {
+        if !self.list_rect().contains(x, y) {
             return None;
         }
         self.rows.iter().find(|r| y >= r.y && y < r.y + r.h).map(|r| r.id)
     }
 
+    /// The footer button under the pointer, with its bounds.
+    pub fn button_at(&self, x: f32, y: f32) -> Option<(SidebarButton, Rect)> {
+        self.buttons.iter().find(|(_, r)| r.contains(x, y)).copied()
+    }
+
     pub fn scroll_by(&mut self, dy: f32) {
-        let max = (self.content_h - self.rect.h + 10.0).max(0.0);
+        let max = (self.content_h - self.list_rect().h + 10.0).max(0.0);
         self.scroll = (self.scroll - dy).clamp(0.0, max);
     }
+}
+
+fn row_background(p: &Painter, th: &Theme, r: Rect, active: bool, hover: bool) {
+    if active {
+        p.fill_round(r, 6.0, th.sidebar_selected);
+        p.fill_round(Rect::new(r.x, r.y + 7.0, 3.0, r.h - 14.0), 1.5, th.accent);
+    } else if hover {
+        p.fill_round(r, 6.0, th.sidebar_hover);
+    }
+}
+
+/// Unread badge at the right end of a row; returns where the row's text has to end.
+fn badge(p: &Painter, text: &Text, th: &Theme, b: &Buffer, active: bool, r: Rect) -> f32 {
+    let right = r.right() - 8.0;
+    if b.unread == 0 || active {
+        return right;
+    }
+    let label = if b.unread > 999 { "999+".to_owned() } else { b.unread.to_string() };
+    let l = text.layout(&label, &text.fonts.ui_small, 60.0, 20.0);
+    let tw = text::metrics(&l).width;
+    let bw = (tw + 12.0).max(20.0);
+    let br = Rect::new(right - bw, r.y + (r.h - 18.0) / 2.0, bw, 18.0);
+    let (bg, fg) = if b.highlights > 0 { (th.badge_highlight, th.accent_fg) } else { (th.badge_bg, th.badge_fg) };
+    p.fill_round(br, 9.0, bg);
+    p.text(&l, br.x + (bw - tw) / 2.0, br.y + 2.0, fg);
+    br.x - 6.0
 }
 
 #[derive(Default)]

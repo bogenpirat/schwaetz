@@ -87,7 +87,8 @@ Color keys: `backdrop`, `backdrop_opaque`, `sidebar_fg`, `sidebar_dim`, `sidebar
 `accent_fg`, `highlight_bg`, `highlight_bar`, `selection`, `link`, `error`, `join`, `part`,
 `notice`, `own_nick`, `border`, `input_bg`, `topic_bg`, `nicklist_bg`, `badge_bg`, `badge_fg`,
 `badge_highlight`, `scrollbar`, `unread_marker`, `overlay_scrim`, `panel_bg`, `online`,
-`connecting`, `offline`. `mirc = [...]` overrides colors 0–15.
+`connecting`, `offline`, `live` (the sidebar dot for live Twitch channels). `mirc = [...]` overrides
+colors 0–15.
 
 ## Highlights, ignores, aliases
 

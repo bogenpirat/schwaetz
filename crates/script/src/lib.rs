@@ -12,7 +12,7 @@ pub use ts::{transpile, transpile_cached};
 
 use rquickjs::prelude::{Opt, Rest};
 use rquickjs::{Array, CatchResultExt, Coerced, Context, Ctx, Function, Object, Persistent, Runtime, Value};
-use schwaetz_core::buffer::{BufferKind, Emote, LineFlags, LineKind};
+use schwaetz_core::buffer::{Emote, LineFlags, LineKind};
 use schwaetz_core::services::{ScriptHost, ScriptInfo};
 use schwaetz_core::{App, BufferId};
 use schwaetz_proto::Message;
@@ -25,7 +25,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 const CALL_BUDGET: Duration = Duration::from_millis(250);
 const MEMORY_LIMIT: usize = 64 << 20;
-const SCRIPTS_BUFFER: &str = "scripts";
+/// Scripts used to write to their own "scripts" buffer; that name still means the status buffer.
+const LEGACY_SCRIPTS_BUFFER: &str = "scripts";
 
 /// (request id, (status, body) or error).
 type HttpResult = (u32, Result<(u16, String), String>);
@@ -135,6 +136,12 @@ const EXAMPLES: &[(&str, &str)] = &[
 
 fn stem(p: &Path) -> &str {
     p.file_stem().and_then(|s| s.to_str()).unwrap_or("script")
+}
+
+/// A script host message in the status buffer.
+fn status_line(app: &mut App, kind: LineKind, text: &str) {
+    let b = app.status_buffer;
+    app.print_flagged(b, kind, "", text, LineFlags::SCRIPT);
 }
 
 fn grants_http(source: &str) -> bool {
@@ -283,10 +290,12 @@ impl Host {
         self.last_error.borrow_mut().remove(&name);
         match result {
             Ok(()) => {
-                let msg =
-                    if http { format!("Loaded {name} (network access granted)") } else { format!("Loaded {name}") };
-                let b = app.ensure_special(SCRIPTS_BUFFER);
-                app.print(b, LineKind::Status, "", &msg);
+                let msg = if http {
+                    format!("Script {name} loaded (network access granted)")
+                } else {
+                    format!("Script {name} loaded")
+                };
+                status_line(app, LineKind::Status, &msg);
             }
             Err(e) => {
                 self.report(app, &name, &e);
@@ -306,10 +315,9 @@ impl Host {
         if !script.is_empty() {
             self.last_error.borrow_mut().insert(script.to_owned(), text.to_owned());
         }
-        let b = app.ensure_special(SCRIPTS_BUFFER);
         // Error lines show no nick column, so name the script in the text.
-        let text = if script.is_empty() { text.to_owned() } else { format!("{script}: {text}") };
-        app.print(b, LineKind::Error, script, &text);
+        let text = if script.is_empty() { text.to_owned() } else { format!("Script {script}: {text}") };
+        status_line(app, LineKind::Error, &text);
     }
 
     /// Calls `f` from script `sid` with an argument built in its context. Returns the result
@@ -356,8 +364,14 @@ impl Host {
             Target::Active => Some(app.active),
             Target::Id(i) => app.buffer(BufferId(*i)).map(|b| b.id),
             Target::Named { network, buffer } => {
-                // Without a network the name refers to a client-side buffer ("scripts", …).
-                let Some(n) = network else { return Some(app.ensure_special(buffer)) };
+                // Without a network the name refers to a client-side buffer; "scripts" (and "") is
+                // the status buffer.
+                let Some(n) = network else {
+                    if buffer.is_empty() || buffer == LEGACY_SCRIPTS_BUFFER {
+                        return Some(app.status_buffer);
+                    }
+                    return Some(app.ensure_special(buffer));
+                };
                 let net = app.network_by_name(n)?;
                 Some(app.buffer_for(net, buffer))
             }
@@ -374,8 +388,8 @@ impl Host {
             for a in actions {
                 match a {
                     Action::Print { target, text } => {
-                        let b = self.resolve(app, &target).unwrap_or_else(|| app.ensure_special(SCRIPTS_BUFFER));
-                        app.print(b, LineKind::Status, "", &text);
+                        let b = self.resolve(app, &target).unwrap_or(app.status_buffer);
+                        app.print_flagged(b, LineKind::Status, "", &text, LineFlags::SCRIPT);
                     }
                     Action::Exec { target, text } => {
                         let Some(b) = self.resolve(app, &target) else { continue };
@@ -728,9 +742,10 @@ fn install_api<'js>(
     let sh = shared.clone();
     let log = Function::new(ctx.clone(), move |args: Rest<Coerced<String>>| {
         let text = args.0.into_iter().map(|a| a.0).collect::<Vec<_>>().join(" ");
-        sh.borrow_mut()
-            .actions
-            .push(Action::Print { target: Target::Named { network: None, buffer: SCRIPTS_BUFFER.into() }, text });
+        sh.borrow_mut().actions.push(Action::Print {
+            target: Target::Named { network: None, buffer: LEGACY_SCRIPTS_BUFFER.into() },
+            text,
+        });
     })?;
     api.set("log", log.clone())?;
     let console = Object::new(ctx.clone())?;
@@ -772,10 +787,10 @@ impl ScriptHost for Host {
         self.snapshot(app, app.now);
         for &(bid, lid) in lines {
             let Some(b) = app.buffer(bid) else { continue };
-            if b.kind == BufferKind::Special && b.name == SCRIPTS_BUFFER {
+            let Some(l) = b.lines.iter().rev().find(|l| l.id == lid) else { continue };
+            if l.flags.has(LineFlags::SCRIPT) {
                 continue;
             }
-            let Some(l) = b.lines.iter().rev().find(|l| l.id == lid) else { continue };
             let net = b.network.and_then(|n| app.network(n)).map(|n| n.display_name().to_owned());
             let data = (
                 net,
@@ -928,9 +943,8 @@ impl ScriptHost for Host {
         self.status.clear();
         self.last_error.borrow_mut().clear();
         self.load_all(app);
-        let b = app.ensure_special(SCRIPTS_BUFFER);
         let n = self.scripts.len();
-        app.print(b, LineKind::Status, "", &format!("{n} script(s) loaded from {}", self.dir.display()));
+        status_line(app, LineKind::Status, &format!("{n} script(s) loaded from {}", self.dir.display()));
     }
 
     fn commands(&self) -> Vec<String> {
