@@ -4,6 +4,11 @@ Settings are stored in `config.toml` (`%APPDATA%\schwaetz`, or `data\` in portab
 be changed in the settings dialog (**Ctrl+,**) or with `/set section.key value`
 (e.g. `/set appearance.font_size 15`); `/set` without arguments lists everything.
 
+Configuration, themes and scripts live in `%APPDATA%\schwaetz`, history and caches in
+`%LOCALAPPDATA%\schwaetz`. Put an empty `portable.txt` next to `schwaetz.exe` to keep everything in
+a `data` folder beside it instead. Passwords and tokens never go into the config file: they are
+stored in the Windows Credential Manager (see [Secrets](#networks) below).
+
 ## Networks
 
 ```toml
