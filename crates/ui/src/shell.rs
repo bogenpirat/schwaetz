@@ -1122,15 +1122,14 @@ impl Ui {
         self.after_update();
     }
 
-    /// Middle-click on a sidebar row, like on a browser tab: leaves a joined channel, and closes a
-    /// channel that was already left.
+    /// Middle-click on a sidebar row, like on a browser tab: closes the channel right away (leaving
+    /// it first if joined).
     fn middle_click_buffer(&mut self, id: BufferId) {
         let Some(b) = self.app.buffer(id) else { return };
         if b.kind != BufferKind::Channel {
             return;
         }
-        let command = if b.joined { "/part" } else { "/close" };
-        self.app.input(id, command);
+        self.app.input(id, "/close");
         self.after_update();
         self.invalidate();
     }
