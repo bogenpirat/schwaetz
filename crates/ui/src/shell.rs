@@ -134,6 +134,8 @@ pub struct Ui {
     pub(crate) anims: crate::anim::Anims,
     /// "Open stream" button in the topic bar (Twitch channels), as last drawn.
     stream_btn: Option<Rect>,
+    /// Sidebar row under a pressed middle button (acts on release over the same row).
+    middle_pressed: Option<BufferId>,
 }
 
 thread_local! {
@@ -271,6 +273,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         pressed: None,
         anims: Default::default(),
         stream_btn: None,
+        middle_pressed: None,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -1069,6 +1072,19 @@ impl Ui {
             self.form = None;
         }
         self.after_update();
+    }
+
+    /// Middle-click on a sidebar row, like on a browser tab: leaves a joined channel, and closes a
+    /// channel that was already left.
+    fn middle_click_buffer(&mut self, id: BufferId) {
+        let Some(b) = self.app.buffer(id) else { return };
+        if b.kind != BufferKind::Channel {
+            return;
+        }
+        let command = if b.joined { "/part" } else { "/close" };
+        self.app.input(id, command);
+        self.after_update();
+        self.invalidate();
     }
 
     /// Opens the settings dialog (the Scripts page lists the script host's files).
@@ -2711,6 +2727,20 @@ impl Ui {
             WM_LBUTTONUP => {
                 let (x, y) = self.pt(lp);
                 self.mouse_up(x, y);
+                Some(LRESULT(0))
+            }
+            WM_MBUTTONDOWN => {
+                let (x, y) = self.pt(lp);
+                self.middle_pressed = self.sidebar.hit(x, y);
+                Some(LRESULT(0))
+            }
+            WM_MBUTTONUP => {
+                let (x, y) = self.pt(lp);
+                if let Some(id) = self.middle_pressed.take()
+                    && self.sidebar.hit(x, y) == Some(id)
+                {
+                    self.middle_click_buffer(id);
+                }
                 Some(LRESULT(0))
             }
             WM_RBUTTONUP => {
