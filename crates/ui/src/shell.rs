@@ -44,11 +44,29 @@ enum Pressed {
     ReplyClose,
     JumpPill,
     OpenStream,
+    /// A row of the emote completion list.
+    Completion(usize),
     Chat(Hit),
 }
 
+/// The emote list shown while typing `:word` in a Twitch channel.
+struct EmoteCompletion {
+    /// Byte offset of the `:` in the input; the text up to the caret is replaced on accept.
+    colon: usize,
+    query: String,
+    items: Vec<schwaetz_core::emotes::EmoteEntry>,
+    selected: usize,
+    scroll: f32,
+    /// Where the list was drawn (for the mouse).
+    rect: Rect,
+}
+
+/// Height of one emote row in the completion list.
+const COMPLETION_ROW: f32 = 32.0;
+
 enum WorkerResult {
     Live(schwaetz_core::helix::LiveResult),
+    Emotes(schwaetz_core::helix::EmoteResult),
     Auth(schwaetz_net::NetworkId, schwaetz_core::twitch_auth::AuthRequest, schwaetz_core::twitch_auth::AuthResponse),
 }
 /// `dwData` tag for WM_COPYDATA messages carrying input for the running instance.
@@ -141,6 +159,10 @@ pub struct Ui {
     middle_pressed: Option<BufferId>,
     /// Pointer height where a channel row was pressed (a drag starts a few pixels away).
     row_drag_from: f32,
+    /// Emote completion list for a `:word` being typed.
+    completion: Option<EmoteCompletion>,
+    /// Byte offset of the `:` whose completion was dismissed with Esc (stays closed for it).
+    completion_dismissed: Option<usize>,
 }
 
 thread_local! {
@@ -280,6 +302,8 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         stream_btn: None,
         middle_pressed: None,
         row_drag_from: 0.0,
+        completion: None,
+        completion_dismissed: None,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -701,6 +725,14 @@ impl Ui {
         // Sidebar edge.
         p.line(self.sidebar_w - 0.5, 0.0, self.sidebar_w - 0.5, self.win_rect.h, th.border, 1.0);
 
+        // Emote completion, rising from the `:` in the input.
+        if let Some(mut c) = self.completion.take() {
+            let map = text::U16Map::new(self.input.text());
+            let (colon_x, _, _) = text::caret_pos(&layout, map.to_u16(c.colon as u32));
+            self.draw_completion(&p, &th, &mut c, inner.x + colon_x);
+            self.completion = Some(c);
+        }
+
         if let Some((code, url, anchor)) =
             self.tooltip.as_ref().filter(|_| self.overlay.is_none() && self.form.is_none())
         {
@@ -923,6 +955,9 @@ impl Ui {
             Effect::OpenUrl(u) => win::open_url(&u),
             Effect::TwitchLive(req) => {
                 self.run_worker("twitch-live", move || WorkerResult::Live(schwaetz_core::helix::check(req)))
+            }
+            Effect::TwitchEmotes(req) => {
+                self.run_worker("twitch-emotes", move || WorkerResult::Emotes(schwaetz_core::helix::fetch_emotes(req)))
             }
             Effect::TwitchAuth { network, request } => self.run_worker("twitch-auth", move || {
                 let response = schwaetz_core::twitch_auth::execute(&request);
@@ -1512,6 +1547,10 @@ impl Ui {
         if self.overlay.is_some() {
             return self.overlay_key(v, ctrl, shift);
         }
+        if self.completion.is_some() && self.completion_key(v) {
+            self.invalidate();
+            return true;
+        }
         let lh = self.text.fonts.line_height;
         match v {
             VK_RETURN if shift => self.input.insert("\n"),
@@ -1737,6 +1776,7 @@ impl Ui {
         } else {
             self.input.insert(s);
             self.typed();
+            self.refresh_completion();
         }
         self.caret_on = true;
         self.invalidate();
@@ -1759,6 +1799,19 @@ impl Ui {
         }
         self.anims.pressed = self.control_at(x, y);
         if self.anims.pressed.is_some() {
+            self.invalidate();
+        }
+        if let Some(c) = &self.completion
+            && self.overlay.is_none()
+            && self.form.is_none()
+        {
+            if let Some(i) = completion_row(c, x, y) {
+                self.pressed = Some(Pressed::Completion(i));
+                return;
+            }
+            // A click anywhere else closes the list (until the next `:`).
+            self.completion_dismissed = Some(c.colon);
+            self.completion = None;
             self.invalidate();
         }
         self.tooltip = None;
@@ -1828,6 +1881,7 @@ impl Ui {
             if double {
                 self.input.select_word_at_cursor();
             }
+            self.refresh_completion();
             self.drag = Drag::Input;
             self.invalidate();
             return;
@@ -1889,6 +1943,13 @@ impl Ui {
     }
 
     fn mouse_move(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.completion.as_mut()
+            && let Some(i) = completion_row(c, x, y)
+            && i != c.selected
+        {
+            c.selected = i;
+            self.invalidate();
+        }
         let hot = self.control_at(x, y);
         if hot != self.anims.hot {
             self.anims.hot = hot;
@@ -2050,6 +2111,9 @@ impl Ui {
 
     /// The button-like control under a point, compared with the pressed one on release.
     fn pressed_at(&self, x: f32, y: f32) -> Option<Pressed> {
+        if let Some(i) = self.completion.as_ref().and_then(|c| completion_row(c, x, y)) {
+            return Some(Pressed::Completion(i));
+        }
         if let Some(o) = &self.overlay {
             return Some(Pressed::Overlay(o.target(self.win_rect, x, y)));
         }
@@ -2110,6 +2174,7 @@ impl Ui {
                 self.layout();
             }
             Pressed::JumpPill => self.chat.scroll_to_bottom(),
+            Pressed::Completion(i) => self.accept_completion(Some(i)),
             Pressed::OpenStream => {
                 if let Some(url) = self.app.twitch_stream_url(self.app.active) {
                     win::open_url(&url);
@@ -2176,6 +2241,14 @@ impl Ui {
         }
         let lh = self.text.fonts.line_height + 3.0;
         let dy = delta as f32 / 120.0 * lines.clamp(1, 20) as f32 * lh;
+        if let Some(c) = self.completion.as_mut()
+            && c.rect.contains(x, y)
+        {
+            let max = (c.items.len() as f32 * COMPLETION_ROW + 8.0 - c.rect.h).max(0.0);
+            c.scroll = (c.scroll - dy).clamp(0.0, max);
+            self.invalidate();
+            return;
+        }
         // Line positions change; hover state comes back with the next mouse move.
         self.tooltip = None;
         self.chat.hover = None;
@@ -2732,6 +2805,10 @@ impl Ui {
                 while let Ok(r) = self.workers.1.try_recv() {
                     match r {
                         WorkerResult::Live(r) => self.app.on_live_result(r),
+                        WorkerResult::Emotes(r) => {
+                            self.app.on_emote_result(r);
+                            self.refresh_completion();
+                        }
                         WorkerResult::Auth(net, req, resp) => self.app.on_auth_result(net, req, resp),
                     }
                 }
@@ -2795,11 +2872,12 @@ impl Ui {
                 None
             }
             WM_KEYDOWN | WM_SYSKEYDOWN => {
-                if self.key_down(wp.0 as u16) {
-                    Some(LRESULT(0))
-                } else {
-                    None
+                let handled = self.key_down(wp.0 as u16);
+                // Editing or moving the caret can open, narrow or close the emote list.
+                if self.form.is_none() && self.overlay.is_none() {
+                    self.refresh_completion();
                 }
+                if handled { Some(LRESULT(0)) } else { None }
             }
             WM_CHAR => {
                 self.char_input(wp.0 as u16);
@@ -3136,5 +3214,148 @@ fn edit_menu(hwnd: HWND, ed: &mut Editor) {
         }
         5 => ed.select_all(),
         _ => {}
+    }
+}
+
+/// The completion row under a point.
+fn completion_row(c: &EmoteCompletion, x: f32, y: f32) -> Option<usize> {
+    let inner = c.rect.inset(0.0, 4.0);
+    if !inner.contains(x, y) {
+        return None;
+    }
+    let i = ((y - inner.y + c.scroll) / COMPLETION_ROW) as usize;
+    (i < c.items.len()).then_some(i)
+}
+
+impl Ui {
+    /// Opens, updates or closes the emote list for the `:word` before the caret (Twitch
+    /// channels only: a `:` at the start of a word followed by at least one letter or digit).
+    fn refresh_completion(&mut self) {
+        let text = self.input.text();
+        let cursor = self.input.cursor.min(text.len());
+        let before = &text[..cursor];
+        let word = before.len()
+            - before.chars().rev().take_while(|c| c.is_alphanumeric() || *c == '_').map(char::len_utf8).sum::<usize>();
+        let colon = word.checked_sub(1).filter(|&i| before.as_bytes()[i] == b':');
+        let opens_word = |i: usize| i == 0 || before[..i].chars().next_back().is_some_and(char::is_whitespace);
+        let Some(colon) = colon.filter(|&i| word < cursor && opens_word(i)) else {
+            self.completion = None;
+            self.completion_dismissed = None;
+            return;
+        };
+        if self.completion_dismissed == Some(colon) {
+            return;
+        }
+        let query = before[word..].to_owned();
+        if self.completion.as_ref().is_some_and(|c| c.colon == colon && c.query == query) {
+            return;
+        }
+        let items = self.app.emote_completions(self.app.active, &query, 500);
+        self.completion = (!items.is_empty()).then(|| EmoteCompletion {
+            colon,
+            query,
+            items,
+            selected: 0,
+            scroll: 0.0,
+            rect: Rect::default(),
+        });
+        self.invalidate();
+    }
+
+    /// Keys while the emote list is open; returns whether the key was used.
+    fn completion_key(&mut self, v: VIRTUAL_KEY) -> bool {
+        let Some(c) = self.completion.as_mut() else { return false };
+        let n = c.items.len();
+        let page = ((c.rect.h / COMPLETION_ROW) as usize).max(1);
+        match v {
+            VK_UP => c.selected = (c.selected + n - 1) % n,
+            VK_DOWN => c.selected = (c.selected + 1) % n,
+            VK_PRIOR => c.selected = c.selected.saturating_sub(page),
+            VK_NEXT => c.selected = (c.selected + page).min(n - 1),
+            VK_TAB | VK_RETURN => {
+                self.accept_completion(None);
+                return true;
+            }
+            VK_ESCAPE => {
+                self.completion_dismissed = Some(c.colon);
+                self.completion = None;
+                return true;
+            }
+            _ => return false,
+        }
+        // Keep the selection in view.
+        let top = c.selected as f32 * COMPLETION_ROW;
+        let view = (c.rect.h - 8.0).max(COMPLETION_ROW);
+        if top < c.scroll {
+            c.scroll = top;
+        } else if top + COMPLETION_ROW > c.scroll + view {
+            c.scroll = top + COMPLETION_ROW - view;
+        }
+        true
+    }
+
+    /// Replaces the `:word` with the chosen emote (the selected one, or row `index`).
+    fn accept_completion(&mut self, index: Option<usize>) {
+        let Some(c) = self.completion.take() else { return };
+        let Some(e) = c.items.get(index.unwrap_or(c.selected)) else { return };
+        let text = self.input.text().to_owned();
+        let cursor = self.input.cursor.min(text.len()).max(c.colon);
+        let rest = &text[cursor..];
+        let space = if rest.starts_with(' ') { "" } else { " " };
+        let new = format!("{}{}{space}{rest}", &text[..c.colon], e.name);
+        let caret = c.colon + e.name.len() + space.len().max(usize::from(rest.starts_with(' ')));
+        self.input.set_text(&new, Some(caret));
+        self.completion_dismissed = None;
+        self.typed();
+        self.invalidate();
+    }
+
+    /// Draws the emote list above the input, starting at `anchor_x`; at most as tall as the
+    /// chat pane, scrolling when longer.
+    fn draw_completion(&self, p: &Painter, th: &Theme, c: &mut EmoteCompletion, anchor_x: f32) {
+        let f = &self.text.fonts;
+        let w = 320.0f32.min(self.chat.rect.w - 16.0);
+        let bottom = self.input_rect.y - 6.0;
+        let max_h = (bottom - self.chat.rect.y).max(COMPLETION_ROW + 8.0);
+        let h = (c.items.len() as f32 * COMPLETION_ROW + 8.0).min(max_h);
+        let x = anchor_x.clamp(self.chat.rect.x + 8.0, (self.chat.rect.right() - w - 8.0).max(self.chat.rect.x + 8.0));
+        let r = Rect::new(x, bottom - h, w, h);
+        c.rect = r;
+        c.scroll = c.scroll.clamp(0.0, (c.items.len() as f32 * COMPLETION_ROW + 8.0 - h).max(0.0));
+        p.fill_round(Rect::new(r.x, r.y + 3.0, r.w, r.h), 8.0, with_alpha(crate::gfx::hex(0), 0.25));
+        p.fill_round(r, 8.0, th.panel_bg);
+        p.stroke_round(r, 8.0, th.border, 1.0);
+        let inner = r.inset(4.0, 4.0);
+        p.clip(inner);
+        let first = (c.scroll / COMPLETION_ROW) as usize;
+        let visible = (inner.h / COMPLETION_ROW) as usize + 2;
+        for (i, e) in c.items.iter().enumerate().skip(first).take(visible) {
+            let row = Rect::new(inner.x, inner.y + i as f32 * COMPLETION_ROW - c.scroll, inner.w, COMPLETION_ROW);
+            if i == c.selected {
+                p.fill_round(row, 5.0, with_alpha(th.accent, 0.18));
+            }
+            // The emote itself (loaded like inline emotes), at most twice as wide as tall.
+            let size = self.images.borrow_mut().size(&e.url, false);
+            if let Some((iw, ih)) = size
+                && let Some(bmp) = self.images.borrow().bitmap(&e.url)
+            {
+                let eh = 24.0f32;
+                let ew = (eh * iw as f32 / ih.max(1) as f32).min(eh * 2.0);
+                p.bitmap(&bmp.cast().unwrap(), Rect::new(row.x + 8.0, row.y + (row.h - eh) / 2.0, ew, eh), 1.0);
+            }
+            let label = self.text.layout(&e.label(), &f.ui_small, 120.0, 20.0);
+            let lw = text::metrics(&label).width;
+            p.text(&label, row.right() - lw - 10.0, row.y + (row.h - 14.0) / 2.0, th.text_dim);
+            let name = self.text.layout(&e.name, &f.ui, (row.w - 70.0 - lw - 16.0).max(10.0), 20.0);
+            p.text(&name, row.x + 62.0, row.y + (row.h - 17.0) / 2.0, th.text);
+        }
+        p.unclip();
+        // Scrollbar when the list is longer than the space.
+        let content = c.items.len() as f32 * COMPLETION_ROW;
+        if content > inner.h {
+            let th_h = (inner.h * inner.h / content).max(20.0);
+            let ty = inner.y + (inner.h - th_h) * (c.scroll / (content - inner.h).max(1.0));
+            p.fill_round(Rect::new(r.right() - 7.0, ty, 4.0, th_h), 2.0, th.scrollbar);
+        }
     }
 }

@@ -264,6 +264,130 @@ pub fn parse_channels(body: &[u8]) -> Result<Vec<(String, StreamInfo)>, String> 
         .collect())
 }
 
+// ----- emotes ------------------------------------------------------------------------------------
+
+/// Fetch the Twitch emotes usable in a channel (for completion).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmoteRequest {
+    pub network: NetworkId,
+    /// `#channel`, lowercase.
+    pub channel: String,
+    /// The channel's Twitch user id (ROOMSTATE `room-id`).
+    pub broadcaster_id: String,
+    pub token: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct EmoteResult {
+    pub network: NetworkId,
+    pub channel: String,
+    /// The emotes, and whether only global ones could be fetched because the token lacks the
+    /// `user:read:emotes` permission.
+    pub result: Result<(Vec<crate::emotes::EmoteEntry>, bool), String>,
+}
+
+/// Needed to list the emotes a user may use (follower, subscriber …).
+pub const EMOTES_SCOPE: &str = "user:read:emotes";
+
+/// Runs an emote fetch (blocking).
+pub fn fetch_emotes(req: EmoteRequest) -> EmoteResult {
+    EmoteResult { network: req.network, channel: req.channel.clone(), result: run_emotes(&req) }
+}
+
+fn run_emotes(req: &EmoteRequest) -> Result<(Vec<crate::emotes::EmoteEntry>, bool), String> {
+    let token = normalize_token(&req.token);
+    // Who the token belongs to, for which app, and what it may do.
+    let auth = format!("OAuth {token}");
+    let r = schwaetz_net::http::get_with(
+        "https://id.twitch.tv/oauth2/validate",
+        &[("Authorization", &auth)],
+        MAX_BODY,
+        false,
+    )?;
+    if r.status != 200 {
+        return Err(UNAUTHORIZED.into());
+    }
+    #[derive(Deserialize)]
+    struct V {
+        client_id: String,
+        #[serde(default)]
+        user_id: String,
+        #[serde(default)]
+        scopes: Vec<String>,
+    }
+    let v: V = json(&r.body)?;
+    let bearer = format!("Bearer {token}");
+    let headers = [("Authorization", bearer.as_str()), ("Client-Id", v.client_id.as_str())];
+    let full = !v.user_id.is_empty() && v.scopes.iter().any(|s| s == EMOTES_SCOPE);
+    let mut out = Vec::new();
+    let mut after: Option<String> = None;
+    for _ in 0..30 {
+        let url = if full {
+            let mut u = format!(
+                "{HELIX}/chat/emotes/user?user_id={}&broadcaster_id={}",
+                encode(&v.user_id),
+                encode(&req.broadcaster_id)
+            );
+            if let Some(a) = &after {
+                u.push_str(&format!("&after={}", encode(a)));
+            }
+            u
+        } else {
+            format!("{HELIX}/chat/emotes/global")
+        };
+        let r = schwaetz_net::http::get_with(&url, &headers, 4 << 20, false)?;
+        match r.status {
+            200 => {}
+            401 => return Err(UNAUTHORIZED.into()),
+            s => return Err(format!("emote request failed (HTTP {s})")),
+        }
+        let (page, cursor) = parse_emotes(&r.body, &req.broadcaster_id)?;
+        out.extend(page);
+        match cursor {
+            Some(c) if full => after = Some(c),
+            _ => break,
+        }
+    }
+    Ok((out, !full))
+}
+
+/// Parses a Helix emote list (user or global emotes) and its pagination cursor.
+pub fn parse_emotes(
+    body: &[u8],
+    broadcaster_id: &str,
+) -> Result<(Vec<crate::emotes::EmoteEntry>, Option<String>), String> {
+    #[derive(Deserialize)]
+    struct E {
+        id: String,
+        name: String,
+        #[serde(default)]
+        owner_id: String,
+    }
+    #[derive(Deserialize, Default)]
+    struct P {
+        #[serde(default)]
+        cursor: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct R {
+        data: Vec<E>,
+        #[serde(default)]
+        pagination: P,
+    }
+    let r: R = json(body)?;
+    let list = r
+        .data
+        .into_iter()
+        .map(|e| crate::emotes::EmoteEntry {
+            url: format!("https://static-cdn.jtvnw.net/emoticons/v2/{}/default/dark/1.0", e.id),
+            channel: !broadcaster_id.is_empty() && e.owner_id == broadcaster_id,
+            name: e.name,
+            provider: "twitch".into(),
+        })
+        .collect();
+    Ok((list, r.pagination.cursor.filter(|c| !c.is_empty())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +409,22 @@ mod tests {
         let (_, info) = parse_channels(c).unwrap().remove(0);
         assert_eq!(info.summary(), "Offline · mañana");
         assert!(parse_streams(b"<html>").is_err());
+    }
+
+    #[test]
+    fn parses_emote_lists() {
+        let body = br#"{"data":[
+            {"id":"emotesv2_1","name":"xqcL","emote_type":"subscriptions","emote_set_id":"1","owner_id":"71092938","format":["static"],"scale":["1.0"],"theme_mode":["dark"]},
+            {"id":"25","name":"Kappa","emote_type":"globals","emote_set_id":"0","owner_id":"0"}],
+            "template":"https://static-cdn.jtvnw.net/emoticons/v2/{{id}}/{{format}}/{{theme_mode}}/{{scale}}",
+            "pagination":{"cursor":"next-page"}}"#;
+        let (list, cursor) = parse_emotes(body, "71092938").unwrap();
+        assert_eq!(cursor.as_deref(), Some("next-page"));
+        assert_eq!((list[0].name.as_str(), list[0].channel), ("xqcL", true));
+        assert_eq!((list[1].name.as_str(), list[1].channel), ("Kappa", false));
+        assert_eq!(list[1].url, "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0");
+        let (_, none) = parse_emotes(br#"{"data":[],"pagination":{}}"#, "1").unwrap();
+        assert_eq!(none, None);
     }
 
     #[test]

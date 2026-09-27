@@ -45,7 +45,8 @@ schwaetz.on("message", (line) => {
 ## Doing things
 
 `print`, `exec` (run input as if typed, including `/commands`), `say`, `notice`, `send` (raw
-line), `hide`, `decorate` (inline images, e.g. emotes), `notify`, `networks`, `active`, `now`,
+line), `hide`, `decorate` (inline images, e.g. emotes), `setEmotes` (offer emotes for `:`
+completion in Twitch channels), `notify`, `networks`, `active`, `now`,
 `log` / `console.log`, `setTimeout` / `setInterval` / `clearTimer`, `storage.get` / `storage.set`
 (persisted per script in `<name>.storage.toml`).
 

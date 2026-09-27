@@ -20,8 +20,9 @@ pub fn built_in_client_id() -> Option<&'static str> {
     option_env!("SCHWAETZ_TWITCH_CLIENT_ID").map(str::trim).filter(|s| !s.is_empty())
 }
 
-/// Scopes requested at sign-in. Live checks (streams, users, channels) need none.
-pub const SCOPES: &str = "";
+/// Scopes requested at sign-in: live checks need none; emote completion needs the list of
+/// emotes the user may use.
+pub const SCOPES: &str = crate::helix::EMOTES_SCOPE;
 
 /// Refresh at least this often: a public client's refresh token dies 30 days after it was issued,
 /// and refreshing replaces it.

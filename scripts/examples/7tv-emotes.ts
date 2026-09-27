@@ -1,10 +1,14 @@
-// Shows 7TV, BetterTTV and FrankerFaceZ emotes inline in Twitch channels.
+// Shows 7TV, BetterTTV and FrankerFaceZ emotes inline in Twitch channels and offers them for
+// `:` emote completion.
 // @grant http
 
 type EmoteMap = Map<string, string>; // name → image URL
+type Provider = "7tv" | "bttv" | "ffz";
+type Sets = Record<Provider, EmoteMap>;
 
-const global: EmoteMap = new Map();
-const channels = new Map<string, EmoteMap>(); // "#channel" → emotes
+const newSets = (): Sets => ({ "7tv": new Map(), bttv: new Map(), ffz: new Map() });
+const global: Sets = newSets();
+const channels = new Map<string, Sets>(); // "#channel" → emotes by provider
 const roomIds = new Map<string, string>(); // "#channel" → Twitch user id
 
 function get(url: string, parse: (json: any) => void) {
@@ -38,20 +42,32 @@ function addFfz(map: EmoteMap, sets: any) {
   }
 }
 
+/** Hands one provider's emotes to the client's completion. */
+function offer(provider: Provider, channel: string | null, map: EmoteMap) {
+  schwaetz.setEmotes(provider, channel, [...map].map(([name, url]) => ({ name, url })));
+}
+
+function load(provider: Provider, channel: string | null, map: EmoteMap, url: string, parse: (json: any) => void) {
+  get(url, (j) => {
+    parse(j);
+    offer(provider, channel, map);
+  });
+}
+
 // Global emotes.
-get("https://7tv.io/v3/emote-sets/global", (j) => add7tv(global, j));
-get("https://api.betterttv.net/3/cached/emotes/global", (j) => addBttv(global, j));
-get("https://api.frankerfacez.com/v1/set/global", (j) => addFfz(global, j.sets));
+load("7tv", null, global["7tv"], "https://7tv.io/v3/emote-sets/global", (j) => add7tv(global["7tv"], j));
+load("bttv", null, global.bttv, "https://api.betterttv.net/3/cached/emotes/global", (j) => addBttv(global.bttv, j));
+load("ffz", null, global.ffz, "https://api.frankerfacez.com/v1/set/global", (j) => addFfz(global.ffz, j.sets));
 
 function loadChannel(channel: string, id: string) {
-  const map: EmoteMap = new Map();
-  channels.set(channel, map);
-  get(`https://7tv.io/v3/users/twitch/${id}`, (j) => add7tv(map, j.emote_set));
-  get(`https://api.betterttv.net/3/cached/users/twitch/${id}`, (j) => {
-    addBttv(map, j.channelEmotes);
-    addBttv(map, j.sharedEmotes);
+  const sets = newSets();
+  channels.set(channel, sets);
+  load("7tv", channel, sets["7tv"], `https://7tv.io/v3/users/twitch/${id}`, (j) => add7tv(sets["7tv"], j.emote_set));
+  load("bttv", channel, sets.bttv, `https://api.betterttv.net/3/cached/users/twitch/${id}`, (j) => {
+    addBttv(sets.bttv, j.channelEmotes);
+    addBttv(sets.bttv, j.sharedEmotes);
   });
-  get(`https://api.frankerfacez.com/v1/room/id/${id}`, (j) => addFfz(map, j.sets));
+  load("ffz", channel, sets.ffz, `https://api.frankerfacez.com/v1/room/id/${id}`, (j) => addFfz(sets.ffz, j.sets));
 }
 
 // ROOMSTATE carries the channel's Twitch user id.
@@ -64,26 +80,41 @@ schwaetz.on("raw", (m) => {
   loadChannel(channel, id);
 });
 
+/** The image for a word: the channel's emotes first, then global ones. */
+function lookup(channel: string, word: string): string | undefined {
+  const local = channels.get(channel);
+  for (const p of ["7tv", "ffz", "bttv"] as Provider[]) {
+    const url = local?.[p].get(word);
+    if (url) return url;
+  }
+  for (const p of ["7tv", "ffz", "bttv"] as Provider[]) {
+    const url = global[p].get(word);
+    if (url) return url;
+  }
+  return undefined;
+}
+
 schwaetz.on("message", (line) => {
   if (!line.network || !line.buffer.startsWith("#")) return;
-  const local = channels.get(line.buffer.toLowerCase());
-  if (!local && global.size === 0) return;
+  const channel = line.buffer.toLowerCase();
   const emotes: { start: number; end: number; url: string; name: string }[] = [];
   const re = /\S+/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(line.plain)) !== null) {
     const word = m[0];
-    const url = local?.get(word) ?? global.get(word);
+    const url = lookup(channel, word);
     if (url) emotes.push({ start: m.index, end: m.index + word.length, url, name: word });
   }
   if (emotes.length) schwaetz.decorate(line, emotes);
 });
 
+const count = (s: Sets | undefined) => (s ? s["7tv"].size + s.bttv.size + s.ffz.size : 0);
+
 schwaetz.command(
   "emotes",
   (ctx) => {
     const local = channels.get(ctx.buffer.toLowerCase());
-    schwaetz.print(`${global.size} global and ${local?.size ?? 0} channel emotes loaded`, ctx);
+    schwaetz.print(`${count(global)} global and ${count(local)} channel emotes loaded`, ctx);
   },
   "Show how many third-party emotes are loaded",
 );

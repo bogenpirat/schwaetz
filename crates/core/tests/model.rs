@@ -816,3 +816,57 @@ fn twitch_topic_keeps_status_game_and_viewers_apart_from_the_title() {
     let (_, joined) = h.app.topic_for(h.buffer("#xqc"));
     assert_eq!(joined, format!("{}{}{}", t.lead, t.body, t.tail));
 }
+
+#[test]
+fn emote_completion_orders_channel_twitch_then_third_party_then_global() {
+    use schwaetz_core::emotes::EmoteEntry;
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.app.set_twitch_api_token(h.net, Some("tok".into()));
+    h.connect();
+    h.lines(&[
+        ":tmi.twitch.tv 001 me :hi",
+        ":tmi.twitch.tv 376 me :>",
+        ":me!me@me.tmi.twitch.tv JOIN #xqc",
+        "@room-id=71092938 :tmi.twitch.tv ROOMSTATE #xqc",
+    ]);
+    let c = h.buffer("#xqc");
+    h.app.take_effects();
+
+    // Looking at the channel fetches its Twitch emotes (once).
+    h.app.switch_to(c);
+    let reqs: Vec<_> = h
+        .app
+        .take_effects()
+        .into_iter()
+        .filter_map(|e| match e {
+            Effect::TwitchEmotes(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!((reqs[0].channel.as_str(), reqs[0].broadcaster_id.as_str()), ("#xqc", "71092938"));
+    h.app.switch_to(c);
+    assert!(!h.app.take_effects().iter().any(|e| matches!(e, Effect::TwitchEmotes(_))), "in flight");
+
+    let twitch = |name: &str, channel: bool| EmoteEntry {
+        name: name.into(),
+        url: format!("https://e/{name}"),
+        provider: "twitch".into(),
+        channel,
+    };
+    h.app.on_emote_result(schwaetz_core::helix::EmoteResult {
+        network: h.net,
+        channel: "#xqc".into(),
+        result: Ok((vec![twitch("xqcL", true), twitch("LUL", false)], false)),
+    });
+    h.app.set_script_emotes("7tv", Some("#xqc"), vec![("LULW".into(), "https://7tv/LULW".into())]);
+    h.app.set_script_emotes("bttv", None, vec![("LULE".into(), "https://bttv/LULE".into())]);
+    h.app.set_script_emotes("7tv", Some("#other"), vec![("LULother".into(), "https://7tv/x".into())]);
+
+    let names = |q: &str| h.app.emote_completions(c, q, 50).into_iter().map(|e| e.name).collect::<Vec<_>>();
+    assert_eq!(names("lu"), ["LULW", "LUL", "LULE"], "7TV channel, then Twitch global, then BTTV global");
+    assert_eq!(names("x"), ["xqcL"]);
+    // Only Twitch channels complete emotes.
+    let server = h.app.network(h.net).unwrap().server_buffer;
+    assert!(h.app.emote_completions(server, "lu", 50).is_empty());
+}

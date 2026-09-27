@@ -60,6 +60,9 @@ pub enum Effect {
     OpenUrl(String),
     /// Run a Twitch live check on a worker thread and pass the result to `App::on_live_result`.
     TwitchLive(crate::helix::LiveRequest),
+    /// Fetch a channel's usable Twitch emotes on a worker thread (`helix::fetch_emotes`) and pass
+    /// the result to `App::on_emote_result`.
+    TwitchEmotes(crate::helix::EmoteRequest),
     /// Talk to Twitch's OAuth server on a worker thread (`twitch_auth::execute`) and pass the
     /// response to `App::on_auth_result`.
     TwitchAuth {
@@ -181,6 +184,12 @@ pub struct App {
     mem_secrets: Option<std::collections::HashMap<String, String>>,
     /// The chat line being processed, as received (attached to the chat line it produces).
     current_raw: Option<Box<str>>,
+    /// Twitch emotes usable per (network, `#channel`), for completion.
+    twitch_emotes: std::collections::HashMap<(NetworkId, String), EmoteCache>,
+    /// Emotes handed over by scripts per (provider, `#channel` or `None` for global).
+    script_emotes: std::collections::HashMap<(String, Option<String>), Vec<crate::emotes::EmoteEntry>>,
+    /// Whether the "sign in again for your emotes" hint was shown, per network.
+    emote_scope_hint: std::collections::HashSet<NetworkId>,
     /// Commands registered by scripts (completion and /help).
     pub extra_commands: Vec<(String, String)>,
     /// Persistent history (logging, scroll-back, search).
@@ -213,6 +222,9 @@ impl App {
             rawlog: false,
             mem_secrets: None,
             current_raw: None,
+            twitch_emotes: Default::default(),
+            script_emotes: Default::default(),
+            emote_scope_hint: Default::default(),
             extra_commands: Vec::new(),
             history: None,
             config,
@@ -431,6 +443,8 @@ impl App {
         if self.buffer(id).is_none() {
             return;
         }
+        // Twitch channels: have their emotes ready for completion.
+        self.request_emotes(id);
         let prev = self.active;
         if prev != id {
             self.sync_read_marker(prev);
@@ -1942,7 +1956,14 @@ impl App {
                             b.room_state.push((k.to_owned(), v.to_owned()));
                         }
                     }
+                    if let Some(id) = tags.value("room-id").filter(|id| !id.is_empty()) {
+                        b.room_id = Some(id.to_owned());
+                    }
                     self.dirty.topic = true;
+                    // The emotes of the channel being looked at can be fetched now.
+                    if bid == self.active {
+                        self.request_emotes(bid);
+                    }
                 }
             }
             TwitchEvent::UserState { tags, .. } => {
@@ -2715,5 +2736,99 @@ impl App {
             self.effects.push(Effect::SaveConfig);
         }
         self.dirty.sidebar = true;
+    }
+}
+
+// ----- emote completion --------------------------------------------------------------------------
+
+/// Twitch emotes of one channel, as last fetched.
+#[derive(Default)]
+struct EmoteCache {
+    list: Vec<crate::emotes::EmoteEntry>,
+    fetched_at: i64,
+    in_flight: bool,
+}
+
+/// Refetch a channel's emotes after this long (subscriptions and follows change).
+const EMOTE_REFRESH_MS: i64 = 30 * 60 * 1000;
+
+impl App {
+    /// Fetches the Twitch emotes usable in a channel if they are missing or stale (needs the
+    /// channel's id from ROOMSTATE and an API token).
+    pub fn request_emotes(&mut self, buffer: BufferId) {
+        let Some(b) = self.buffer(buffer).filter(|b| b.kind == BufferKind::Channel) else { return };
+        let (Some(net), Some(room_id)) = (b.network, b.room_id.clone()) else { return };
+        let channel = b.name.to_ascii_lowercase();
+        if !self.networks.get(&net).is_some_and(|n| n.is_twitch()) {
+            return;
+        }
+        let now = self.now;
+        let cache = self.twitch_emotes.entry((net, channel.clone())).or_default();
+        if cache.in_flight || (cache.fetched_at != 0 && now - cache.fetched_at < EMOTE_REFRESH_MS) {
+            return;
+        }
+        let Some((token, _)) = self.api_token(net) else { return };
+        let cache = self.twitch_emotes.get_mut(&(net, channel.clone())).unwrap();
+        cache.in_flight = true;
+        let req = crate::helix::EmoteRequest { network: net, channel, broadcaster_id: room_id, token };
+        self.effects.push(Effect::TwitchEmotes(req));
+    }
+
+    /// An [`Effect::TwitchEmotes`] fetch finished.
+    pub fn on_emote_result(&mut self, r: crate::helix::EmoteResult) {
+        let now = self.now;
+        let cache = self.twitch_emotes.entry((r.network, r.channel.clone())).or_default();
+        cache.in_flight = false;
+        cache.fetched_at = now;
+        match r.result {
+            Ok((list, only_global)) => {
+                cache.list = list;
+                let signed_in = self.networks.get(&r.network).is_some_and(|n| n.auth.access_token().is_some());
+                if only_global && signed_in && self.emote_scope_hint.insert(r.network) {
+                    let sb = self.networks[&r.network].server_buffer;
+                    self.status(
+                        sb,
+                        LineKind::Status,
+                        "Emote completion offers Twitch's global emotes only: sign in with Twitch again (network \
+                         settings or /twitch login) to allow access to your follower and subscriber emotes.",
+                    );
+                }
+            }
+            Err(e) => tracing::warn!("emotes for {}: {e}", r.channel),
+        }
+    }
+
+    /// Replaces the emotes a script provides for a channel (`Some("#channel")`) or globally, e.g.
+    /// its 7TV, FFZ or BTTV set.
+    pub fn set_script_emotes(&mut self, provider: &str, channel: Option<&str>, emotes: Vec<(String, String)>) {
+        let provider = provider.to_ascii_lowercase();
+        let key = (provider.clone(), channel.map(|c| c.to_ascii_lowercase()));
+        let list = emotes
+            .into_iter()
+            .filter(|(name, url)| !name.is_empty() && !url.is_empty())
+            .map(|(name, url)| crate::emotes::EmoteEntry {
+                name,
+                url,
+                provider: provider.clone(),
+                channel: key.1.is_some(),
+            })
+            .collect();
+        self.script_emotes.insert(key, list);
+    }
+
+    /// Emote completions for `query` in a Twitch channel buffer, best first.
+    pub fn emote_completions(&self, buffer: BufferId, query: &str, limit: usize) -> Vec<crate::emotes::EmoteEntry> {
+        let Some(b) = self.buffer(buffer).filter(|b| b.kind == BufferKind::Channel) else { return Vec::new() };
+        let Some(net) = b.network.filter(|n| self.networks.get(n).is_some_and(|n| n.is_twitch())) else {
+            return Vec::new();
+        };
+        let channel = b.name.to_ascii_lowercase();
+        let twitch = self.twitch_emotes.get(&(net, channel.clone())).map(|c| c.list.iter()).into_iter().flatten();
+        let scripts = self
+            .script_emotes
+            .iter()
+            .filter(|((_, c), _)| c.as_deref().is_none_or(|c| c == channel))
+            .flat_map(|(_, list)| list.iter());
+        crate::emotes::complete(twitch.chain(scripts), query, limit)
     }
 }

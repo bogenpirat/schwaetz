@@ -54,6 +54,15 @@ away for channels you join later, and every `live_check_secs` after that. The st
 game show in the topic bar (`🔴 Live · Game — Title · 1,234 viewers` or `Offline · Game — Title`),
 and going live, going offline and title or game changes are printed in the channel.
 
+**Twitch emote completion:** in a Twitch channel, typing `:` followed by a letter or digit at the
+start of a word lists matching emotes above the input (↑/↓, PgUp/PgDn to move, Tab or Enter to
+insert, Esc to close; clicking an entry inserts it too). Order: the channel's Twitch emotes you may
+use (follower, subscriber tiers), then the channel's 7TV, FFZ and BTTV emotes, then global ones.
+Twitch emotes need the Twitch sign-in (it asks for permission to read your emotes; sign-ins from
+before this was added need to sign in once more); without it only Twitch's global emotes are
+offered, if any API token is available. 7TV/FFZ/BTTV emotes come from scripts, such as the bundled
+`7tv-emotes` example.
+
 **ZNC:** `/znc <command>` talks to `*status`; `/znc import` offers to add your other ZNC networks.
 
 ## General (`[general]`)

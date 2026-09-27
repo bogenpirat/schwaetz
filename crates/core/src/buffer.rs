@@ -256,6 +256,8 @@ pub struct Buffer {
     pub room_state: Vec<(String, String)>,
     /// Twitch: stream state from the Helix API (shown in place of a topic).
     pub stream: Option<crate::helix::StreamInfo>,
+    /// Twitch: the channel's user id (ROOMSTATE `room-id`).
+    pub room_id: Option<String>,
     recent_ids: VecDeque<String>,
     recent_set: HashSet<String>,
     /// Bumped on every change; the UI compares it to decide what to redraw.
@@ -287,6 +289,7 @@ impl Buffer {
             history_loading: false,
             room_state: Vec::new(),
             stream: None,
+            room_id: None,
             recent_ids: VecDeque::new(),
             recent_set: HashSet::new(),
             generation: 0,

@@ -40,15 +40,52 @@ enum Target {
 }
 
 enum Action {
-    Print { target: Target, text: String },
-    Exec { target: Target, text: String },
-    Say { network: String, target: String, text: String, notice: bool },
-    Send { network: String, line: String },
-    Hide { buffer: u32, line: u64 },
-    Decorate { buffer: u32, line: u64, emotes: Vec<(u32, u32, String, String)> },
-    Notify { title: String, body: String },
-    HttpGet { script: u32, url: String, cb: Persistent<Function<'static>> },
-    Error { script: u32, text: String },
+    Print {
+        target: Target,
+        text: String,
+    },
+    Exec {
+        target: Target,
+        text: String,
+    },
+    Say {
+        network: String,
+        target: String,
+        text: String,
+        notice: bool,
+    },
+    Send {
+        network: String,
+        line: String,
+    },
+    Hide {
+        buffer: u32,
+        line: u64,
+    },
+    Decorate {
+        buffer: u32,
+        line: u64,
+        emotes: Vec<(u32, u32, String, String)>,
+    },
+    /// Emotes offered for completion: provider, channel (`None` = global), (name, url).
+    SetEmotes {
+        provider: String,
+        channel: Option<String>,
+        emotes: Vec<(String, String)>,
+    },
+    Notify {
+        title: String,
+        body: String,
+    },
+    HttpGet {
+        script: u32,
+        url: String,
+        cb: Persistent<Function<'static>>,
+    },
+    Error {
+        script: u32,
+        text: String,
+    },
 }
 
 struct Handler {
@@ -413,6 +450,9 @@ impl Host {
                         }
                     }
                     Action::Hide { buffer, line } => app.remove_line(BufferId(buffer), line),
+                    Action::SetEmotes { provider, channel, emotes } => {
+                        app.set_script_emotes(&provider, channel.as_deref(), emotes)
+                    }
                     Action::Decorate { buffer, line, emotes } => {
                         if let Some(b) = app.buffer_mut(BufferId(buffer))
                             && let Some(l) = b.lines.iter_mut().find(|l| l.id == line)
@@ -641,6 +681,25 @@ fn install_api<'js>(
             sh.borrow_mut().actions.push(Action::Decorate { buffer, line: id, emotes: list });
             Ok(())
         })?,
+    )?;
+    let sh = shared.clone();
+    api.set(
+        "setEmotes",
+        Function::new(
+            ctx.clone(),
+            move |provider: Coerced<String>,
+                  channel: Option<Coerced<String>>,
+                  emotes: Vec<Object<'js>>|
+                  -> rquickjs::Result<()> {
+                let mut list = Vec::with_capacity(emotes.len());
+                for e in emotes {
+                    list.push((e.get::<_, Coerced<String>>("name")?.0, e.get::<_, Coerced<String>>("url")?.0));
+                }
+                let channel = channel.map(|c| c.0).filter(|c| !c.is_empty());
+                sh.borrow_mut().actions.push(Action::SetEmotes { provider: provider.0, channel, emotes: list });
+                Ok(())
+            },
+        )?,
     )?;
     let sh = shared.clone();
     api.set(
