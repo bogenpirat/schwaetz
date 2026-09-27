@@ -559,14 +559,9 @@ impl ChatView {
     }
 
     fn nick_color(&self, c: &Ctx, line: &Line) -> crate::gfx::Color {
-        let th = c.theme;
-        if line.flags.has(LineFlags::OWN) {
-            return th.own_nick;
-        }
-        if let Some(rgb) = line.extra.as_ref().and_then(|e| e.color) {
-            return ensure_contrast(crate::gfx::hex(rgb), th.chat_bg, 3.0);
-        }
-        if c.colored_nicks { th.nick_color(&line.nick) } else { th.text }
+        let own = line.flags.has(LineFlags::OWN);
+        let twitch = line.extra.as_ref().and_then(|e| e.color);
+        pick_nick_color(c.theme, c.colored_nicks, own, twitch, &line.nick)
     }
 
     fn ensure(&mut self, c: &mut Ctx, line: &Line, m: &Metrics) -> f32 {
@@ -1099,5 +1094,39 @@ impl ChatView {
     /// The line drawn at vertical position `y`, if any.
     pub fn line_at(&self, y: f32) -> Option<u64> {
         self.drawn.iter().find(|d| y >= d.y && y < d.y + d.h).map(|d| d.id)
+    }
+}
+
+/// The color of a nick in the chat: your own nick keeps its color; with "Colored nicks" off every
+/// other nick uses the text color (including Twitch users' own name colors), otherwise Twitch's
+/// color (made readable on the background) or one from the theme's palette.
+pub fn pick_nick_color(th: &Theme, colored: bool, own: bool, twitch: Option<u32>, nick: &str) -> crate::gfx::Color {
+    if own {
+        return th.own_nick;
+    }
+    if !colored {
+        return th.text;
+    }
+    match twitch {
+        Some(rgb) => ensure_contrast(crate::gfx::hex(rgb), th.chat_bg, 3.0),
+        None => th.nick_color(nick),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colored_nicks_setting_covers_twitch_colors() {
+        let th = Theme::dark();
+        let red = Some(0xff0000);
+        // Off: plain text color for everyone but yourself, Twitch colors included.
+        assert_eq!(pick_nick_color(&th, false, false, red, "alice"), th.text);
+        assert_eq!(pick_nick_color(&th, false, false, None, "alice"), th.text);
+        assert_eq!(pick_nick_color(&th, false, true, None, "me"), th.own_nick);
+        // On: Twitch's color, otherwise the palette.
+        assert_ne!(pick_nick_color(&th, true, false, red, "alice"), th.text);
+        assert_eq!(pick_nick_color(&th, true, false, None, "alice"), th.nick_color("alice"));
     }
 }

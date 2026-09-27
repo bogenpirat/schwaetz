@@ -659,7 +659,7 @@ impl Ui {
         self.set_ime_pos(inner.x + cx, inner.y + cy - scroll_y + ch);
 
         if self.show_nicklist {
-            self.nicklist.render(&p, &self.text, &th);
+            self.nicklist.render(&p, &self.text, &th, self.app.config.appearance.colored_nicks);
         }
         // Sidebar edge.
         p.line(self.sidebar_w - 0.5, 0.0, self.sidebar_w - 0.5, self.win_rect.h, th.border, 1.0);

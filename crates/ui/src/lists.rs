@@ -297,7 +297,8 @@ impl NickList {
         self.members.is_empty()
     }
 
-    pub fn render(&mut self, p: &Painter, text: &Text, th: &Theme) {
+    /// `colored`: the "Colored nicks" setting (off: all names in the text color).
+    pub fn render(&mut self, p: &Painter, text: &Text, th: &Theme, colored: bool) {
         let f = &text.fonts;
         p.fill(self.rect, th.nicklist_bg);
         p.line(self.rect.x, self.rect.y, self.rect.x, self.rect.bottom(), th.border, 1.0);
@@ -329,7 +330,13 @@ impl NickList {
             }
             let name = if *bot { format!("{nick} 🤖") } else { nick.clone() };
             let l = text.layout(&name, &f.ui, r.w - 30.0, 20.0);
-            let color = if *away { with_alpha(th.text_dim, 0.8) } else { th.nick_color(nick) };
+            let color = if *away {
+                with_alpha(th.text_dim, 0.8)
+            } else if colored {
+                th.nick_color(nick)
+            } else {
+                th.text
+            };
             p.text(&l, r.x + 22.0, y + 4.0, color);
         }
         p.unclip();
