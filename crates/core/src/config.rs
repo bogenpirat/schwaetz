@@ -111,6 +111,9 @@ pub struct Appearance {
     pub show_nicklist: bool,
     pub colored_nicks: bool,
     pub show_mirc_colors: bool,
+    /// Unread badges in the sidebar: "all" (new messages), "highlights" (highlights only) or
+    /// "none". Networks can override it (`NetworkConfig::unread_badges`).
+    pub unread_badges: String,
     pub mica: bool,
     /// Render on the GPU. Off by default: the CPU rasterizer (WARP) is fast enough for text and
     /// avoids the GPU driver's large memory footprint.
@@ -130,6 +133,7 @@ impl Default for Appearance {
             show_nicklist: true,
             colored_nicks: true,
             show_mirc_colors: true,
+            unread_badges: "all".into(),
             mica: true,
             gpu_acceleration: false,
         }
@@ -298,6 +302,10 @@ pub struct NetworkConfig {
     /// listed come after, alphabetically.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub channel_order: Vec<String>,
+    /// Unread badges for this network's buffers ("all", "highlights" or "none"); unset follows
+    /// `appearance.unread_badges`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unread_badges: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -334,6 +342,7 @@ impl Default for NetworkConfig {
             twitch_popout: false,
             twitch_live_first: false,
             channel_order: Vec::new(),
+            unread_badges: None,
         }
     }
 }

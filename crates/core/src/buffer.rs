@@ -351,6 +351,16 @@ impl Buffer {
         self.generation += 1;
     }
 
+    /// The sidebar badge in a badge mode ("all", "highlights" or "none"): the count to show and
+    /// whether it includes highlights.
+    pub fn badge(&self, mode: &str) -> Option<(u32, bool)> {
+        match mode {
+            "none" => None,
+            "highlights" => (self.highlights > 0).then_some((self.highlights, true)),
+            _ => (self.unread > 0).then_some((self.unread, self.highlights > 0)),
+        }
+    }
+
     pub fn bump(&mut self, activity: Activity) {
         if activity > self.activity {
             self.activity = activity;
@@ -383,6 +393,20 @@ mod tests {
             text: "t".into(),
             extra: None,
         }
+    }
+
+    #[test]
+    fn badge_modes() {
+        let mut b = Buffer::new(BufferId(1), None, BufferKind::Channel, "#c", 100);
+        assert_eq!(b.badge("all"), None);
+        b.unread = 5;
+        assert_eq!(b.badge("all"), Some((5, false)));
+        assert_eq!(b.badge("highlights"), None);
+        assert_eq!(b.badge("none"), None);
+        b.highlights = 2;
+        assert_eq!(b.badge("all"), Some((5, true)));
+        assert_eq!(b.badge("highlights"), Some((2, true)));
+        assert_eq!(b.badge("none"), None);
     }
 
     #[test]

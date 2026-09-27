@@ -33,6 +33,7 @@ auto_connect = true
 | `twitch_colors` | Twitch: show the name colors users picked in the chat, exactly as Twitch sends them (your own included; default on), whatever `colored_nicks` says |
 | `twitch_popout` | Twitch: "Open stream" (topic bar button, channel menu) opens the popout player instead of the channel page |
 | `twitch_live_first` | Twitch: list live channels before offline ones in the sidebar, each group in your arranged order |
+| `unread_badges` | Unread badges for this network: `all`, `highlights` or `none` (unset: as in `[appearance]`) |
 | `channel_order` | Sidebar order of the channels; drag channels in the sidebar to arrange them (empty = alphabetical, unlisted channels go last) |
 
 Secrets: `/secret <network> sasl <password>`, `/secret <network> pass <password>`,
@@ -81,10 +82,12 @@ window are removed. Being kicked or `/cycle` keeps a channel on the list.
 
 `theme` (`system`, `dark`, `light`, or the name of a file in `themes\`), `font`, `font_size`,
 `ui_font`, `timestamp_format` (`%H %M %S %d %m %Y %y %A %B`), `nick_column`,
-`nick_column_width`, `show_nicklist`, `colored_nicks`, `show_mirc_colors`, `mica`,
+`nick_column_width`, `show_nicklist`, `colored_nicks`, `show_mirc_colors`, `unread_badges`, `mica`,
 `gpu_acceleration` (off by default: the CPU rasterizer is fast enough for text and saves the GPU
 driver's ~50 MB). `colored_nicks` colors names from the theme's palette: in the member list, and
 in the chat for names without a Twitch color (see the network setting `twitch_colors`).
+`unread_badges` sets the counts next to buffers in the sidebar: `all` (new messages, the
+default), `highlights` (only highlights are counted) or `none`; networks can override it.
 
 ### Themes
 

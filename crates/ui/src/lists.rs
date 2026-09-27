@@ -4,7 +4,7 @@ use crate::anim::{Anims, Control, mix};
 use crate::gfx::{Painter, Rect, with_alpha};
 use crate::text::{self, Text};
 use crate::theme::Theme;
-use schwaetz_core::{Activity, App, Buffer, BufferId, BufferKind, ConnState, NotifyLevel};
+use schwaetz_core::{Activity, App, BufferId, BufferKind, ConnState, NotifyLevel};
 
 const NET_ROW_H: f32 = 32.0;
 const ROW_H: f32 = 28.0;
@@ -116,7 +116,7 @@ impl Sidebar {
             } else {
                 r
             };
-            let right = badge(p, text, th, b, active, badge_area);
+            let right = badge(p, text, th, app.badge(id).filter(|_| !active), badge_area);
 
             if is_net {
                 let net = b.network.and_then(|n| app.network(n));
@@ -205,10 +205,7 @@ impl Sidebar {
         let active = app.active == sb;
         let status = status.inset(anims.press(Control::SidebarStatus) * 1.5, anims.press(Control::SidebarStatus) * 1.0);
         row_background(p, th, status, active, anims.hover(Control::SidebarStatus));
-        let right = match app.buffer(sb) {
-            Some(b) => badge(p, text, th, b, active, status),
-            None => status.right() - 8.0,
-        };
+        let right = badge(p, text, th, app.badge(sb).filter(|_| !active), status);
         let g = text.layout(ICON_STATUS, &f.icons, 24.0, 24.0);
         let gm = text::metrics(&g);
         p.text(&g, status.x + 12.0, status.y + (status.h - gm.height) / 2.0, th.sidebar_fg);
@@ -289,18 +286,17 @@ fn icon_face(p: &Painter, th: &Theme, r: Rect, hover: f32, press: f32) -> Rect {
     face
 }
 
-/// Unread badge at the right end of a row; returns where the row's text has to end.
-fn badge(p: &Painter, text: &Text, th: &Theme, b: &Buffer, active: bool, r: Rect) -> f32 {
+/// Unread badge (count, includes highlights) at the right end of a row; returns where the row's
+/// text has to end.
+fn badge(p: &Painter, text: &Text, th: &Theme, badge: Option<(u32, bool)>, r: Rect) -> f32 {
     let right = r.right() - 8.0;
-    if b.unread == 0 || active {
-        return right;
-    }
-    let label = if b.unread > 999 { "999+".to_owned() } else { b.unread.to_string() };
+    let Some((count, highlight)) = badge else { return right };
+    let label = if count > 999 { "999+".to_owned() } else { count.to_string() };
     let l = text.layout(&label, &text.fonts.ui_small, 60.0, 20.0);
     let tw = text::metrics(&l).width;
     let bw = (tw + 12.0).max(20.0);
     let br = Rect::new(right - bw, r.y + (r.h - 18.0) / 2.0, bw, 18.0);
-    let (bg, fg) = if b.highlights > 0 { (th.badge_highlight, th.accent_fg) } else { (th.badge_bg, th.badge_fg) };
+    let (bg, fg) = if highlight { (th.badge_highlight, th.accent_fg) } else { (th.badge_bg, th.badge_fg) };
     p.fill_round(br, 9.0, bg);
     p.text(&l, br.x + (bw - tw) / 2.0, br.y + 2.0, fg);
     br.x - 6.0

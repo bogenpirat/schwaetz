@@ -369,6 +369,17 @@ impl Form {
             text("perform", "Commands on connect", "separate with ;  e.g. /mode $nick +x", &c.perform.join(" ; ")),
             check("rejoin_on_kick", "Rejoin when kicked", c.rejoin_on_kick),
             check("previews", "Link previews on this network", c.previews),
+            choice(
+                "unread_badges",
+                "Unread badges",
+                vec![
+                    ("", "As in the settings"),
+                    ("all", "New messages"),
+                    ("highlights", "Highlights only"),
+                    ("none", "Off"),
+                ],
+                c.unread_badges.as_deref().unwrap_or(""),
+            ),
             header("Twitch"),
             button("twitch_signin", "Account", "Sign in with Twitch"),
             password("twitch_api", "Manual API token", has(SecretKind::TwitchApi)),
@@ -407,6 +418,12 @@ impl Form {
             check("colored_nicks", "Colored nicks (theme palette)", a.colored_nicks),
             check("show_mirc_colors", "Show mIRC colors", a.show_mirc_colors),
             check("show_nicklist", "Show member list", a.show_nicklist),
+            choice(
+                "unread_badges",
+                "Unread badges",
+                vec![("all", "New messages"), ("highlights", "Highlights only"), ("none", "Off")],
+                &a.unread_badges,
+            ),
             check("mica", "Mica backdrop (Windows 11)", a.mica),
             check("gpu_acceleration", "GPU rendering (uses more memory)", a.gpu_acceleration),
             header("Chat"),
@@ -579,6 +596,7 @@ impl Form {
             twitch_colors: self.check("twitch_colors"),
             twitch_popout: self.check("twitch_popout"),
             twitch_live_first: self.check("twitch_live_first"),
+            unread_badges: Some(self.choice("unread_badges")).filter(|m| !m.is_empty()).map(str::to_owned),
             ..base
         };
         Ok((cfg, secrets))
@@ -614,6 +632,7 @@ impl Form {
         c.appearance.colored_nicks = self.check("colored_nicks");
         c.appearance.show_mirc_colors = self.check("show_mirc_colors");
         c.appearance.show_nicklist = self.check("show_nicklist");
+        c.appearance.unread_badges = self.choice("unread_badges").into();
         c.appearance.mica = self.check("mica");
         c.appearance.gpu_acceleration = self.check("gpu_acceleration");
         c.general.show_joins_parts = self.choice("show_joins_parts").into();

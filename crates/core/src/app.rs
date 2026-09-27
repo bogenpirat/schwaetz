@@ -266,6 +266,14 @@ impl App {
         self.networks.get(&id)
     }
 
+    /// The sidebar badge of a buffer (count, includes highlights), in the network's badge mode or
+    /// else `appearance.unread_badges`.
+    pub fn badge(&self, buffer: BufferId) -> Option<(u32, bool)> {
+        let b = self.buffer(buffer)?;
+        let mode = self.network_of(buffer).and_then(|n| n.cfg.unread_badges.as_deref());
+        b.badge(mode.unwrap_or(&self.config.appearance.unread_badges))
+    }
+
     pub fn network_of(&self, buffer: BufferId) -> Option<&Network> {
         self.buffer(buffer).and_then(|b| b.network).and_then(|n| self.networks.get(&n))
     }
