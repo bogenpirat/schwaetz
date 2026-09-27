@@ -20,6 +20,8 @@ pub struct Fonts {
     pub title: IDWriteTextFormat,
     /// Symbol font for toolbar icons (Segoe Fluent Icons, or Segoe MDL2 Assets on Windows 10).
     pub icons: IDWriteTextFormat,
+    /// Monospace, wrapping (raw protocol lines).
+    pub mono: IDWriteTextFormat,
     pub mono_family: HSTRING,
     pub chat_size: f32,
     /// Height of one chat text line.
@@ -119,6 +121,7 @@ impl Text {
         let title = format(dw, &ui_f, 15.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, true)?;
         let icon_f = pick("Segoe Fluent Icons", &["Segoe MDL2 Assets"]);
         let icons = format(dw, &icon_f, 15.0, DWRITE_FONT_WEIGHT_NORMAL, true)?;
+        let mono_fmt = format(dw, &mono, 12.5, DWRITE_FONT_WEIGHT_NORMAL, false)?;
 
         // Measure line height and average glyph width with a sample layout.
         let sample: Vec<u16> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".encode_utf16().collect();
@@ -135,6 +138,7 @@ impl Text {
             ui_small,
             title,
             icons,
+            mono: mono_fmt,
             mono_family: mono,
             chat_size: size,
             line_height: m.height.max(size * 1.2),

@@ -130,6 +130,8 @@ pub struct LineExtra {
     pub account: Option<String>,
     /// STATUSMSG prefix (`@` for `@#chan`).
     pub status: Option<char>,
+    /// The IRC line as received, tags included (live messages only; not kept in history).
+    pub raw: Option<Box<str>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

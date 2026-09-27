@@ -170,6 +170,8 @@ pub struct App {
     pub rawlog: bool,
     /// Tests: secrets live here instead of the Windows Credential Manager.
     mem_secrets: Option<std::collections::HashMap<String, String>>,
+    /// The chat line being processed, as received (attached to the chat line it produces).
+    current_raw: Option<Box<str>>,
     /// Commands registered by scripts (completion and /help).
     pub extra_commands: Vec<(String, String)>,
     /// Persistent history (logging, scroll-back, search).
@@ -201,6 +203,7 @@ impl App {
             track_new_lines: false,
             rawlog: false,
             mem_secrets: None,
+            current_raw: None,
             extra_commands: Vec::new(),
             history: None,
             config,
@@ -822,10 +825,14 @@ impl App {
                 if self.rawlog && self.networks.contains_key(&id) {
                     self.raw_log(id, "«", &msg);
                 }
+                // Chat lines keep their raw form ("View raw message").
+                self.current_raw = matches!(msg.command.as_str(), "PRIVMSG" | "NOTICE" | "USERNOTICE")
+                    .then(|| msg.to_line().into_boxed_str());
                 if let Some(net) = self.networks.get_mut(&id) {
                     net.session.on_message(msg, now);
                     self.flush(id);
                 }
+                self.current_raw = None;
             }
             NetEvent::Lag { id, ms } => {
                 if let Some(net) = self.networks.get_mut(&id) {
@@ -1551,6 +1558,9 @@ impl App {
         line.flags.set(LineFlags::HISTORY, history);
         line.flags.set(LineFlags::BOT, tags.contains("bot") || tags.contains("draft/bot"));
         let mut extra = LineExtra { msgid: msgid.clone(), ..Default::default() };
+        if !history {
+            extra.raw = self.current_raw.take();
+        }
         if let Target::Channel { status: Some(s), .. } = target {
             extra.status = Some(s);
             line.flags.set(LineFlags::STATUSMSG, true);
@@ -1908,6 +1918,7 @@ impl App {
                 }
                 let mut line = self.new_line(time, LineKind::System, &who, body);
                 let mut extra = LineExtra { msgid: tags.value("id").map(str::to_owned), ..Default::default() };
+                extra.raw = self.current_raw.take();
                 extra.color = tags.value("color").and_then(twitch::parse_color);
                 line.extra = Some(Box::new(extra));
                 self.add_line(bid, line, Activity::Messages);

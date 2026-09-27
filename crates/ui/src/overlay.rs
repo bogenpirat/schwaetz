@@ -23,9 +23,31 @@ pub enum ConfirmAction {
 }
 
 pub enum Overlay {
-    QuickSwitch { input: Editor, selected: usize, results: Vec<BufferId> },
-    Confirm { title: String, body: String, yes: String, action: ConfirmAction },
-    ChannelList { net: NetworkId, filter: Editor, scroll: f32, selected: usize, rows: Vec<usize>, by_users: bool },
+    QuickSwitch {
+        input: Editor,
+        selected: usize,
+        results: Vec<BufferId>,
+    },
+    Confirm {
+        title: String,
+        body: String,
+        yes: String,
+        action: ConfirmAction,
+    },
+    ChannelList {
+        net: NetworkId,
+        filter: Editor,
+        scroll: f32,
+        selected: usize,
+        rows: Vec<usize>,
+        by_users: bool,
+    },
+    /// A chat line as received, with its tags listed.
+    Raw {
+        raw: String,
+        scroll: f32,
+        content_h: f32,
+    },
 }
 
 /// Subsequence fuzzy match; higher is better, `None` if not all characters match.
@@ -84,7 +106,7 @@ impl Overlay {
         match self {
             Overlay::QuickSwitch { input, .. } => Some(input),
             Overlay::ChannelList { filter, .. } => Some(filter),
-            Overlay::Confirm { .. } => None,
+            Overlay::Confirm { .. } | Overlay::Raw { .. } => None,
         }
     }
 
@@ -138,7 +160,7 @@ impl Overlay {
                 *selected = (*selected).min(rows.len().saturating_sub(1));
                 *scroll = scroll.min((rows.len() as f32 * 26.0).max(0.0));
             }
-            Overlay::Confirm { .. } => {}
+            Overlay::Confirm { .. } | Overlay::Raw { .. } => {}
         }
     }
 
@@ -162,7 +184,7 @@ impl Overlay {
                     }
                 }
             }
-            Overlay::Confirm { .. } => {}
+            Overlay::Confirm { .. } | Overlay::Raw { .. } => {}
         }
     }
 
@@ -170,7 +192,9 @@ impl Overlay {
         let (w, h) = match self {
             Overlay::QuickSwitch { results, .. } => (520.0, 64.0 + results.len().max(1) as f32 * 34.0 + 12.0),
             Overlay::Confirm { .. } => (440.0, 190.0),
-            Overlay::ChannelList { .. } => (760.0f32.min(win.w - 40.0), (win.h - 80.0).min(560.0)),
+            Overlay::ChannelList { .. } | Overlay::Raw { .. } => {
+                (760.0f32.min(win.w - 40.0), (win.h - 80.0).min(560.0))
+            }
         };
         let top = if matches!(self, Overlay::QuickSwitch { .. }) { win.y + 90.0 } else { win.y + (win.h - h) / 2.0 };
         Rect::new(win.x + (win.w - w) / 2.0, top, w, h)
@@ -246,6 +270,45 @@ impl Overlay {
                 let nw = text::metrics(&nl).width;
                 p.text(&nl, face.x + (face.w - nw) / 2.0, face.y + (face.h - 18.0) / 2.0, th.text);
             }
+            Overlay::Raw { raw, scroll, content_h } => {
+                let t = text.layout("Raw message", &f.title, panel.w - 48.0, 30.0);
+                p.text(&t, panel.x + 24.0, panel.y + 20.0, th.text);
+                let (yes_r, no_r) = confirm_buttons(panel);
+                let body = Rect::new(panel.x + 24.0, panel.y + 60.0, panel.w - 48.0, yes_r.y - 14.0 - (panel.y + 60.0));
+                p.clip(body);
+                let mut y = body.y - *scroll;
+                // The line exactly as received.
+                let l = text.layout(raw, &f.mono, body.w, 10_000.0);
+                p.text(&l, body.x, y, th.text);
+                y += text::metrics(&l).height + 18.0;
+                // Its IRCv3 tags, unescaped, one per row.
+                let tags = schwaetz_proto::Message::parse(raw).map(|m| m.tags).unwrap_or_default();
+                if tags.iter().next().is_some() {
+                    let h = text.layout("TAGS", &f.ui_small, body.w, 20.0);
+                    p.text(&h, body.x, y, th.accent);
+                    y += 22.0;
+                    let key_w = 170.0f32.min(body.w * 0.4);
+                    for (k, v) in tags.iter() {
+                        let kl = text.layout(k, &f.mono, key_w - 12.0, 1000.0);
+                        let vl = text.layout(if v.is_empty() { "(empty)" } else { v }, &f.mono, body.w - key_w, 1000.0);
+                        p.text(&kl, body.x, y, th.text_dim);
+                        p.text(&vl, body.x + key_w, y, if v.is_empty() { th.text_dim } else { th.text });
+                        y += text::metrics(&vl).height.max(text::metrics(&kl).height) + 4.0;
+                    }
+                }
+                p.unclip();
+                *content_h = y + *scroll - body.y;
+                use crate::anim::{Control, button_face};
+                let (c_yes, c_no) = (Control::ConfirmYes, Control::ConfirmNo);
+                let face = button_face(p, yes_r, 6.0, th.accent, th, anims.hover(c_yes), anims.press(c_yes));
+                let yl = text.layout("Copy line", &f.ui_semibold, yes_r.w, 30.0);
+                let yw = text::metrics(&yl).width;
+                p.text(&yl, face.x + (face.w - yw) / 2.0, face.y + (face.h - 18.0) / 2.0, th.accent_fg);
+                let face = button_face(p, no_r, 6.0, th.badge_bg, th, anims.hover(c_no), anims.press(c_no));
+                let nl = text.layout("Close", &f.ui_semibold, no_r.w, 30.0);
+                let nw = text::metrics(&nl).width;
+                p.text(&nl, face.x + (face.w - nw) / 2.0, face.y + (face.h - 18.0) / 2.0, th.text);
+            }
             Overlay::ChannelList { net, filter, scroll, selected, rows, by_users } => {
                 let Some(n) = app.network(*net) else { return };
                 let title = if n.channel_list_complete {
@@ -314,7 +377,7 @@ impl Overlay {
                     OverlayTarget::Other
                 }
             }
-            Overlay::Confirm { .. } => {
+            Overlay::Confirm { .. } | Overlay::Raw { .. } => {
                 let (yes, no) = confirm_buttons(panel);
                 if yes.contains(x, y) {
                     OverlayTarget::Yes
@@ -347,7 +410,7 @@ impl Overlay {
                 }
                 OverlayClick::None
             }
-            Overlay::Confirm { .. } => {
+            Overlay::Confirm { .. } | Overlay::Raw { .. } => {
                 let (yes, no) = confirm_buttons(panel);
                 if yes.contains(x, y) {
                     OverlayClick::Accept
@@ -374,8 +437,14 @@ impl Overlay {
     }
 
     pub fn scroll(&mut self, dy: f32) {
-        if let Overlay::ChannelList { scroll, rows, .. } = self {
-            *scroll = (*scroll - dy).clamp(0.0, (rows.len() as f32 * 26.0 - 200.0).max(0.0));
+        match self {
+            Overlay::ChannelList { scroll, rows, .. } => {
+                *scroll = (*scroll - dy).clamp(0.0, (rows.len() as f32 * 26.0 - 200.0).max(0.0));
+            }
+            Overlay::Raw { scroll, content_h, .. } => {
+                *scroll = (*scroll - dy).clamp(0.0, (*content_h - 200.0).max(0.0))
+            }
+            _ => {}
         }
     }
 }

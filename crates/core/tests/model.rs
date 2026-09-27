@@ -757,3 +757,30 @@ fn channels_can_be_arranged_and_twitch_can_list_live_first() {
     h.app.move_channel(h.buffer("#alpha"), Some(h.buffer("#charlie")));
     assert_eq!(channel_names(&h), ["#alpha", "#charlie", "#delta", "#bravo", "#echo"]);
 }
+
+#[test]
+fn live_chat_lines_keep_their_raw_form() {
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.connect();
+    h.lines(&[
+        ":tmi.twitch.tv CAP * ACK :twitch.tv/tags twitch.tv/commands",
+        ":tmi.twitch.tv 001 me :hi",
+        ":tmi.twitch.tv 376 me :>",
+        ":me!me@me.tmi.twitch.tv JOIN #chan",
+        "@badge-info=;color=#FF4500;display-name=Alice;id=abc;tmi-sent-ts=1 :alice!alice@alice.tmi.twitch.tv PRIVMSG #chan :hello there",
+        r"@msg-id=raid;system-msg=Bob\sis\sraiding :tmi.twitch.tv USERNOTICE #chan",
+    ]);
+    let b = h.app.buffer(h.buffer("#chan")).unwrap();
+    let raws: Vec<String> =
+        b.lines.iter().filter_map(|l| l.extra.as_ref()?.raw.as_deref().map(str::to_owned)).collect();
+    assert_eq!(raws.len(), 2, "{raws:?}");
+    let msg = schwaetz_proto::Message::parse(&raws[0]).unwrap();
+    assert_eq!(msg.command, "PRIVMSG");
+    assert_eq!(msg.tags.value("display-name"), Some("Alice"));
+    assert_eq!(msg.tags.value("color"), Some("#FF4500"));
+    assert!(raws[1].contains("USERNOTICE") && raws[1].contains(r"system-msg=Bob\sis\sraiding"));
+    // Join and status lines have none.
+    assert!(
+        b.lines.iter().filter(|l| l.kind == LineKind::Join).all(|l| l.extra.as_ref().is_none_or(|e| e.raw.is_none()))
+    );
+}

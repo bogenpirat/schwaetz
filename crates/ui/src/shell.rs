@@ -1613,6 +1613,7 @@ impl Ui {
                 ConfirmAction::AddZncNetworks { net, names } => self.add_znc_networks(net, names),
                 ConfirmAction::RemoveNetwork { name } => self.remove_network(&name),
             },
+            Overlay::Raw { raw, .. } => win::set_clipboard(self.hwnd, &raw),
             Overlay::ChannelList { net, rows, selected, .. } => {
                 let name = self.app.network(net).and_then(|n| rows.get(selected).map(|&i| n.channel_list[i].0.clone()));
                 if let Some(name) = name {
@@ -2196,9 +2197,18 @@ impl Ui {
                 _ => {
                     let has_sel = self.chat.selection.is_some();
                     let filtered = self.chat.show_filtered;
+                    // The line under the pointer, if it was received live (raw form known).
+                    let raw = self.chat.line_at(y).and_then(|id| {
+                        let b = self.app.active_buffer();
+                        b.lines.iter().rev().find(|l| l.id == id)?.extra.as_ref()?.raw.as_deref().map(str::to_owned)
+                    });
                     let mut items = vec![];
                     if has_sel {
                         items.push(MenuItem::Item(1, "Copy"));
+                        items.push(MenuItem::Separator);
+                    }
+                    if raw.is_some() {
+                        items.push(MenuItem::Item(4, "View raw message"));
                         items.push(MenuItem::Separator);
                     }
                     items.push(MenuItem::Check(2, "Show hidden joins/parts", filtered));
@@ -2215,6 +2225,11 @@ impl Ui {
                             let id = self.app.active;
                             if let Some(b) = self.app.buffer_mut(id) {
                                 b.clear();
+                            }
+                        }
+                        4 => {
+                            if let Some(raw) = raw {
+                                self.overlay = Some(Overlay::Raw { raw, scroll: 0.0, content_h: 0.0 });
                             }
                         }
                         _ => {}
