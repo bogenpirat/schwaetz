@@ -82,8 +82,10 @@ pub struct Form {
     pub error: Option<String>,
     /// The field the last validation error is about (to show its page).
     error_key: Cell<&'static str>,
-    /// Laid-out rows of the current page: (field, row, control).
-    rows: Vec<(usize, Rect, Rect)>,
+    /// Laid-out rows of the current page: (field, row, control, horizontal text scroll).
+    rows: Vec<(usize, Rect, Rect, f32)>,
+    /// Text field being drag-selected with the mouse.
+    selecting: Option<usize>,
     nav: Vec<Rect>,
     nav_hover: Option<usize>,
     buttons: Vec<(FormAction, Rect)>,
@@ -189,6 +191,7 @@ impl Form {
             error: None,
             error_key: Cell::new(""),
             rows: Vec::new(),
+            selecting: None,
             nav: Vec::new(),
             nav_hover: None,
             buttons: Vec::new(),
@@ -665,6 +668,7 @@ impl Form {
             let open = self.dropdown.is_some_and(|(d, _)| d == i);
             let field = &mut self.fields[i];
             let row = Rect::new(list.x, y, list.w, ROW_H);
+            let mut text_dx = 0.0;
             let ctl = Rect::new(list.x + LABEL_W, y + 4.0, ctl_w, ROW_H - 8.0);
             // Switches sit at the right edge, so their labels can use the whole row.
             let label_w =
@@ -682,13 +686,17 @@ impl Form {
                     let ty = ctl.y + (ctl.h - lh) / 2.0;
                     let (cx, _, ch) = ed.caret();
                     let dx = (cx - inner.w + 4.0).max(0.0);
+                    text_dx = dx;
                     p.clip(inner);
                     if ed.is_empty() && !field.hint.is_empty() {
                         let hl = text.layout(field.hint, &f.ui, inner.w, 20.0);
                         p.text(&hl, inner.x, ty, with_alpha(th.text_dim, 0.8));
                     }
-                    for (sx, sy, sw, sh) in ed.selection_rects() {
-                        p.fill(Rect::new(inner.x + sx - dx, ty + sy, sw, sh), th.selection);
+                    // Only the focused field shows its selection, as in Windows edit boxes.
+                    if focused {
+                        for (sx, sy, sw, sh) in ed.selection_rects() {
+                            p.fill(Rect::new(inner.x + sx - dx, ty + sy, sw, sh), th.selection);
+                        }
                     }
                     p.text(&lay, inner.x - dx, ty, th.text);
                     if focused && caret_on {
@@ -743,7 +751,7 @@ impl Form {
                 }
                 FieldKind::Header => {}
             }
-            self.rows.push((i, row, ctl));
+            self.rows.push((i, row, ctl, text_dx));
             y += ROW_H;
         }
         p.unclip();
@@ -798,7 +806,7 @@ impl Form {
         // Open dropdown, drawn over everything else.
         self.popup.clear();
         if let Some((fi, hi)) = self.dropdown
-            && let Some(&(_, _, ctl)) = self.rows.iter().find(|(i, ..)| *i == fi)
+            && let Some(&(_, _, ctl, _)) = self.rows.iter().find(|(i, ..)| *i == fi)
             && let FieldKind::Choice(opts, idx) = &self.fields[fi].kind
         {
             let h = opts.len() as f32 * OPTION_H + 8.0;
@@ -825,7 +833,9 @@ impl Form {
         }
     }
 
-    pub fn click(&mut self, win: Rect, x: f32, y: f32) -> FormAction {
+    /// A left click; `double` for the second click of a double-click, `shift` extends the
+    /// selection in text fields.
+    pub fn click(&mut self, win: Rect, x: f32, y: f32, double: bool, shift: bool) -> FormAction {
         // With a dropdown open, a click picks an option or just closes it.
         if let Some((fi, _)) = self.dropdown.take() {
             if let Some(i) = self.popup.iter().position(|r| r.contains(x, y))
@@ -860,7 +870,9 @@ impl Form {
         if !self.list_rect(win).contains(x, y) {
             return FormAction::None;
         }
-        let Some(&(i, _, ctl)) = self.rows.iter().find(|(_, r, _)| r.contains(x, y)) else { return FormAction::None };
+        let Some(&(i, _, ctl, dx)) = self.rows.iter().find(|(_, r, ..)| r.contains(x, y)) else {
+            return FormAction::None;
+        };
         self.focus = i;
         if matches!(self.fields[i].kind, FieldKind::Button { .. }) {
             return if ctl.contains(x, y) { FormAction::Button(self.fields[i].key) } else { FormAction::None };
@@ -876,8 +888,12 @@ impl Form {
                 }
             }
             FieldKind::Text(ed) | FieldKind::Password(ed, _) => {
-                if x >= ctl.x {
-                    ed.click(x - ctl.x - 10.0, 10.0, false);
+                if double {
+                    // Double-click selects the whole value.
+                    ed.select_all();
+                } else {
+                    ed.click((x - ctl.x - 10.0 + dx).max(0.0), 10.0, shift);
+                    self.selecting = Some(i);
                 }
             }
             FieldKind::Header | FieldKind::Button { .. } => {}
@@ -889,6 +905,13 @@ impl Form {
     pub fn mouse_move(&mut self, x: f32, y: f32) -> bool {
         if self.grab.is_some() {
             self.drag_to(y);
+            return true;
+        }
+        if let Some(i) = self.selecting
+            && let Some(&(_, _, ctl, dx)) = self.rows.iter().find(|(r, ..)| *r == i)
+            && let FieldKind::Text(ed) | FieldKind::Password(ed, _) = &mut self.fields[i].kind
+        {
+            ed.click((x - ctl.x - 10.0 + dx).max(0.0), 10.0, true);
             return true;
         }
         let mut changed = false;
@@ -908,6 +931,7 @@ impl Form {
     }
 
     pub fn mouse_up(&mut self) -> bool {
+        self.selecting = None;
         self.grab.take().is_some()
     }
 
@@ -923,7 +947,7 @@ impl Form {
         if self.dropdown.is_some() || !self.list_rect(win).contains(x, y) {
             return None;
         }
-        let &(i, _, _) = self.rows.iter().find(|(_, _, ctl)| ctl.contains(x, y))?;
+        let &(i, ..) = self.rows.iter().find(|(_, _, ctl, _)| ctl.contains(x, y))?;
         if !matches!(self.fields[i].kind, FieldKind::Text(_) | FieldKind::Password(..)) {
             return None;
         }
@@ -937,7 +961,7 @@ impl Form {
     /// Whether the pointer is over a text box (for the I-beam cursor).
     pub fn text_at(&self, x: f32, y: f32) -> bool {
         self.dropdown.is_none()
-            && self.rows.iter().any(|(i, _, ctl)| {
+            && self.rows.iter().any(|(i, _, ctl, _)| {
                 ctl.contains(x, y) && matches!(self.fields[*i].kind, FieldKind::Text(_) | FieldKind::Password(..))
             })
     }

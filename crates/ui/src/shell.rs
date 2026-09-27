@@ -1574,7 +1574,7 @@ impl Ui {
         }
         self.tooltip = None;
         if let Some(f) = self.form.as_mut() {
-            let action = f.click(self.win_rect, x, y);
+            let action = f.click(self.win_rect, x, y, double, win::key_down(VK_SHIFT.0));
             self.form_action(action);
             self.invalidate();
             return;
