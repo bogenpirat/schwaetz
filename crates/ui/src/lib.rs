@@ -6,6 +6,7 @@ pub mod editor;
 pub mod gfx;
 pub mod lists;
 pub mod overlay;
+pub mod scrollbar;
 pub mod shell;
 pub mod text;
 pub mod theme;

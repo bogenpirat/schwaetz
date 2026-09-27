@@ -128,6 +128,12 @@ pub struct ChatView {
     nick_fit: NickFit,
     /// Measured widths of nick column texts (badges, status prefix and name).
     nick_widths: HashMap<String, f32>,
+    /// Scrollbar as last drawn (only while the lines don't all fit).
+    pub bar: Option<crate::scrollbar::Scrollbar>,
+    /// The scrollbar is hovered or dragged (drawn wider).
+    pub bar_hot: bool,
+    /// Lines that fit above the bottom one in the last frame (maps scrollbar positions to lines).
+    per_view: usize,
 }
 
 /// Width of the widest nick column text in a buffer, kept up to date as lines arrive.
@@ -192,6 +198,9 @@ impl Default for ChatView {
             nicks: HashMap::new(),
             nick_fit: NickFit::default(),
             nick_widths: HashMap::new(),
+            bar: None,
+            bar_hot: false,
+            per_view: 0,
         }
     }
 }
@@ -711,6 +720,28 @@ impl ChatView {
         self.anchor = None;
     }
 
+    /// Scrolls to a scrollbar position: 0 shows the oldest lines, 1 the newest.
+    pub fn scroll_to(&mut self, c: &mut Ctx, b: &Buffer, pos: f32) {
+        let vis: Vec<usize> = (0..b.lines.len()).filter(|&i| visible(&b.lines[i], self.show_filtered)).collect();
+        if vis.is_empty() {
+            return;
+        }
+        // The position picks the line at the bottom edge, from the last of the first screenful
+        // to the newest.
+        let n = vis.len();
+        let lo = self.per_view.min(n - 1);
+        let ai = lo + ((n - 1 - lo) as f32 * pos.clamp(0.0, 1.0)).round() as usize;
+        if ai + 1 >= n {
+            self.scroll_to_bottom();
+            return;
+        }
+        self.pinned = false;
+        self.anchor = Some(b.lines[vis[ai]].id);
+        self.anchor_y = self.rect.h - PAD_BOTTOM;
+        // Settles the anchor (and stops at the oldest line).
+        self.scroll(c, b, 0.0);
+    }
+
     pub fn render(&mut self, p: &Painter, c: &mut Ctx, b: &Buffer) {
         self.frame += 1;
         self.fit_nicks(c, b);
@@ -722,6 +753,7 @@ impl ChatView {
             self.nicks.clear();
         }
         let vis: Vec<usize> = (0..b.lines.len()).filter(|&i| visible(&b.lines[i], self.show_filtered)).collect();
+        self.bar = None;
         if vis.is_empty() {
             return;
         }
@@ -747,6 +779,10 @@ impl ChatView {
             // The whole buffer fits: nothing older in memory, try history.
             self.wants_older = true;
         }
+        // Everything from the oldest line down to the anchor is in view.
+        let all_above = vi < 0 && y >= 0.0;
+        let above = blocks.len();
+        self.per_view = above.saturating_sub(1);
         blocks.reverse();
         let mut y = anchor_bottom;
         let mut vi = ai + 1;
@@ -786,13 +822,16 @@ impl ChatView {
         }
         p.unclip();
 
-        // Scrollbar (only when not pinned).
-        if !self.pinned && vis.len() > 1 {
-            let frac = ai as f32 / (vis.len() - 1) as f32;
-            let track = self.rect.h - 16.0;
-            let thumb_h = (track * 0.08).max(24.0);
-            let ty = self.rect.y + 8.0 + (track - thumb_h) * frac;
-            p.fill_round(Rect::new(self.rect.right() - 7.0, ty, 4.0, thumb_h), 2.0, th.scrollbar);
+        // Scrollbar while not all lines fit; positions as in `scroll_to`.
+        if !all_above || !self.pinned {
+            let n = vis.len();
+            let lo = self.per_view.min(n - 1);
+            let pos = if self.pinned || n - 1 <= lo { 1.0 } else { ai.saturating_sub(lo) as f32 / (n - 1 - lo) as f32 };
+            let bar = crate::scrollbar::Scrollbar::new(self.rect, above as f32 / n as f32, pos);
+            bar.draw(p, th, self.bar_hot);
+            self.bar = Some(bar);
+        }
+        if !self.pinned {
             // "Jump to latest" pill.
             let label = c.text.layout("↓  Jump to latest", &c.text.fonts.ui_small, 200.0, 20.0);
             let w = text::metrics(&label).width + 24.0;

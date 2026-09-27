@@ -303,7 +303,16 @@ pub struct NickList {
     rows_top: f32,
     row_h: f32,
     pub hover: Option<usize>,
+    /// Scrollbar as last drawn (only while the members don't all fit).
+    pub bar: Option<crate::scrollbar::Scrollbar>,
+    /// The scrollbar is hovered or dragged (drawn wider).
+    pub bar_hot: bool,
 }
+
+/// Height of a member row.
+const MEMBER_H: f32 = 24.0;
+/// Space above the first member (the header).
+const MEMBERS_TOP: f32 = 36.0;
 
 impl NickList {
     /// Rebuilds the member list for a channel buffer.
@@ -319,8 +328,17 @@ impl NickList {
             let bot = u.is_some_and(|u| u.bot);
             self.members.push((m.highest(), m.nick.clone(), away, bot));
         }
-        let max = (self.members.len() as f32 * 22.0 - self.rect.h + 40.0).max(0.0);
-        self.scroll = self.scroll.min(max);
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+
+    /// How far the list scrolls: the members' height beyond what fits below the header.
+    fn max_scroll(&self) -> f32 {
+        (self.members.len() as f32 * MEMBER_H - (self.rect.h - MEMBERS_TOP - 4.0)).max(0.0)
+    }
+
+    /// Scrolls to a scrollbar position (0 = top, 1 = bottom).
+    pub fn scroll_to(&mut self, pos: f32) {
+        self.scroll = self.max_scroll() * pos.clamp(0.0, 1.0);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -332,13 +350,14 @@ impl NickList {
         let f = &text.fonts;
         p.fill(self.rect, th.nicklist_bg);
         p.line(self.rect.x, self.rect.y, self.rect.x, self.rect.bottom(), th.border, 1.0);
-        p.clip(self.rect);
         let n = self.members.len();
         let header =
             text.layout(&format!("{n} {}", if n == 1 { "MEMBER" } else { "MEMBERS" }), &f.ui_small, self.rect.w, 20.0);
         p.text(&header, self.rect.x + 16.0, self.rect.y + 12.0, th.text_dim);
-        self.row_h = 24.0;
-        self.rows_top = self.rect.y + 36.0;
+        self.row_h = MEMBER_H;
+        self.rows_top = self.rect.y + MEMBERS_TOP;
+        // Rows scroll under the header, not over it.
+        p.clip(Rect::new(self.rect.x, self.rows_top, self.rect.w, self.rect.bottom() - self.rows_top));
         let first = (self.scroll / self.row_h) as usize;
         let count = (self.rect.h / self.row_h) as usize + 2;
         for (i, (prefix, nick, away, bot)) in self.members.iter().enumerate().skip(first).take(count) {
@@ -370,6 +389,15 @@ impl NickList {
             p.text(&l, r.x + 22.0, y + 4.0, color);
         }
         p.unclip();
+        let max = self.max_scroll();
+        self.bar = (max > 0.0).then(|| {
+            let area = Rect::new(self.rect.x, self.rows_top, self.rect.w, self.rect.bottom() - self.rows_top);
+            let content = self.members.len() as f32 * MEMBER_H;
+            crate::scrollbar::Scrollbar::new(area, (content - max) / content, self.scroll / max)
+        });
+        if let Some(bar) = self.bar {
+            bar.draw(p, th, self.bar_hot);
+        }
     }
 
     pub fn hit(&self, x: f32, y: f32) -> Option<usize> {
@@ -385,8 +413,7 @@ impl NickList {
     }
 
     pub fn scroll_by(&mut self, dy: f32) {
-        let max = (self.members.len() as f32 * self.row_h.max(1.0) - self.rect.h + 40.0).max(0.0);
-        self.scroll = (self.scroll - dy).clamp(0.0, max);
+        self.scroll = (self.scroll - dy).clamp(0.0, self.max_scroll());
     }
 }
 

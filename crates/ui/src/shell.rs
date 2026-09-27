@@ -81,7 +81,7 @@ const SIDEBAR_MIN: f32 = 160.0;
 const TOPIC_H: f32 = 56.0;
 const NICKLIST_W: f32 = 210.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 enum Drag {
     None,
     Chat,
@@ -90,6 +90,10 @@ enum Drag {
     /// A channel row pressed in the sidebar; it becomes a rearranging drag once the pointer has
     /// moved a few pixels (`row_drag_from`).
     Row(BufferId),
+    /// The chat's scrollbar thumb, held this far below its top.
+    ChatBar(f32),
+    /// The member list's scrollbar thumb, held this far below its top.
+    NickBar(f32),
 }
 
 pub struct Services {
@@ -1369,6 +1373,16 @@ impl Ui {
     }
 
     fn chat_scroll(&mut self, dy: f32) {
+        self.with_chat(|chat, ctx, b| chat.scroll(ctx, b, dy));
+    }
+
+    /// Scrolls the chat to a scrollbar position (0 = oldest lines, 1 = newest).
+    fn chat_scroll_to(&mut self, pos: f32) {
+        self.with_chat(|chat, ctx, b| chat.scroll_to(ctx, b, pos));
+    }
+
+    /// Runs a chat view operation that needs line heights, then redraws.
+    fn with_chat(&mut self, f: impl FnOnce(&mut ChatView, &mut crate::chat::Ctx, &schwaetz_core::Buffer)) {
         let Some(mut gfx) = self.gfx.take() else { return };
         // Scrolling needs line heights, which need a device context for brushes.
         let dgen = gfx.generation;
@@ -1379,7 +1393,7 @@ impl Ui {
             let th = theme.clone();
             let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, app, images, anims);
             if let Some(b) = app.buffer(id) {
-                chat.scroll(&mut ctx, b, dy);
+                f(chat, &mut ctx, b);
             }
             self.draw(dc, dgen);
         });
@@ -1887,6 +1901,28 @@ impl Ui {
             }
             return;
         }
+        // Scrollbars: the thumb is dragged; a click beside it jumps there first.
+        if self.show_nicklist
+            && let Some(bar) = self.nicklist.bar.filter(|b| b.contains(x, y))
+        {
+            let grab = bar.grab(y);
+            self.nicklist.scroll_to(bar.pos_at(y, grab));
+            self.nicklist.bar_hot = true;
+            self.drag = Drag::NickBar(grab);
+            self.invalidate();
+            return;
+        }
+        if let Some(bar) = self.chat.bar.filter(|b| b.contains(x, y)) {
+            let grab = bar.grab(y);
+            if !bar.thumb.contains(x, y) {
+                self.chat_scroll_to(bar.pos_at(y, grab));
+            }
+            self.chat.bar_hot = true;
+            self.chat.hover = None;
+            self.drag = Drag::ChatBar(grab);
+            self.invalidate();
+            return;
+        }
         if self.show_nicklist && self.nicklist.rect.contains(x, y) {
             if double
                 && let Some(i) = self.nicklist.hit(x, y)
@@ -2019,6 +2055,17 @@ impl Ui {
                 self.input.click(x - inner.x, y - inner.y, true);
                 self.invalidate();
             }
+            Drag::ChatBar(grab) => {
+                if let Some(bar) = self.chat.bar {
+                    self.chat_scroll_to(bar.pos_at(y, grab));
+                }
+            }
+            Drag::NickBar(grab) => {
+                if let Some(bar) = self.nicklist.bar {
+                    self.nicklist.scroll_to(bar.pos_at(y, grab));
+                    self.invalidate();
+                }
+            }
             Drag::Row(id) => {
                 if self.sidebar.drag.is_none() && (y - self.row_drag_from).abs() < 5.0 {
                     return;
@@ -2042,6 +2089,13 @@ impl Ui {
                 // Footer and network buttons animate via `anims.hot`; here only their tooltips.
                 let button = self.sidebar.button_at(x, y);
                 let net_button = self.sidebar.network_button_at(x, y);
+                // Scrollbars widen under the pointer.
+                let chat_bar = self.chat.bar.is_some_and(|b| b.contains(x, y)) && !self.over_completion(x, y);
+                let nick_bar = self.show_nicklist && self.nicklist.bar.is_some_and(|b| b.contains(x, y));
+                if (chat_bar, nick_bar) != (self.chat.bar_hot, self.nicklist.bar_hot) {
+                    (self.chat.bar_hot, self.nicklist.bar_hot) = (chat_bar, nick_bar);
+                    self.invalidate();
+                }
                 let nh = if self.show_nicklist { self.nicklist.hit(x, y) } else { None };
                 if nh != self.nicklist.hover {
                     self.nicklist.hover = nh;
@@ -2090,6 +2144,10 @@ impl Ui {
         {
             let action = f.release(self.win_rect, x, y);
             self.form_action(action);
+        }
+        if matches!(self.drag, Drag::ChatBar(_) | Drag::NickBar(_)) {
+            self.chat.bar_hot = self.chat.bar.is_some_and(|b| b.contains(x, y));
+            self.nicklist.bar_hot = self.show_nicklist && self.nicklist.bar.is_some_and(|b| b.contains(x, y));
         }
         if let Drag::Row(id) = self.drag
             && let Some(d) = self.sidebar.drag.take()
@@ -2253,6 +2311,12 @@ impl Ui {
             return IDC_SIZENS;
         }
         if self.over_completion(x, y) {
+            return IDC_ARROW;
+        }
+        if matches!(self.drag, Drag::ChatBar(_) | Drag::NickBar(_))
+            || self.chat.bar.is_some_and(|b| b.contains(x, y))
+            || (self.show_nicklist && self.nicklist.bar.is_some_and(|b| b.contains(x, y)))
+        {
             return IDC_ARROW;
         }
         if (self.reply_rect.h > 0.0 && self.reply_close_rect().contains(x, y))
@@ -2980,8 +3044,12 @@ impl Ui {
                         || self.sidebar.hover.is_some()
                         || self.anims.hot.is_some()
                         || self.nicklist.hover.is_some()
+                        || self.chat.bar_hot
+                        || self.nicklist.bar_hot
                         || self.tooltip.is_some())
                 {
+                    self.chat.bar_hot = false;
+                    self.nicklist.bar_hot = false;
                     self.tooltip = None;
                     self.chat.hover = None;
                     self.sidebar.hover = None;
