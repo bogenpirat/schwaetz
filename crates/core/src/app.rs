@@ -190,6 +190,8 @@ pub struct App {
     script_emotes: std::collections::HashMap<(String, Option<String>), Vec<crate::emotes::EmoteEntry>>,
     /// Whether the "sign in again for your emotes" hint was shown, per network.
     emote_scope_hint: std::collections::HashSet<NetworkId>,
+    /// Bumped whenever emote lists change, so an open (or not yet opened) completion updates.
+    pub emote_gen: u64,
     /// Commands registered by scripts (completion and /help).
     pub extra_commands: Vec<(String, String)>,
     /// Persistent history (logging, scroll-back, search).
@@ -225,6 +227,7 @@ impl App {
             twitch_emotes: Default::default(),
             script_emotes: Default::default(),
             emote_scope_hint: Default::default(),
+            emote_gen: 0,
             extra_commands: Vec::new(),
             history: None,
             config,
@@ -2783,6 +2786,7 @@ impl App {
         match r.result {
             Ok((list, only_global)) => {
                 cache.list = list;
+                self.emote_gen += 1;
                 let signed_in = self.networks.get(&r.network).is_some_and(|n| n.auth.access_token().is_some());
                 if only_global && signed_in && self.emote_scope_hint.insert(r.network) {
                     let sb = self.networks[&r.network].server_buffer;
@@ -2814,6 +2818,7 @@ impl App {
             })
             .collect();
         self.script_emotes.insert(key, list);
+        self.emote_gen += 1;
     }
 
     /// Emote completions for `query` in a Twitch channel buffer, best first.

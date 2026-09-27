@@ -163,6 +163,9 @@ pub struct Ui {
     completion: Option<EmoteCompletion>,
     /// Byte offset of the `:` whose completion was dismissed with Esc (stays closed for it).
     completion_dismissed: Option<usize>,
+    /// What the completion was last computed for: (`:` offset, query, emote data generation).
+    /// Emote lists arrive asynchronously; a newer generation recomputes even with no key press.
+    completion_for: Option<(usize, String, u64)>,
 }
 
 thread_local! {
@@ -304,6 +307,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         row_drag_from: 0.0,
         completion: None,
         completion_dismissed: None,
+        completion_for: None,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -825,6 +829,10 @@ impl Ui {
     fn after_update(&mut self) {
         if self.restore_active.is_some() {
             self.check_restore_active();
+        }
+        // Emote lists arrive asynchronously: a `:word` typed before they did gets its list now.
+        if self.form.is_none() && self.overlay.is_none() {
+            self.refresh_completion();
         }
         for _ in 0..4 {
             let lines = self.app.take_new_lines();
@@ -3239,24 +3247,40 @@ impl Ui {
         let colon = word.checked_sub(1).filter(|&i| before.as_bytes()[i] == b':');
         let opens_word = |i: usize| i == 0 || before[..i].chars().next_back().is_some_and(char::is_whitespace);
         let Some(colon) = colon.filter(|&i| word < cursor && opens_word(i)) else {
+            if self.completion.is_some() {
+                self.invalidate();
+            }
             self.completion = None;
             self.completion_dismissed = None;
+            self.completion_for = None;
             return;
         };
         if self.completion_dismissed == Some(colon) {
             return;
         }
         let query = before[word..].to_owned();
-        if self.completion.as_ref().is_some_and(|c| c.colon == colon && c.query == query) {
+        let key = (colon, query.clone(), self.app.emote_gen);
+        if self.completion_for.as_ref() == Some(&key) {
             return;
         }
+        self.completion_for = Some(key);
+        // Keep the selection on the same emote when only the lists changed.
+        let keep = self
+            .completion
+            .as_ref()
+            .filter(|c| c.colon == colon && c.query == query)
+            .map(|c| (c.items.get(c.selected).map(|e| e.name.clone()), c.scroll));
         let items = self.app.emote_completions(self.app.active, &query, 500);
+        let (selected, scroll) = match keep {
+            Some((Some(name), scroll)) => (items.iter().position(|e| e.name == name).unwrap_or(0), scroll),
+            _ => (0, 0.0),
+        };
         self.completion = (!items.is_empty()).then(|| EmoteCompletion {
             colon,
             query,
             items,
-            selected: 0,
-            scroll: 0.0,
+            selected,
+            scroll,
             rect: Rect::default(),
         });
         self.invalidate();
@@ -3306,6 +3330,7 @@ impl Ui {
         let caret = c.colon + e.name.len() + space.len().max(usize::from(rest.starts_with(' ')));
         self.input.set_text(&new, Some(caret));
         self.completion_dismissed = None;
+        self.completion_for = None;
         self.typed();
         self.invalidate();
     }
