@@ -1817,6 +1817,9 @@ impl Ui {
                 self.pressed = Some(Pressed::Completion(i));
                 return;
             }
+            if c.rect.contains(x, y) {
+                return;
+            }
             // A click anywhere else closes the list (until the next `:`).
             self.completion_dismissed = Some(c.colon);
             self.completion = None;
@@ -2018,13 +2021,17 @@ impl Ui {
                     self.nicklist.hover = nh;
                     self.invalidate();
                 }
-                let ch = if self.chat.rect.contains(x, y) { self.chat.line_at(y) } else { None };
+                // The emote list covers part of the chat: nothing under it reacts to the pointer.
+                let in_chat = self.chat.rect.contains(x, y) && !self.over_completion(x, y);
+                let ch = if in_chat { self.chat.line_at(y) } else { None };
                 if ch != self.chat.hover {
                     self.chat.hover = ch;
                     self.invalidate();
                 }
-                let tip = if self.chat.rect.contains(x, y) {
+                let tip = if in_chat {
                     self.chat.emote_at(x, y)
+                } else if self.chat.rect.contains(x, y) {
+                    None
                 } else {
                     // Icon buttons in the sidebar footer explain themselves on hover.
                     button
@@ -2076,6 +2083,11 @@ impl Ui {
         self.invalidate();
     }
 
+    /// Whether a point is on the emote completion list, which covers part of the chat.
+    fn over_completion(&self, x: f32, y: f32) -> bool {
+        self.completion.as_ref().is_some_and(|c| c.rect.contains(x, y))
+    }
+
     /// The animated button-like control under a point (hover and press effects).
     fn control_at(&self, x: f32, y: f32) -> Option<crate::anim::Control> {
         use crate::anim::Control;
@@ -2089,6 +2101,9 @@ impl Ui {
         }
         if let Some(f) = &self.form {
             return f.control_at(self.win_rect, x, y);
+        }
+        if self.over_completion(x, y) {
+            return None;
         }
         if let Some((sb, _)) = self.sidebar.network_button_at(x, y) {
             return Some(Control::NetworkSettings(sb.0));
@@ -2214,6 +2229,9 @@ impl Ui {
         if self.sidebar.drag.is_some() {
             return IDC_SIZENS;
         }
+        if self.over_completion(x, y) {
+            return IDC_ARROW;
+        }
         if (self.reply_rect.h > 0.0 && self.reply_close_rect().contains(x, y))
             || self.stream_btn.is_some_and(|r| r.contains(x, y))
         {
@@ -2292,7 +2310,7 @@ impl Ui {
             self.invalidate();
             return;
         }
-        if self.overlay.is_some() {
+        if self.overlay.is_some() || self.over_completion(x, y) {
             return;
         }
         if self.input_rect.contains(x, y) {
