@@ -1,5 +1,6 @@
 //! Form dialogs: the network editor and the settings dialog.
 
+use crate::anim::{Anims, Control, button_face, mix};
 use crate::editor::Editor;
 use crate::gfx::{Painter, Rect, with_alpha};
 use crate::text::{self, Text};
@@ -163,6 +164,23 @@ fn script_note(s: &ScriptInfo) -> (String, bool) {
         parts.push(format!("last error: {}", e.lines().next().unwrap_or_default()));
     }
     (parts.join(" · "), false)
+}
+
+/// An on/off switch whose knob slides and whose track fades between off and on.
+fn draw_switch(p: &Painter, th: &Theme, anims: &Anims, c: Control, bx: Rect, on: bool, focused: bool) {
+    let s = anims.switch(c, on);
+    p.fill_round(bx, 10.0, mix(th.badge_bg, th.accent, s));
+    let hover = anims.hover(c);
+    if hover > 0.0 {
+        p.fill_round(bx, 10.0, with_alpha(th.text, 0.08 * hover));
+    }
+    if focused {
+        p.stroke_round(bx.inset(-2.0, -2.0), 12.0, with_alpha(th.accent, 0.6), 1.0);
+    }
+    // Pressing squeezes the knob a little, like a finger on it.
+    let knob_r = 7.0 - 1.5 * anims.press(c);
+    let knob_x = bx.x + 10.0 + (bx.w - 20.0) * s;
+    p.circle(knob_x, bx.y + 10.0, knob_r, mix(th.text_dim, th.accent_fg, s));
 }
 
 /// One page per header: (title, field range).
@@ -631,7 +649,7 @@ impl Form {
         self.sections.get(self.section).map_or(0..0, |(_, r)| r.clone())
     }
 
-    pub fn render(&mut self, p: &Painter, text: &Text, th: &Theme, win: Rect, caret_on: bool) {
+    pub fn render(&mut self, p: &Painter, text: &Text, th: &Theme, win: Rect, caret_on: bool, anims: &Anims) {
         let f = &text.fonts;
         p.fill(win, th.overlay_scrim);
         let panel = self.panel(win);
@@ -724,12 +742,7 @@ impl Form {
                 }
                 FieldKind::Check(on) => {
                     let bx = Rect::new(ctl.right() - 40.0, ctl.y + (ctl.h - 20.0) / 2.0, 36.0, 20.0);
-                    p.fill_round(bx, 10.0, if *on { th.accent } else { th.badge_bg });
-                    if focused {
-                        p.stroke_round(bx.inset(-2.0, -2.0), 12.0, with_alpha(th.accent, 0.6), 1.0);
-                    }
-                    let knob_x = if *on { bx.right() - 10.0 } else { bx.x + 10.0 };
-                    p.circle(knob_x, bx.y + 10.0, 7.0, if *on { th.accent_fg } else { th.text_dim });
+                    draw_switch(p, th, anims, Control::DialogField(i), bx, *on, focused);
                 }
                 FieldKind::Script { file, enabled, note, failed, .. } => {
                     // File name in the label column, state beside it, switch at the right edge.
@@ -738,22 +751,19 @@ impl Form {
                     let nl = text.layout(note, &f.ui, (ctl.w - 56.0).max(1.0), 20.0);
                     p.text(&nl, ctl.x, ctl.y + 8.0, if *failed { th.error } else { th.text_dim });
                     let bx = Rect::new(ctl.right() - 40.0, ctl.y + (ctl.h - 20.0) / 2.0, 36.0, 20.0);
-                    p.fill_round(bx, 10.0, if *enabled { th.accent } else { th.badge_bg });
-                    if focused {
-                        p.stroke_round(bx.inset(-2.0, -2.0), 12.0, with_alpha(th.accent, 0.6), 1.0);
-                    }
-                    let knob_x = if *enabled { bx.right() - 10.0 } else { bx.x + 10.0 };
-                    p.circle(knob_x, bx.y + 10.0, 7.0, if *enabled { th.accent_fg } else { th.text_dim });
+                    draw_switch(p, th, anims, Control::DialogField(i), bx, *enabled, focused);
                 }
                 FieldKind::Button { caption, note } => {
                     let cl = text.layout(caption, &f.ui_semibold, ctl.w, 20.0);
                     let bw = (text::metrics(&cl).width + 32.0).min(ctl.w);
                     let b = Rect::new(ctl.x, ctl.y, bw, ctl.h);
-                    p.fill_round(b, 6.0, th.accent);
+                    let c = Control::DialogField(i);
+                    let face = button_face(p, b, 6.0, th.accent, th, anims.hover(c), anims.press(c));
                     if focused {
                         p.stroke_round(b.inset(-2.0, -2.0), 8.0, with_alpha(th.accent, 0.6), 1.0);
                     }
-                    p.text(&cl, b.x + 16.0, b.y + 8.0, th.accent_fg);
+                    let cw = text::metrics(&cl).width;
+                    p.text(&cl, face.x + (face.w - cw) / 2.0, face.y + (face.h - 18.0) / 2.0, th.accent_fg);
                     if !note.is_empty() {
                         let nl = text.layout(note, &f.ui, (ctl.w - bw - 14.0).max(1.0), 20.0);
                         p.text(&nl, b.right() + 14.0, b.y + 8.0, th.text_dim);
@@ -797,19 +807,28 @@ impl Form {
         }
         let save = Rect::new(panel.right() - 24.0 - 110.0, by, 110.0, 34.0);
         let cancel = Rect::new(save.x - 12.0 - 100.0, by, 100.0, 34.0);
-        p.fill_round(save, 6.0, th.accent);
+        // Footer buttons are animated by position: Save 0, Cancel 1, Remove 2.
+        let footer = |i: usize| (anims.hover(Control::DialogFooter(i)), anims.press(Control::DialogFooter(i)));
+        let (h, pz) = footer(0);
+        let face = button_face(p, save, 6.0, th.accent, th, h, pz);
         let sl = text.layout("Save", &f.ui_semibold, save.w, 30.0);
-        p.text(&sl, save.x + (save.w - text::metrics(&sl).width) / 2.0, save.y + 8.0, th.accent_fg);
-        p.fill_round(cancel, 6.0, th.badge_bg);
+        p.text(&sl, face.x + (face.w - text::metrics(&sl).width) / 2.0, face.y + (face.h - 18.0) / 2.0, th.accent_fg);
+        let (h, pz) = footer(1);
+        let face = button_face(p, cancel, 6.0, th.badge_bg, th, h, pz);
         let cl = text.layout("Cancel", &f.ui_semibold, cancel.w, 30.0);
-        p.text(&cl, cancel.x + (cancel.w - text::metrics(&cl).width) / 2.0, cancel.y + 8.0, th.text);
+        p.text(&cl, face.x + (face.w - text::metrics(&cl).width) / 2.0, face.y + (face.h - 18.0) / 2.0, th.text);
         self.buttons.push((FormAction::Save, save));
         self.buttons.push((FormAction::Cancel, cancel));
         if matches!(&self.kind, FormKind::Network { original: Some(_) }) && self.error.is_none() {
             let del = Rect::new(panel.x + 24.0, by, 150.0, 34.0);
-            p.stroke_round(del, 6.0, th.error, 1.0);
+            let (h, pz) = (anims.hover(Control::DialogFooter(2)), anims.press(Control::DialogFooter(2)));
+            let face = del.inset(pz * 1.5, pz * 1.5);
+            if h + pz > 0.0 {
+                p.fill_round(face, 6.0, with_alpha(th.error, 0.10 * h + 0.10 * pz));
+            }
+            p.stroke_round(face, 6.0, th.error, 1.0);
             let dl = text.layout("Remove network", &f.ui_semibold, del.w, 30.0);
-            p.text(&dl, del.x + (del.w - text::metrics(&dl).width) / 2.0, del.y + 8.0, th.error);
+            p.text(&dl, face.x + (face.w - text::metrics(&dl).width) / 2.0, face.y + (face.h - 18.0) / 2.0, th.error);
             self.buttons.push((FormAction::Delete, del));
         }
 
@@ -862,6 +881,14 @@ impl Form {
             FieldKind::Check(_) | FieldKind::Script { .. } => Some(Target::Field(i)),
             _ => None,
         }
+    }
+
+    /// The animated control (button or switch) under a point.
+    pub fn control_at(&self, win: Rect, x: f32, y: f32) -> Option<crate::anim::Control> {
+        self.target_at(win, x, y).map(|t| match t {
+            Target::Footer(i) => crate::anim::Control::DialogFooter(i),
+            Target::Field(i) => crate::anim::Control::DialogField(i),
+        })
     }
 
     /// Left button pressed. Selecting things (pages, text, opening a dropdown, the scrollbar)

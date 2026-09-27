@@ -56,6 +56,8 @@ const TIMER_TICK: usize = 1;
 const TIMER_CARET: usize = 2;
 const TIMER_PAINT: usize = 3;
 const TIMER_ANIM: usize = 4;
+/// Next frame of a hover/press/switch transition.
+const TIMER_UI_ANIM: usize = 5;
 const SIDEBAR_MIN: f32 = 160.0;
 const TOPIC_H: f32 = 56.0;
 const NICKLIST_W: f32 = 210.0;
@@ -127,6 +129,8 @@ pub struct Ui {
     tooltip: Option<(String, String, Rect)>,
     /// Button-like control under a pressed left button; it acts on release if still under it.
     pressed: Option<Pressed>,
+    /// Hover/press/switch transitions of buttons.
+    pub(crate) anims: crate::anim::Anims,
 }
 
 thread_local! {
@@ -262,6 +266,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         mouse_tracking: false,
         tooltip: None,
         pressed: None,
+        anims: Default::default(),
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -442,12 +447,14 @@ impl Ui {
         dgen: u64,
         app: &'a App,
         images: &'a std::rc::Rc<std::cell::RefCell<crate::images::ImageStore>>,
+        anims: &'a crate::anim::Anims,
     ) -> Ctx<'a> {
         let cfg = &app.config;
         let a = &cfg.appearance;
         let net_previews = app.network_of(app.active).is_some_and(|n| n.cfg.previews);
         Ctx {
             text,
+            anims,
             theme,
             brushes,
             dc,
@@ -473,6 +480,12 @@ impl Ui {
         let dgen = gfx.generation;
         let r = gfx.frame(pw, ph, |dc| self.draw(dc, dgen));
         self.gfx = Some(gfx);
+        if self.anims.moving() {
+            // A button transition is running: next frame at ~60 fps.
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_UI_ANIM, 16, None);
+            }
+        }
         if self.active_window && self.images.borrow().animating.get() {
             // Keep animated emotes moving (~25 fps) while visible and focused.
             unsafe {
@@ -532,6 +545,10 @@ impl Ui {
         if self.reply.as_ref().is_some_and(|r| r.buffer == self.app.active) != (self.reply_rect.h > 0.0) {
             self.layout();
         }
+        self.anims.begin_frame();
+        if self.form.is_none() {
+            self.anims.forget_dialog();
+        }
         let p = Painter::new(dc);
         let th = self.theme.clone();
         if self.mica {
@@ -548,7 +565,7 @@ impl Ui {
             store.animating.set(false);
             store.realize(dc, dgen);
         }
-        self.sidebar.render(&p, &self.text, &th, &self.app);
+        self.sidebar.render(&p, &self.text, &th, &self.app, &self.anims);
 
         // Topic bar.
         let tr = self.topic_rect;
@@ -565,8 +582,8 @@ impl Ui {
         // Chat.
         let id = self.app.active;
         {
-            let Ui { ref mut chat, ref text, ref mut brushes, ref app, ref images, .. } = *self;
-            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, app, images);
+            let Ui { ref mut chat, ref text, ref mut brushes, ref app, ref images, ref anims, .. } = *self;
+            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, app, images, anims);
             if let Some(b) = app.buffer(id) {
                 chat.render(&p, &mut ctx, b);
             }
@@ -599,9 +616,14 @@ impl Ui {
             let ex = self.text.layout(&r.excerpt, &f.ui, (rr.w - hw - 72.0).max(1.0), 20.0);
             p.text(&ex, rr.x + 32.0 + hw, rr.y + 7.0, th.text_dim);
             let cr = self.reply_close_rect();
+            let rc = crate::anim::Control::ReplyClose;
+            let (h, pr) = (self.anims.hover(rc), self.anims.press(rc));
+            if h + pr > 0.0 {
+                p.fill_round(cr.inset(pr * 1.5, pr * 1.5), 6.0, with_alpha(th.text, 0.08 * h + 0.08 * pr));
+            }
             let x = self.text.layout("✕", &f.ui, cr.w, cr.h);
             let xw = text::metrics(&x).width;
-            p.text(&x, cr.x + (cr.w - xw) / 2.0, cr.y + 4.0, th.text_dim);
+            p.text(&x, cr.x + (cr.w - xw) / 2.0, cr.y + 4.0, crate::anim::mix(th.text_dim, th.text, h));
         }
 
         // Input box.
@@ -652,11 +674,11 @@ impl Ui {
                 let (caption, note) = twitch_account_button(&self.app, net);
                 f.set_button("twitch_signin", caption, &note);
             }
-            f.render(&p, &self.text, &th, self.win_rect, self.caret_on);
+            f.render(&p, &self.text, &th, self.win_rect, self.caret_on, &self.anims);
         }
         // Overlays (confirmations) sit on top of an open dialog.
         if let Some(o) = self.overlay.as_mut() {
-            o.render(&p, &self.text, &th, &self.app, self.win_rect, self.caret_on);
+            o.render(&p, &self.text, &th, &self.app, self.win_rect, self.caret_on, &self.anims);
         }
         let _ = draw_field;
         let _ = with_alpha;
@@ -1200,9 +1222,9 @@ impl Ui {
         let (pw, ph) = self.client_size();
         let _ = gfx.frame(pw, ph, |dc| {
             let id = self.app.active;
-            let Ui { ref mut chat, ref text, ref mut brushes, ref app, ref theme, ref images, .. } = *self;
+            let Ui { ref mut chat, ref text, ref mut brushes, ref app, ref theme, ref images, ref anims, .. } = *self;
             let th = theme.clone();
-            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, app, images);
+            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, app, images, anims);
             if let Some(b) = app.buffer(id) {
                 chat.scroll(&mut ctx, b, dy);
             }
@@ -1301,6 +1323,7 @@ impl Ui {
                 if let Some(h) = self.services.scripts.as_mut() {
                     h.reload(&mut self.app);
                     form.set_scripts(&h.list(&self.app));
+                    self.anims.forget_dialog();
                 }
                 self.after_update();
             }
@@ -1319,6 +1342,7 @@ impl Ui {
                             }
                             h.refresh(&mut self.app);
                             form.set_scripts(&h.list(&self.app));
+                            self.anims.forget_dialog();
                             let note = match added.len() {
                                 0 => "All examples are already there".to_owned(),
                                 n => format!("Added {n} example(s), switched off"),
@@ -1624,6 +1648,10 @@ impl Ui {
         unsafe {
             SetCapture(self.hwnd);
         }
+        self.anims.pressed = self.control_at(x, y);
+        if self.anims.pressed.is_some() {
+            self.invalidate();
+        }
         self.tooltip = None;
         if self.overlay.is_none()
             && let Some(f) = self.form.as_mut()
@@ -1743,6 +1771,11 @@ impl Ui {
     }
 
     fn mouse_move(&mut self, x: f32, y: f32) {
+        let hot = self.control_at(x, y);
+        if hot != self.anims.hot {
+            self.anims.hot = hot;
+            self.invalidate();
+        }
         if self.overlay.is_none()
             && let Some(f) = self.form.as_mut()
         {
@@ -1776,16 +1809,9 @@ impl Ui {
                     self.sidebar.hover = hover;
                     self.invalidate();
                 }
+                // Footer and network buttons animate via `anims.hot`; here only their tooltips.
                 let button = self.sidebar.button_at(x, y);
-                if button.map(|b| b.0) != self.sidebar.button_hover {
-                    self.sidebar.button_hover = button.map(|b| b.0);
-                    self.invalidate();
-                }
                 let net_button = self.sidebar.network_button_at(x, y);
-                if net_button.map(|b| b.0) != self.sidebar.net_button_hover {
-                    self.sidebar.net_button_hover = net_button.map(|b| b.0);
-                    self.invalidate();
-                }
                 let nh = if self.show_nicklist { self.nicklist.hit(x, y) } else { None };
                 if nh != self.nicklist.hover {
                     self.nicklist.hover = nh;
@@ -1816,6 +1842,9 @@ impl Ui {
         unsafe {
             let _ = ReleaseCapture();
         }
+        if self.anims.pressed.take().is_some() {
+            self.invalidate();
+        }
         // A pressed button acts only if the pointer is still on it.
         if let Some(p) = self.pressed.take()
             && self.pressed_at(x, y).as_ref() == Some(&p)
@@ -1838,6 +1867,44 @@ impl Ui {
         }
         self.drag = Drag::None;
         self.invalidate();
+    }
+
+    /// The animated button-like control under a point (hover and press effects).
+    fn control_at(&self, x: f32, y: f32) -> Option<crate::anim::Control> {
+        use crate::anim::Control;
+        use crate::overlay::OverlayTarget;
+        if let Some(o) = &self.overlay {
+            return match o.target(self.win_rect, x, y) {
+                OverlayTarget::Yes => Some(Control::ConfirmYes),
+                OverlayTarget::No => Some(Control::ConfirmNo),
+                _ => None,
+            };
+        }
+        if let Some(f) = &self.form {
+            return f.control_at(self.win_rect, x, y);
+        }
+        if let Some((sb, _)) = self.sidebar.network_button_at(x, y) {
+            return Some(Control::NetworkSettings(sb.0));
+        }
+        if let Some((b, _)) = self.sidebar.button_at(x, y) {
+            return Some(match b {
+                SidebarButton::Status => Control::SidebarStatus,
+                SidebarButton::AddNetwork => Control::SidebarAdd,
+                SidebarButton::Settings => Control::SidebarSettings,
+            });
+        }
+        if self.reply_rect.h > 0.0 && self.reply_close_rect().contains(x, y) {
+            return Some(Control::ReplyClose);
+        }
+        if self.chat.rect.contains(x, y) {
+            if self.chat.jump_pill(x, y) {
+                return Some(Control::JumpPill);
+            }
+            if let Hit::Reply(line) = self.chat.hit(x, y) {
+                return Some(Control::Reply(line));
+            }
+        }
+        None
     }
 
     /// The button-like control under a point, compared with the pressed one on release.
@@ -2499,6 +2566,12 @@ impl Ui {
                             self.invalidate();
                         }
                     }
+                    TIMER_UI_ANIM => {
+                        unsafe {
+                            let _ = KillTimer(Some(self.hwnd), TIMER_UI_ANIM);
+                        }
+                        self.invalidate();
+                    }
                     TIMER_ANIM => {
                         unsafe {
                             let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
@@ -2573,16 +2646,14 @@ impl Ui {
                 if self.drag == Drag::None
                     && (self.chat.hover.is_some()
                         || self.sidebar.hover.is_some()
-                        || self.sidebar.button_hover.is_some()
-                        || self.sidebar.net_button_hover.is_some()
+                        || self.anims.hot.is_some()
                         || self.nicklist.hover.is_some()
                         || self.tooltip.is_some())
                 {
                     self.tooltip = None;
                     self.chat.hover = None;
                     self.sidebar.hover = None;
-                    self.sidebar.button_hover = None;
-                    self.sidebar.net_button_hover = None;
+                    self.anims.hot = None;
                     self.nicklist.hover = None;
                     self.invalidate();
                 }

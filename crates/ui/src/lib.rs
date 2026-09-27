@@ -1,5 +1,6 @@
 //! Native Win32 + Direct2D user interface for schwätz.
 
+pub mod anim;
 pub mod chat;
 pub mod editor;
 pub mod gfx;

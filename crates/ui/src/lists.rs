@@ -1,5 +1,6 @@
 //! Sidebar (networks and buffers) and nick list.
 
+use crate::anim::{Anims, Control, mix};
 use crate::gfx::{Painter, Rect, with_alpha};
 use crate::text::{self, Text};
 use crate::theme::Theme;
@@ -51,10 +52,8 @@ pub struct Sidebar {
     pub hover: Option<BufferId>,
     content_h: f32,
     buttons: Vec<(SidebarButton, Rect)>,
-    pub button_hover: Option<SidebarButton>,
     /// Settings buttons at the right end of network rows: (server buffer, bounds).
     net_buttons: Vec<(BufferId, Rect)>,
-    pub net_button_hover: Option<BufferId>,
 }
 
 impl Sidebar {
@@ -63,7 +62,7 @@ impl Sidebar {
         Rect::new(self.rect.x, self.rect.y, self.rect.w, (self.rect.h - FOOTER_H).max(0.0))
     }
 
-    pub fn render(&mut self, p: &Painter, text: &Text, th: &Theme, app: &App) {
+    pub fn render(&mut self, p: &Painter, text: &Text, th: &Theme, app: &App, anims: &Anims) {
         let f = &text.fonts;
         self.rows.clear();
         self.net_buttons.clear();
@@ -85,18 +84,17 @@ impl Sidebar {
             let row_h = if is_net { NET_ROW_H } else { h };
             let r = Rect::new(x + 8.0 + indent, row_y, w - 16.0 - indent, row_h);
             let active = app.active == id;
-            row_background(p, th, r, active, self.hover == Some(id));
+            row_background(p, th, r, active, if self.hover == Some(id) { 1.0 } else { 0.0 });
             // Networks have a settings button at the very right; the unread badge sits before it.
             let badge_area = if is_net {
                 let gear = Rect::new(r.right() - 30.0, r.y + (r.h - 26.0) / 2.0, 26.0, 26.0);
-                let hovered = self.net_button_hover == Some(id);
-                if hovered {
-                    p.fill_round(gear, 5.0, th.sidebar_hover);
-                }
+                let c = Control::NetworkSettings(id.0);
+                let (h, pr) = (anims.hover(c), anims.press(c));
+                let face = icon_face(p, th, gear, h, pr);
                 let g = text.layout(ICON_SETTINGS, &f.icons, gear.w, gear.h);
                 let m = text::metrics(&g);
-                let color = if hovered { th.sidebar_header } else { th.sidebar_dim };
-                p.text(&g, gear.x + (gear.w - m.width) / 2.0, gear.y + (gear.h - m.height) / 2.0, color);
+                let color = mix(th.sidebar_dim, th.sidebar_header, h.max(pr));
+                p.text(&g, face.x + (face.w - m.width) / 2.0, face.y + (face.h - m.height) / 2.0, color);
                 self.net_buttons.push((id, gear));
                 Rect::new(r.x, r.y, gear.x - 2.0 - r.x, r.h)
             } else {
@@ -162,11 +160,11 @@ impl Sidebar {
         }
         self.content_h = y + self.scroll - list.y;
         p.unclip();
-        self.render_footer(p, text, th, app);
+        self.render_footer(p, text, th, app, anims);
     }
 
     /// Status button (with the status buffer's unread count), then the icon buttons.
-    fn render_footer(&mut self, p: &Painter, text: &Text, th: &Theme, app: &App) {
+    fn render_footer(&mut self, p: &Painter, text: &Text, th: &Theme, app: &App, anims: &Anims) {
         let f = &text.fonts;
         self.buttons.clear();
         let fy = self.rect.bottom() - FOOTER_H;
@@ -178,7 +176,8 @@ impl Sidebar {
 
         let sb = app.status_buffer;
         let active = app.active == sb;
-        row_background(p, th, status, active, self.button_hover == Some(SidebarButton::Status));
+        let status = status.inset(anims.press(Control::SidebarStatus) * 1.5, anims.press(Control::SidebarStatus) * 1.0);
+        row_background(p, th, status, active, anims.hover(Control::SidebarStatus));
         let right = match app.buffer(sb) {
             Some(b) => badge(p, text, th, b, active, status),
             None => status.right() - 8.0,
@@ -194,12 +193,11 @@ impl Sidebar {
         for (button, r, glyph) in
             [(SidebarButton::AddNetwork, add, ICON_ADD), (SidebarButton::Settings, settings, ICON_SETTINGS)]
         {
-            if self.button_hover == Some(button) {
-                p.fill_round(r, 6.0, th.sidebar_hover);
-            }
+            let c = if button == SidebarButton::AddNetwork { Control::SidebarAdd } else { Control::SidebarSettings };
+            let face = icon_face(p, th, r, anims.hover(c), anims.press(c));
             let g = text.layout(glyph, &f.icons, r.w, r.h);
             let m = text::metrics(&g);
-            p.text(&g, r.x + (r.w - m.width) / 2.0, r.y + (r.h - m.height) / 2.0, th.sidebar_fg);
+            p.text(&g, face.x + (face.w - m.width) / 2.0, face.y + (face.h - m.height) / 2.0, th.sidebar_fg);
             self.buttons.push((button, r));
         }
     }
@@ -230,13 +228,24 @@ impl Sidebar {
     }
 }
 
-fn row_background(p: &Painter, th: &Theme, r: Rect, active: bool, hover: bool) {
+fn row_background(p: &Painter, th: &Theme, r: Rect, active: bool, hover: f32) {
     if active {
         p.fill_round(r, 6.0, th.sidebar_selected);
         p.fill_round(Rect::new(r.x, r.y + 7.0, 3.0, r.h - 14.0), 1.5, th.accent);
-    } else if hover {
-        p.fill_round(r, 6.0, th.sidebar_hover);
+    } else if hover > 0.0 {
+        p.fill_round(r, 6.0, with_alpha(th.sidebar_hover, th.sidebar_hover.a * hover));
     }
+}
+
+/// Background of a small icon button: fades in on hover, deepens and shrinks while pressed.
+/// Returns the rect to center the icon in.
+fn icon_face(p: &Painter, th: &Theme, r: Rect, hover: f32, press: f32) -> Rect {
+    let face = r.inset(press * 1.5, press * 1.5);
+    let a = th.sidebar_hover.a * hover + th.sidebar_selected.a * press;
+    if a > 0.0 {
+        p.fill_round(face, 6.0, with_alpha(th.sidebar_hover, a));
+    }
+    face
 }
 
 /// Unread badge at the right end of a row; returns where the row's text has to end.

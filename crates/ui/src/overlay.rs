@@ -176,7 +176,17 @@ impl Overlay {
         Rect::new(win.x + (win.w - w) / 2.0, top, w, h)
     }
 
-    pub fn render(&mut self, p: &Painter, text: &Text, th: &Theme, app: &App, win: Rect, caret_on: bool) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn render(
+        &mut self,
+        p: &Painter,
+        text: &Text,
+        th: &Theme,
+        app: &App,
+        win: Rect,
+        caret_on: bool,
+        anims: &crate::anim::Anims,
+    ) {
         let f = &text.fonts;
         p.fill(win, th.overlay_scrim);
         let panel = self.panel(win);
@@ -225,14 +235,16 @@ impl Overlay {
                 }
                 p.text(&b, panel.x + 24.0, panel.y + 58.0, th.text_dim);
                 let (yes_r, no_r) = confirm_buttons(panel);
-                p.fill_round(yes_r, 6.0, th.accent);
+                use crate::anim::{Control, button_face};
+                let (c_yes, c_no) = (Control::ConfirmYes, Control::ConfirmNo);
+                let face = button_face(p, yes_r, 6.0, th.accent, th, anims.hover(c_yes), anims.press(c_yes));
                 let yl = text.layout(yes, &f.ui_semibold, yes_r.w, 30.0);
                 let yw = text::metrics(&yl).width;
-                p.text(&yl, yes_r.x + (yes_r.w - yw) / 2.0, yes_r.y + 8.0, th.accent_fg);
-                p.fill_round(no_r, 6.0, th.badge_bg);
+                p.text(&yl, face.x + (face.w - yw) / 2.0, face.y + (face.h - 18.0) / 2.0, th.accent_fg);
+                let face = button_face(p, no_r, 6.0, th.badge_bg, th, anims.hover(c_no), anims.press(c_no));
                 let nl = text.layout("Cancel", &f.ui_semibold, no_r.w, 30.0);
                 let nw = text::metrics(&nl).width;
-                p.text(&nl, no_r.x + (no_r.w - nw) / 2.0, no_r.y + 8.0, th.text);
+                p.text(&nl, face.x + (face.w - nw) / 2.0, face.y + (face.h - 18.0) / 2.0, th.text);
             }
             Overlay::ChannelList { net, filter, scroll, selected, rows, by_users } => {
                 let Some(n) = app.network(*net) else { return };

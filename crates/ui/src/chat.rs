@@ -127,6 +127,8 @@ pub struct ChatView {
 
 pub struct Ctx<'a> {
     pub text: &'a Text,
+    /// Hover/press transitions of the Reply and "Jump to latest" buttons.
+    pub anims: &'a crate::anim::Anims,
     pub theme: &'a Theme,
     pub brushes: &'a mut Brushes,
     pub dc: &'a ID2D1DeviceContext,
@@ -759,8 +761,9 @@ impl ChatView {
             let label = c.text.layout("↓  Jump to latest", &c.text.fonts.ui_small, 200.0, 20.0);
             let w = text::metrics(&label).width + 24.0;
             let r = Rect::new(self.rect.x + (self.rect.w - w) / 2.0, self.rect.bottom() - 34.0, w, 24.0);
-            p.fill_round(r, 12.0, th.accent);
-            p.text(&label, r.x + 12.0, r.y + 5.0, th.accent_fg);
+            let jc = crate::anim::Control::JumpPill;
+            let face = crate::anim::button_face(p, r, 12.0, th.accent, th, c.anims.hover(jc), c.anims.press(jc));
+            p.text(&label, face.x + 12.0, face.y + (face.h - 14.0) / 2.0, th.accent_fg);
         }
 
         // Evict layouts not used recently.
@@ -905,9 +908,15 @@ impl ChatView {
             let l = c.text.layout("↩  Reply", &c.text.fonts.ui_small, 120.0, 20.0);
             let w = text::metrics(&l).width + 20.0;
             let r = Rect::new(self.rect.right() - w - 18.0, y + 1.0, w, 22.0);
-            p.fill_round(r, 11.0, th.panel_bg);
-            p.stroke_round(r, 11.0, th.border, 1.0);
-            p.text(&l, r.x + 10.0, r.y + 4.0, th.text);
+            let rc = crate::anim::Control::Reply(line.id);
+            let (h, pr) = (c.anims.hover(rc), c.anims.press(rc));
+            let face = r.inset(pr * 1.5, pr * 1.0);
+            p.fill_round(face, 11.0, th.panel_bg);
+            if h > 0.0 {
+                p.fill_round(face, 11.0, with_alpha(th.accent, 0.14 * h));
+            }
+            p.stroke_round(face, 11.0, crate::anim::mix(th.border, th.accent, h), 1.0);
+            p.text(&l, face.x + 10.0, face.y + (face.h - 14.0) / 2.0, th.text);
             reply_btn = Some(r);
         }
         self.drawn.push(Drawn {
