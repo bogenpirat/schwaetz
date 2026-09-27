@@ -1344,6 +1344,17 @@ impl Ui {
         }
     }
 
+    /// Puts a finished chat selection on the clipboard (`general.copy_on_select`).
+    fn copy_on_select(&mut self) {
+        if !self.app.config.general.copy_on_select || self.chat.selection.is_none_or(|(a, b)| a == b) {
+            return;
+        }
+        let b = self.app.active_buffer();
+        if let Some(t) = self.chat.selected_text(b, &self.app.config.appearance.timestamp_format) {
+            win::set_clipboard(self.hwnd, &t);
+        }
+    }
+
     fn copy(&mut self) -> bool {
         if self.input.has_selection() {
             win::set_clipboard(self.hwnd, self.input.selected_text());
@@ -1910,12 +1921,14 @@ impl Ui {
                         && double;
                     if double {
                         self.chat.select_word(pos);
+                        self.copy_on_select();
                         self.last_click = (2, x, y, t);
                     } else if self.last_click.0 == 2
                         && t.wrapping_sub(self.last_click.3) < unsafe { GetDoubleClickTime() }
                         && !triple
                     {
                         self.chat.select_line(pos);
+                        self.copy_on_select();
                         self.last_click = (0, x, y, t);
                     } else {
                         self.chat.selection = Some((pos, pos));
@@ -2078,6 +2091,7 @@ impl Ui {
             {
                 self.chat.selection = None;
             }
+            self.copy_on_select();
         }
         self.drag = Drag::None;
         self.invalidate();

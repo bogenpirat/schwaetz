@@ -67,6 +67,8 @@ pub struct General {
     pub close_to_tray: bool,
     /// Add channels you join to the network's autojoin list (and remove them when you leave).
     pub remember_channels: bool,
+    /// Copy text selected in the chat to the clipboard as soon as the selection is made.
+    pub copy_on_select: bool,
 }
 
 impl Default for General {
@@ -91,6 +93,7 @@ impl Default for General {
             minimize_to_tray: false,
             close_to_tray: false,
             remember_channels: true,
+            copy_on_select: true,
         }
     }
 }

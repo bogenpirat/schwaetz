@@ -72,7 +72,9 @@ offered, if any API token is available. 7TV/FFZ/BTTV emotes come from scripts, s
 `scrollback_lines` (in memory; older lines load from history), `show_joins_parts`
 (`smart` shows joins/parts only for people who spoke recently, `all`, `none`),
 `smart_filter_secs`, `ctcp_replies`, `log_to_files`, `history_days` (0 = keep forever),
-`confirm_paste_lines`, `remember_channels`, `minimize_to_tray`, `close_to_tray`.
+`confirm_paste_lines`, `remember_channels`, `minimize_to_tray`, `close_to_tray`,
+`copy_on_select` (on by default: text you select in the chat goes to the clipboard right away,
+no Ctrl+C needed).
 
 With `remember_channels` (on by default) each network's `autojoin` list ("Join on connect") follows
 what you do: channels you join are added, and channels you leave with `/part` or by closing their

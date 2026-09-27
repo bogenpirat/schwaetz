@@ -438,6 +438,7 @@ impl Form {
             text("scrollback_lines", "Lines kept in memory", "", &g.scrollback_lines.to_string()),
             check("ctcp_replies", "Answer CTCP requests", g.ctcp_replies),
             check("remember_channels", "Keep \"Join on connect\" in sync with joins and parts", g.remember_channels),
+            check("copy_on_select", "Copy selected chat text right away", g.copy_on_select),
             header("Notifications"),
             check("on_highlight", "Notify on highlights", c.notifications.on_highlight),
             check("on_private", "Notify on private messages", c.notifications.on_private),
@@ -642,6 +643,7 @@ impl Form {
         c.general.scrollback_lines = scrollback;
         c.general.ctcp_replies = self.check("ctcp_replies");
         c.general.remember_channels = self.check("remember_channels");
+        c.general.copy_on_select = self.check("copy_on_select");
         c.notifications.on_highlight = self.check("on_highlight");
         c.notifications.on_private = self.check("on_private");
         c.notifications.flash_taskbar = self.check("flash_taskbar");
