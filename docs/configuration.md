@@ -30,6 +30,7 @@ auto_connect = true
 | `rejoin_on_kick`, `sasl_required`, `previews` | As named |
 | `flood_burst`, `flood_interval_ms` | Flood control: burst size, then one line per interval |
 | `live_check_secs` | Twitch: seconds between live checks (default 120, at least 30) |
+| `twitch_colors` | Twitch: show the name colors users picked in the chat (default on), whatever `colored_nicks` says |
 
 Secrets: `/secret <network> sasl <password>`, `/secret <network> pass <password>`,
 `/secret Twitch twitch oauth:<token>`, `/secret Twitch twitch-api <token>` — or the network dialog. They go to the Windows Credential
@@ -70,7 +71,8 @@ window are removed. Being kicked or `/cycle` keeps a channel on the list.
 `ui_font`, `timestamp_format` (`%H %M %S %d %m %Y %y %A %B`), `nick_column`,
 `nick_column_width`, `show_nicklist`, `colored_nicks`, `show_mirc_colors`, `mica`,
 `gpu_acceleration` (off by default: the CPU rasterizer is fast enough for text and saves the GPU
-driver's ~50 MB).
+driver's ~50 MB). `colored_nicks` colors names from the theme's palette: in the member list, and
+in the chat for names without a Twitch color (see the network setting `twitch_colors`).
 
 ### Themes
 

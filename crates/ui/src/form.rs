@@ -373,6 +373,7 @@ impl Form {
             button("twitch_signin", "Account", "Sign in with Twitch"),
             password("twitch_api", "Manual API token", has(SecretKind::TwitchApi)),
             text("live_check_secs", "Live check every (seconds)", "at least 30", &c.live_check_secs.to_string()),
+            check("twitch_colors", "Show Twitch name colors in the chat", c.twitch_colors),
         ];
         let title = match cfg {
             Some(c) => format!("Edit network — {}", c.name),
@@ -401,7 +402,7 @@ impl Form {
             text("font_size", "Font size", "", &a.font_size.to_string()),
             text("timestamp_format", "Timestamp format", "%H:%M, %H:%M:%S; empty hides", &a.timestamp_format),
             check("nick_column", "Align nicks in a column", a.nick_column),
-            check("colored_nicks", "Colored nicks", a.colored_nicks),
+            check("colored_nicks", "Colored nicks (theme palette)", a.colored_nicks),
             check("show_mirc_colors", "Show mIRC colors", a.show_mirc_colors),
             check("show_nicklist", "Show member list", a.show_nicklist),
             check("mica", "Mica backdrop (Windows 11)", a.mica),
@@ -573,6 +574,7 @@ impl Form {
             rejoin_on_kick: self.check("rejoin_on_kick"),
             previews: self.check("previews"),
             live_check_secs,
+            twitch_colors: self.check("twitch_colors"),
             ..base
         };
         Ok((cfg, secrets))

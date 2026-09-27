@@ -286,6 +286,9 @@ pub struct NetworkConfig {
     /// Twitch: how often (seconds) joined channels are checked for being live when a Helix API
     /// token is stored.
     pub live_check_secs: u32,
+    /// Twitch: show the name colors users picked (the `color` tag) in the chat, independently of
+    /// `appearance.colored_nicks`.
+    pub twitch_colors: bool,
 }
 
 impl Default for NetworkConfig {
@@ -318,6 +321,7 @@ impl Default for NetworkConfig {
             flood_interval_ms: 2000,
             twitch_client_id: None,
             live_check_secs: 120,
+            twitch_colors: true,
         }
     }
 }

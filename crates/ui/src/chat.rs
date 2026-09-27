@@ -138,6 +138,8 @@ pub struct Ctx<'a> {
     pub nick_column_chars: u32,
     pub colors: bool,
     pub colored_nicks: bool,
+    /// The active network shows Twitch users' own name colors.
+    pub twitch_colors: bool,
     pub images: &'a std::rc::Rc<std::cell::RefCell<crate::images::ImageStore>>,
     /// Link previews enabled for this buffer.
     pub previews: bool,
@@ -561,7 +563,7 @@ impl ChatView {
     fn nick_color(&self, c: &Ctx, line: &Line) -> crate::gfx::Color {
         let own = line.flags.has(LineFlags::OWN);
         let twitch = line.extra.as_ref().and_then(|e| e.color);
-        pick_nick_color(c.theme, c.colored_nicks, own, twitch, &line.nick)
+        pick_nick_color(c.theme, c.colored_nicks, c.twitch_colors, own, twitch, &line.nick)
     }
 
     fn ensure(&mut self, c: &mut Ctx, line: &Line, m: &Metrics) -> f32 {
@@ -1097,20 +1099,24 @@ impl ChatView {
     }
 }
 
-/// The color of a nick in the chat: your own nick keeps its color; with "Colored nicks" off every
-/// other nick uses the text color (including Twitch users' own name colors), otherwise Twitch's
-/// color (made readable on the background) or one from the theme's palette.
-pub fn pick_nick_color(th: &Theme, colored: bool, own: bool, twitch: Option<u32>, nick: &str) -> crate::gfx::Color {
+/// The color of a nick in the chat. Your own nick keeps its color. A Twitch user's chosen color
+/// (made readable on the background) is used when the network shows Twitch colors
+/// (`twitch_colors`); otherwise "Colored nicks" (`palette`) picks a theme color, or the text color.
+pub fn pick_nick_color(
+    th: &Theme,
+    palette: bool,
+    twitch_colors: bool,
+    own: bool,
+    twitch: Option<u32>,
+    nick: &str,
+) -> crate::gfx::Color {
     if own {
         return th.own_nick;
     }
-    if !colored {
-        return th.text;
+    if twitch_colors && let Some(rgb) = twitch {
+        return ensure_contrast(crate::gfx::hex(rgb), th.chat_bg, 3.0);
     }
-    match twitch {
-        Some(rgb) => ensure_contrast(crate::gfx::hex(rgb), th.chat_bg, 3.0),
-        None => th.nick_color(nick),
-    }
+    if palette { th.nick_color(nick) } else { th.text }
 }
 
 #[cfg(test)]
@@ -1118,15 +1124,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn colored_nicks_setting_covers_twitch_colors() {
+    fn twitch_colors_and_palette_are_separate() {
         let th = Theme::dark();
         let red = Some(0xff0000);
-        // Off: plain text color for everyone but yourself, Twitch colors included.
-        assert_eq!(pick_nick_color(&th, false, false, red, "alice"), th.text);
-        assert_eq!(pick_nick_color(&th, false, false, None, "alice"), th.text);
-        assert_eq!(pick_nick_color(&th, false, true, None, "me"), th.own_nick);
-        // On: Twitch's color, otherwise the palette.
-        assert_ne!(pick_nick_color(&th, true, false, red, "alice"), th.text);
-        assert_eq!(pick_nick_color(&th, true, false, None, "alice"), th.nick_color("alice"));
+        let twitch_red = ensure_contrast(crate::gfx::hex(0xff0000), th.chat_bg, 3.0);
+        // Twitch colors on: used whatever the palette setting says.
+        assert_eq!(pick_nick_color(&th, false, true, false, red, "alice"), twitch_red);
+        assert_eq!(pick_nick_color(&th, true, true, false, red, "alice"), twitch_red);
+        // Twitch colors off: the palette setting decides.
+        assert_eq!(pick_nick_color(&th, true, false, false, red, "alice"), th.nick_color("alice"));
+        assert_eq!(pick_nick_color(&th, false, false, false, red, "alice"), th.text);
+        // Users without a Twitch color, and yourself.
+        assert_eq!(pick_nick_color(&th, true, true, false, None, "bob"), th.nick_color("bob"));
+        assert_eq!(pick_nick_color(&th, false, true, false, None, "bob"), th.text);
+        assert_eq!(pick_nick_color(&th, true, true, true, red, "me"), th.own_nick);
     }
 }

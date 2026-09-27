@@ -465,6 +465,7 @@ impl Ui {
             nick_column_chars: a.nick_column_width,
             colors: a.show_mirc_colors,
             colored_nicks: a.colored_nicks,
+            twitch_colors: app.network_of(app.active).is_some_and(|n| n.cfg.twitch_colors),
             images,
             previews: cfg.previews.enabled && net_previews,
             preview_auto: cfg.previews.auto_load,
@@ -1291,6 +1292,8 @@ impl Ui {
                                 set(&cfg.name, *k, v);
                             }
                             let id = self.app.upsert_network(original.as_deref(), cfg);
+                            // Drawn lines may depend on network settings (Twitch name colors).
+                            self.chat.invalidate_styles();
                             if let Some(n) = self.app.network(id) {
                                 let sb = n.server_buffer;
                                 self.app.switch_to(sb);
