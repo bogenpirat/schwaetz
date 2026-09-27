@@ -15,6 +15,7 @@ pub mod secrets;
 pub mod services;
 pub mod time;
 pub mod twitch;
+pub mod twitch_auth;
 pub mod znc;
 
 pub use app::{App, ConnState, Dirty, Effect, Network};

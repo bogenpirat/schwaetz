@@ -31,8 +31,13 @@ use windows::core::{HSTRING, Interface, PCWSTR, w};
 
 pub const WM_APP_NET: u32 = WM_APP + 1;
 pub const WM_APP_MEDIA: u32 = WM_APP + 3;
-/// A Twitch live check finished on its worker thread.
+/// Background work (Twitch API) finished on its worker thread.
 pub const WM_APP_LIVE: u32 = WM_APP + 4;
+
+enum WorkerResult {
+    Live(schwaetz_core::helix::LiveResult),
+    Auth(schwaetz_net::NetworkId, schwaetz_core::twitch_auth::AuthRequest, schwaetz_core::twitch_auth::AuthResponse),
+}
 /// `dwData` tag for WM_COPYDATA messages carrying input for the running instance.
 pub const COPYDATA_MAGIC: usize = 0x5357_4158;
 const TIMER_TICK: usize = 1;
@@ -92,11 +97,8 @@ pub struct Ui {
     media: schwaetz_media::Media,
     images: std::rc::Rc<std::cell::RefCell<crate::images::ImageStore>>,
     preview_pending: std::collections::HashSet<String>,
-    /// Finished Twitch live checks (workers post `WM_APP_LIVE`).
-    live_results: (
-        std::sync::mpsc::Sender<schwaetz_core::helix::LiveResult>,
-        std::sync::mpsc::Receiver<schwaetz_core::helix::LiveResult>,
-    ),
+    /// Results of background work (Twitch API calls); workers post `WM_APP_LIVE`.
+    workers: (std::sync::mpsc::Sender<WorkerResult>, std::sync::mpsc::Receiver<WorkerResult>),
     active_window: bool,
     /// Buffer to reselect once it exists again after startup (network, buffer).
     restore_active: Option<(String, String)>,
@@ -233,7 +235,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         media,
         images: Default::default(),
         preview_pending: Default::default(),
-        live_results: std::sync::mpsc::channel(),
+        workers: std::sync::mpsc::channel(),
         active_window: true,
         restore_active: None,
         form: None,
@@ -633,6 +635,11 @@ impl Ui {
             o.render(&p, &self.text, &th, &self.app, self.win_rect, self.caret_on);
         }
         if let Some(f) = self.form.as_mut() {
+            if let crate::form::FormKind::Network { original } = &f.kind {
+                let net = original.as_deref().and_then(|n| self.app.network_by_name(n));
+                let (caption, note) = twitch_account_button(&self.app, net);
+                f.set_button("twitch_signin", caption, &note);
+            }
             f.render(&p, &self.text, &th, self.win_rect, self.caret_on);
         }
         let _ = draw_field;
@@ -839,15 +846,12 @@ impl Ui {
             Effect::ConfigChanged => self.apply_appearance(),
             Effect::OpenUrl(u) => win::open_url(&u),
             Effect::TwitchLive(req) => {
-                let tx = self.live_results.0.clone();
-                let hwnd = self.hwnd.0 as isize;
-                let _ = std::thread::Builder::new().name("twitch-live".into()).spawn(move || {
-                    let _ = tx.send(schwaetz_core::helix::check(req));
-                    unsafe {
-                        let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_LIVE, WPARAM(0), LPARAM(0));
-                    }
-                });
+                self.run_worker("twitch-live", move || WorkerResult::Live(schwaetz_core::helix::check(req)))
             }
+            Effect::TwitchAuth { network, request } => self.run_worker("twitch-auth", move || {
+                let response = schwaetz_core::twitch_auth::execute(&request);
+                WorkerResult::Auth(network, request, response)
+            }),
             Effect::ReloadScripts => {
                 if let Some(h) = self.services.scripts.as_mut() {
                     h.reload(&mut self.app);
@@ -948,6 +952,18 @@ impl Ui {
         }
         self.chat.scroll_to_bottom();
         self.after_update();
+    }
+
+    /// Runs blocking work (HTTPS) on its own thread; the result comes back through `WM_APP_LIVE`.
+    fn run_worker(&self, name: &str, job: impl FnOnce() -> WorkerResult + Send + 'static) {
+        let tx = self.workers.0.clone();
+        let hwnd = self.hwnd.0 as isize;
+        let _ = std::thread::Builder::new().name(name.into()).spawn(move || {
+            let _ = tx.send(job());
+            unsafe {
+                let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_LIVE, WPARAM(0), LPARAM(0));
+            }
+        });
     }
 
     /// Sends image/preview requests collected while laying out lines.
@@ -1164,6 +1180,7 @@ impl Ui {
                                     SecretKind::ServerPassword,
                                     SecretKind::TwitchToken,
                                     SecretKind::TwitchApi,
+                                    SecretKind::TwitchOAuth,
                                 ] {
                                     if let Some(v) = get(old, k) {
                                         set(&cfg.name, k, &v);
@@ -1184,6 +1201,21 @@ impl Ui {
                     }
                 }
             },
+            FormAction::Button("twitch_signin") => {
+                let net = match &form.kind {
+                    FormKind::Network { original: Some(name) } => self.app.network_by_name(name),
+                    _ => None,
+                };
+                let state = net.and_then(|n| self.app.twitch_auth(n)).map(|a| (a.signing_in(), a.login().is_some()));
+                match (net, state) {
+                    (Some(net), Some((true, _))) => self.app.twitch_cancel_sign_in(net),
+                    (Some(net), Some((_, true))) => self.app.twitch_sign_out(net),
+                    (Some(net), Some(_)) => self.app.twitch_sign_in(net),
+                    _ => form.set_error("Save this network with the type Twitch chat first.".into()),
+                }
+                self.after_update();
+            }
+            FormAction::Button(_) => {}
             FormAction::Delete => {
                 if let FormKind::Network { original: Some(name) } = form.kind.clone() {
                     if let Some(id) = self.app.network_by_name(&name) {
@@ -2203,8 +2235,11 @@ impl Ui {
                 Some(LRESULT(0))
             }
             WM_APP_LIVE => {
-                while let Ok(r) = self.live_results.1.try_recv() {
-                    self.app.on_live_result(r);
+                while let Ok(r) = self.workers.1.try_recv() {
+                    match r {
+                        WorkerResult::Live(r) => self.app.on_live_result(r),
+                        WorkerResult::Auth(net, req, resp) => self.app.on_auth_result(net, req, resp),
+                    }
                 }
                 self.after_update();
                 self.invalidate();
@@ -2535,4 +2570,25 @@ pub(crate) struct ReplyTarget {
     msgid: String,
     nick: String,
     excerpt: String,
+}
+
+/// Caption and note of the network dialog's "Sign in with Twitch" button.
+fn twitch_account_button(app: &App, net: Option<schwaetz_net::NetworkId>) -> (&'static str, String) {
+    let Some(a) = net.and_then(|n| app.twitch_auth(n)) else {
+        return ("Sign in with Twitch", "Save this network as a Twitch network first".into());
+    };
+    if !a.available() {
+        return ("Sign in with Twitch", "Not available in this build".into());
+    }
+    if let Some(code) = a.user_code() {
+        return ("Cancel", format!("Authorize in your browser (code {code})"));
+    }
+    if a.signing_in() {
+        return ("Cancel", "Contacting Twitch…".into());
+    }
+    match a.login() {
+        Some("") => ("Sign out", "Signed in".into()),
+        Some(login) => ("Sign out", format!("Signed in as {login}")),
+        None => ("Sign in with Twitch", "Used for live status".into()),
+    }
 }

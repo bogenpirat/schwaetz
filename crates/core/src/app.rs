@@ -60,6 +60,12 @@ pub enum Effect {
     OpenUrl(String),
     /// Run a Twitch live check on a worker thread and pass the result to `App::on_live_result`.
     TwitchLive(crate::helix::LiveRequest),
+    /// Talk to Twitch's OAuth server on a worker thread (`twitch_auth::execute`) and pass the
+    /// response to `App::on_auth_result`.
+    TwitchAuth {
+        network: NetworkId,
+        request: crate::twitch_auth::AuthRequest,
+    },
     ReloadScripts,
     /// Open the settings dialog.
     OpenSettings,
@@ -105,6 +111,8 @@ pub struct Network {
     pub last_seen: i64,
     pub user_quit: bool,
     pub(crate) live: LiveCheck,
+    /// Twitch: "Sign in with Twitch" tokens for the Helix API.
+    pub(crate) auth: crate::twitch_auth::TokenManager,
 }
 
 /// Twitch live-check scheduling for one network.
@@ -120,8 +128,6 @@ pub(crate) struct LiveCheck {
     client_id: Option<String>,
     ids: std::collections::HashMap<String, String>,
     last_error: Option<String>,
-    /// Token set by tests instead of the Credential Manager.
-    pub(crate) token_override: Option<String>,
 }
 
 impl Network {
@@ -162,6 +168,8 @@ pub struct App {
     pub track_new_lines: bool,
     /// Mirror raw protocol traffic into per-network "raw log" buffers.
     pub rawlog: bool,
+    /// Tests: secrets live here instead of the Windows Credential Manager.
+    mem_secrets: Option<std::collections::HashMap<String, String>>,
     /// Commands registered by scripts (completion and /help).
     pub extra_commands: Vec<(String, String)>,
     /// Persistent history (logging, scroll-back, search).
@@ -192,6 +200,7 @@ impl App {
             new_lines: Vec::new(),
             track_new_lines: false,
             rawlog: false,
+            mem_secrets: None,
             extra_commands: Vec::new(),
             history: None,
             config,
@@ -538,6 +547,7 @@ impl App {
     // ----- networks ------------------------------------------------------------------------------
 
     pub fn add_network(&mut self, cfg: NetworkConfig) -> NetworkId {
+        let auth = self.load_auth(&cfg);
         let id = NetworkId(self.next_network);
         self.next_network += 1;
         let name =
@@ -568,6 +578,7 @@ impl App {
                 last_seen: 0,
                 user_quit: false,
                 live: LiveCheck::default(),
+                auth,
             },
         );
         self.dirty.sidebar = true;
@@ -870,6 +881,9 @@ impl App {
             }
             self.flush(id);
             self.live_tick(id);
+        }
+        for id in self.networks.keys().copied().collect::<Vec<_>>() {
+            self.auth_tick(id);
         }
         // Expire typing indicators.
         let active = self.active;
@@ -2233,21 +2247,67 @@ impl LiveCheck {
 }
 
 impl App {
-    /// The network's Helix API token, if it is a Twitch network and one is stored.
-    fn api_token(&self, net: NetworkId) -> Option<String> {
+    /// The network's Helix API token and the client ID it belongs to (if known): the "Sign in
+    /// with Twitch" token, else a manually entered one.
+    fn api_token(&self, net: NetworkId) -> Option<(String, Option<String>)> {
         let n = self.networks.get(&net).filter(|n| n.is_twitch())?;
-        n.live
-            .token_override
-            .clone()
-            .or_else(|| secrets::get(&n.cfg.name, SecretKind::TwitchApi))
+        if let Some(t) = n.auth.access_token() {
+            return Some((t.to_owned(), n.auth.client_id().map(str::to_owned)));
+        }
+        self.secret_get(&n.cfg.name, SecretKind::TwitchApi)
             .filter(|t| !crate::helix::normalize_token(t).is_empty())
+            .map(|t| (t, None))
     }
 
-    /// Uses `token` instead of the Credential Manager (tests, automation).
+    /// Stores `token` as the manually entered API token (tests use in-memory secrets).
     #[doc(hidden)]
     pub fn set_twitch_api_token(&mut self, net: NetworkId, token: Option<String>) {
-        if let Some(n) = self.networks.get_mut(&net) {
-            n.live.token_override = token;
+        self.use_memory_secrets();
+        let Some(name) = self.networks.get(&net).map(|n| n.cfg.name.clone()) else { return };
+        match token {
+            Some(t) => self.secret_set(&name, SecretKind::TwitchApi, &t),
+            None => self.secret_delete(&name, SecretKind::TwitchApi),
+        }
+    }
+
+    /// Keeps secrets in memory instead of the Windows Credential Manager (tests).
+    #[doc(hidden)]
+    pub fn use_memory_secrets(&mut self) {
+        self.mem_secrets.get_or_insert_with(Default::default);
+    }
+
+    fn secret_key(network: &str, kind: SecretKind) -> String {
+        format!("{}:{kind:?}", network.to_lowercase())
+    }
+
+    pub(crate) fn secret_get(&self, network: &str, kind: SecretKind) -> Option<String> {
+        match &self.mem_secrets {
+            Some(m) => m.get(&Self::secret_key(network, kind)).cloned(),
+            None => secrets::get(network, kind),
+        }
+    }
+
+    pub(crate) fn secret_set(&mut self, network: &str, kind: SecretKind, value: &str) {
+        match &mut self.mem_secrets {
+            Some(m) => {
+                m.insert(Self::secret_key(network, kind), value.to_owned());
+            }
+            None => {
+                if !secrets::set(network, kind, value) {
+                    tracing::warn!("could not store the {kind:?} secret for {network}");
+                }
+            }
+        }
+    }
+
+    pub(crate) fn secret_delete(&mut self, network: &str, kind: SecretKind) {
+        match &mut self.mem_secrets {
+            Some(m) => {
+                m.remove(&Self::secret_key(network, kind));
+            }
+            None => {
+                secrets::delete(network, kind);
+            }
         }
     }
 
@@ -2318,7 +2378,7 @@ impl App {
     /// Checks `only` these channels, or every joined channel (which also schedules the next
     /// periodic check).
     fn check_live(&mut self, net: NetworkId, only: Option<Vec<String>>) {
-        let Some(token) = self.api_token(net) else {
+        let Some((token, token_client)) = self.api_token(net) else {
             if let Some(n) = self.networks.get_mut(&net) {
                 n.live.next_at = 0;
             }
@@ -2352,7 +2412,7 @@ impl App {
         let req = crate::helix::LiveRequest {
             network: net,
             token,
-            client_id: n.live.client_id.clone(),
+            client_id: token_client.or_else(|| n.live.client_id.clone()),
             ids: n.live.ids.clone(),
             logins,
         };
@@ -2361,6 +2421,7 @@ impl App {
 
     /// A live check finished (see [`Effect::TwitchLive`]).
     pub fn on_live_result(&mut self, r: crate::helix::LiveResult) {
+        let now = self.now;
         let Some(n) = self.networks.get_mut(&r.network) else { return };
         n.live.in_flight = false;
         n.live.client_id = r.client_id;
@@ -2368,6 +2429,11 @@ impl App {
         let sb = n.server_buffer;
         let queued = std::mem::take(&mut n.live.queued);
         match r.result {
+            Err(_) if r.unauthorized && n.auth.access_token().is_some() => {
+                // The signed-in token expired early or was revoked: refresh it; the refresh
+                // triggers a new check.
+                n.auth.unauthorized(now);
+            }
             Err(e) => {
                 // Report each problem once, not on every interval.
                 if n.live.last_error.as_deref() != Some(e.as_str()) {
@@ -2416,4 +2482,131 @@ impl App {
 /// `#Name` → `name` (Twitch logins are lowercase).
 fn channel_login(channel: &str) -> String {
     channel.trim_start_matches('#').to_ascii_lowercase()
+}
+
+// ----- Twitch sign-in ----------------------------------------------------------------------------
+
+impl App {
+    fn load_auth(&self, cfg: &NetworkConfig) -> crate::twitch_auth::TokenManager {
+        use crate::twitch_auth::{TokenManager, Tokens, built_in_client_id};
+        if cfg.kind != NetworkKind::Twitch {
+            return TokenManager::default();
+        }
+        let client_id = cfg.twitch_client_id.clone().or_else(|| built_in_client_id().map(str::to_owned));
+        let tokens = self.secret_get(&cfg.name, SecretKind::TwitchOAuth).and_then(|s| Tokens::from_json(&s));
+        TokenManager::new(client_id, tokens)
+    }
+
+    /// Reloads a network's sign-in state from storage (after switching secret stores or
+    /// renaming the network).
+    #[doc(hidden)]
+    pub fn reload_twitch_auth(&mut self, net: NetworkId) {
+        let Some(cfg) = self.networks.get(&net).map(|n| n.cfg.clone()) else { return };
+        let auth = self.load_auth(&cfg);
+        if let Some(n) = self.networks.get_mut(&net) {
+            n.auth = auth;
+        }
+    }
+
+    /// Sign-in state of a Twitch network.
+    pub fn twitch_auth(&self, net: NetworkId) -> Option<&crate::twitch_auth::TokenManager> {
+        self.networks.get(&net).filter(|n| n.is_twitch()).map(|n| &n.auth)
+    }
+
+    /// Starts "Sign in with Twitch" (the browser opens once Twitch hands out a code).
+    pub fn twitch_sign_in(&mut self, net: NetworkId) {
+        let Some(n) = self.networks.get_mut(&net).filter(|n| n.is_twitch()) else { return };
+        let sb = n.server_buffer;
+        if !n.auth.available() {
+            let msg = "This build has no Twitch application for signing in (see SCHWAETZ_TWITCH_CLIENT_ID).";
+            return self.status(sb, LineKind::Error, msg);
+        }
+        if let Some(request) = n.auth.sign_in() {
+            self.effects.push(Effect::TwitchAuth { network: net, request });
+            self.status(sb, LineKind::Status, "Sign in with Twitch: asking Twitch for a sign-in code…");
+        }
+    }
+
+    pub fn twitch_cancel_sign_in(&mut self, net: NetworkId) {
+        let Some(n) = self.networks.get_mut(&net).filter(|n| n.is_twitch() && n.auth.signing_in()) else { return };
+        n.auth.cancel();
+        let sb = n.server_buffer;
+        self.status(sb, LineKind::Status, "Twitch sign-in cancelled.");
+    }
+
+    /// Forgets (and revokes) the signed-in tokens.
+    pub fn twitch_sign_out(&mut self, net: NetworkId) {
+        let Some(n) = self.networks.get_mut(&net).filter(|n| n.is_twitch()) else { return };
+        let (revoke, events) = n.auth.sign_out();
+        let signed_in = !events.is_empty();
+        if let Some(request) = revoke {
+            self.effects.push(Effect::TwitchAuth { network: net, request });
+        }
+        self.apply_auth_events(net, events);
+        if signed_in {
+            let sb = self.networks[&net].server_buffer;
+            self.status(sb, LineKind::Status, "Signed out of Twitch.");
+        }
+    }
+
+    fn auth_tick(&mut self, net: NetworkId) {
+        let now = self.now;
+        let Some(n) = self.networks.get_mut(&net).filter(|n| n.is_twitch()) else { return };
+        if let Some(request) = n.auth.poll(now) {
+            self.effects.push(Effect::TwitchAuth { network: net, request });
+        }
+    }
+
+    /// An [`Effect::TwitchAuth`] request finished.
+    pub fn on_auth_result(
+        &mut self,
+        net: NetworkId,
+        request: crate::twitch_auth::AuthRequest,
+        response: crate::twitch_auth::AuthResponse,
+    ) {
+        let now = self.now;
+        let Some(n) = self.networks.get_mut(&net) else { return };
+        let events = n.auth.on_response(&request, response, now);
+        self.apply_auth_events(net, events);
+    }
+
+    fn apply_auth_events(&mut self, net: NetworkId, events: Vec<crate::twitch_auth::AuthEvent>) {
+        use crate::twitch_auth::AuthEvent;
+        let Some(n) = self.networks.get(&net) else { return };
+        let (name, sb) = (n.cfg.name.clone(), n.server_buffer);
+        for ev in events {
+            match ev {
+                AuthEvent::Persist(Some(t)) => {
+                    self.secret_set(&name, SecretKind::TwitchOAuth, &t.to_json());
+                    // A new (or refreshed) token: check with it right away.
+                    self.live_on_config(net);
+                }
+                AuthEvent::Persist(None) => self.secret_delete(&name, SecretKind::TwitchOAuth),
+                AuthEvent::OpenBrowser { url, user_code } => {
+                    self.effects.push(Effect::OpenUrl(url.clone()));
+                    let text = format!(
+                        "Sign in with Twitch: authorize schwätz in your browser (code {user_code}). \
+                         If no browser opened, visit {url}"
+                    );
+                    self.status(sb, LineKind::Status, text);
+                }
+                AuthEvent::SignedIn { login } => {
+                    let who = if login.is_empty() { String::new() } else { format!(" as {login}") };
+                    self.status(sb, LineKind::Status, format!("Signed in to Twitch{who}."));
+                }
+                AuthEvent::SignInFailed(e) => self.status(sb, LineKind::Error, format!("Twitch sign-in failed: {e}.")),
+                AuthEvent::SignedOut(e) => self.status(
+                    sb,
+                    LineKind::Error,
+                    format!("Twitch sign-in ended: {e}. Sign in again in the network settings (or /twitch login)."),
+                ),
+                AuthEvent::Problem(e) => self.status(
+                    sb,
+                    LineKind::Error,
+                    format!("Could not refresh the Twitch sign-in ({e}); retrying in 5 minutes."),
+                ),
+            }
+        }
+        self.dirty.sidebar = true;
+    }
 }

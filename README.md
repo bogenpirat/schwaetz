@@ -49,6 +49,14 @@ cargo build --release
 If `cargo` reports `link.exe not found` although Build Tools are installed, load the MSVC
 environment first: `. .\scripts\dev-env.ps1`.
 
+"Sign in with Twitch" uses the Twitch application whose client ID is compiled in from
+`SCHWAETZ_TWITCH_CLIENT_ID`, set in `.cargo\config.toml` (so local and CI builds get it without
+extra setup). The application must be registered with the **Public** client type: Twitch only
+offers public clients the device code flow, which needs no client secret. To build against another
+application, set the variable in your environment (`$env:SCHWAETZ_TWITCH_CLIENT_ID = "..."`),
+which takes precedence; an empty value builds without Twitch sign-in. The OAuth endpoints can be
+checked with `cargo test -p schwaetz-core --test twitch_live -- --ignored --nocapture`.
+
 `.\scripts\check.ps1` runs the same checks as CI (format, clippy, tests). End-to-end tests run
 against a local [Ergo](https://ergo.chat) server:
 

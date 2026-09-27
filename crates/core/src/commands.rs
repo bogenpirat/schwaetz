@@ -68,6 +68,7 @@ cmds! {
     "reload", "/reload", "Reload scripts.";
     "say", "/say <text>", "Send text as a message (even if it starts with /).";
     "secret", "/secret <network> <sasl|pass|twitch|twitch-api> <value>", "Store a password or token in Windows Credential Manager (never in config.toml).";
+    "twitch", "/twitch login|logout|cancel|status", "Sign in with Twitch for live status (on a Twitch network).";
     "search", "/search [-n] <text>", "Search the message history (all networks, or -n for the current one).";
     "server", "/server <host[:[+]port]>", "Connect to a server.";
     "set", "/set [key [value]]", "Show or change a setting, e.g. /set appearance.font_size 14.";
@@ -871,6 +872,35 @@ impl App {
                     "Could not store the secret.".to_owned()
                 };
                 self.status(buffer, LineKind::Status, text);
+            }
+            "twitch" => {
+                let Some(net) = self.require_net(buffer) else { return };
+                if !self.networks.get(&net).is_some_and(|n| n.is_twitch()) {
+                    return self.status(buffer, LineKind::Error, "/twitch works on Twitch networks.");
+                }
+                match arg1 {
+                    "login" => self.twitch_sign_in(net),
+                    "logout" => self.twitch_sign_out(net),
+                    "cancel" => self.twitch_cancel_sign_in(net),
+                    "status" | "" => {
+                        let a = &self.networks[&net].auth;
+                        let text = if !a.available() {
+                            "This build has no Twitch application for signing in.".to_owned()
+                        } else if let Some(code) = a.user_code() {
+                            format!("Waiting for you to authorize in the browser (code {code}).")
+                        } else if a.signing_in() {
+                            "Signing in…".to_owned()
+                        } else {
+                            match a.login() {
+                                Some("") => "Signed in to Twitch.".to_owned(),
+                                Some(l) => format!("Signed in to Twitch as {l}."),
+                                None => "Not signed in. Use /twitch login.".to_owned(),
+                            }
+                        };
+                        self.status(buffer, LineKind::Status, text);
+                    }
+                    _ => self.usage(buffer, "twitch"),
+                }
             }
             "rawlog" => {
                 self.rawlog = !self.rawlog;

@@ -8,6 +8,8 @@ pub enum SecretKind {
     TwitchToken,
     /// Twitch Helix API OAuth token (live checks).
     TwitchApi,
+    /// Tokens from "Sign in with Twitch" (JSON: access and refresh token, expiry, login).
+    TwitchOAuth,
 }
 
 impl SecretKind {
@@ -17,6 +19,7 @@ impl SecretKind {
             SecretKind::ServerPassword => "pass",
             SecretKind::TwitchToken => "twitch",
             SecretKind::TwitchApi => "twitch-api",
+            SecretKind::TwitchOAuth => "twitch-oauth",
         }
     }
 }

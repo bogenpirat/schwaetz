@@ -25,6 +25,11 @@ pub enum FieldKind {
     Password(Editor, bool),
     Choice(Vec<(&'static str, &'static str)>, usize),
     Check(bool),
+    /// A push button with a note next to it (both can be updated while the dialog is open).
+    Button {
+        caption: String,
+        note: String,
+    },
 }
 
 pub struct Field {
@@ -45,6 +50,8 @@ pub enum FormAction {
     Save,
     Cancel,
     Delete,
+    /// A button field was pressed (its key).
+    Button(&'static str),
 }
 
 pub struct Form {
@@ -97,6 +104,10 @@ fn choice(key: &'static str, label: &'static str, options: Vec<(&'static str, &'
     Field { key, label, hint: "", kind: FieldKind::Choice(options, idx) }
 }
 
+fn button(key: &'static str, label: &'static str, caption: &str) -> Field {
+    Field { key, label, hint: "", kind: FieldKind::Button { caption: caption.into(), note: String::new() } }
+}
+
 fn header(label: &'static str) -> Field {
     Field { key: "", label, hint: "", kind: FieldKind::Header }
 }
@@ -133,6 +144,20 @@ impl Form {
             popup: Vec::new(),
             scrollbar: None,
             grab: None,
+        }
+    }
+
+    /// Updates a button field's caption and note.
+    pub fn set_button(&mut self, key: &str, caption: &str, note: &str) {
+        if let Some(FieldKind::Button { caption: c, note: n }) =
+            self.fields.iter_mut().find(|f| f.key == key).map(|f| &mut f.kind)
+        {
+            if c != caption {
+                *c = caption.to_owned();
+            }
+            if n != note {
+                *n = note.to_owned();
+            }
         }
     }
 
@@ -237,7 +262,8 @@ impl Form {
             check("rejoin_on_kick", "Rejoin when kicked", c.rejoin_on_kick),
             check("previews", "Link previews on this network", c.previews),
             header("Twitch"),
-            password("twitch_api", "API token (live status)", has(SecretKind::TwitchApi)),
+            button("twitch_signin", "Account", "Sign in with Twitch"),
+            password("twitch_api", "Manual API token", has(SecretKind::TwitchApi)),
             text("live_check_secs", "Live check every (seconds)", "at least 30", &c.live_check_secs.to_string()),
         ];
         let title = match cfg {
@@ -594,6 +620,20 @@ impl Form {
                     let knob_x = if *on { bx.right() - 10.0 } else { bx.x + 10.0 };
                     p.circle(knob_x, bx.y + 10.0, 7.0, if *on { th.accent_fg } else { th.text_dim });
                 }
+                FieldKind::Button { caption, note } => {
+                    let cl = text.layout(caption, &f.ui_semibold, ctl.w, 20.0);
+                    let bw = (text::metrics(&cl).width + 32.0).min(ctl.w);
+                    let b = Rect::new(ctl.x, ctl.y, bw, ctl.h);
+                    p.fill_round(b, 6.0, th.accent);
+                    if focused {
+                        p.stroke_round(b.inset(-2.0, -2.0), 8.0, with_alpha(th.accent, 0.6), 1.0);
+                    }
+                    p.text(&cl, b.x + 16.0, b.y + 8.0, th.accent_fg);
+                    if !note.is_empty() {
+                        let nl = text.layout(note, &f.ui, (ctl.w - bw - 14.0).max(1.0), 20.0);
+                        p.text(&nl, b.right() + 14.0, b.y + 8.0, th.text_dim);
+                    }
+                }
                 FieldKind::Header => {}
             }
             self.rows.push((i, row, ctl));
@@ -715,6 +755,9 @@ impl Form {
         }
         let Some(&(i, _, ctl)) = self.rows.iter().find(|(_, r, _)| r.contains(x, y)) else { return FormAction::None };
         self.focus = i;
+        if matches!(self.fields[i].kind, FieldKind::Button { .. }) {
+            return if ctl.contains(x, y) { FormAction::Button(self.fields[i].key) } else { FormAction::None };
+        }
         match &mut self.fields[i].kind {
             FieldKind::Check(on) => *on = !*on,
             FieldKind::Choice(_, idx) => {
@@ -727,7 +770,7 @@ impl Form {
                     ed.click(x - ctl.x - 10.0, 10.0, false);
                 }
             }
-            FieldKind::Header => {}
+            FieldKind::Header | FieldKind::Button { .. } => {}
         }
         FormAction::None
     }
@@ -829,6 +872,9 @@ impl Form {
             return FormAction::None;
         }
         let pages = self.sections.len().max(1);
+        if matches!(v, VK_RETURN | VK_SPACE) && matches!(self.fields[self.focus].kind, FieldKind::Button { .. }) {
+            return FormAction::Button(self.fields[self.focus].key);
+        }
         match v {
             VK_ESCAPE => return FormAction::Cancel,
             VK_RETURN => return FormAction::Save,

@@ -38,8 +38,13 @@ Manager (`schwaetz:<network>:…`).
 **Twitch:** use `kind = "twitch"`, server `irc.chat.twitch.tv:+6697`. With a token you can chat;
 with a nick like `justinfan12345` and no token you can read anonymously.
 
-**Twitch live status:** store a Helix API OAuth token (network dialog → Twitch, or
-`/secret <network> twitch-api <token>`; any user token works, no scopes needed). Joined channels
+**Twitch live status:** sign in with Twitch (network dialog → Twitch → *Sign in with Twitch*,
+or `/twitch login`): your browser opens a Twitch page with the code filled in, and after you
+click *Authorize* the app picks up the tokens by itself. They are kept in the Credential Manager
+and refreshed automatically at least once a day (Twitch expires unused refresh tokens after 30
+days); `/twitch status` shows the account and `/twitch logout` signs out. Alternatively store a
+Helix API token yourself (*Manual API token*, or `/secret <network> twitch-api <token>`; any
+user token works, no scopes needed). Joined channels
 are then checked for being live: after connecting once all autojoin channels are joined, right
 away for channels you join later, and every `live_check_secs` after that. The stream title and
 game show in the topic bar (`🔴 Live · Game — Title · 1,234 viewers` or `Offline · Game — Title`),

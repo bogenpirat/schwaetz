@@ -80,21 +80,25 @@ pub struct LiveResult {
     pub ids: HashMap<String, String>,
     /// Login → state for every channel that exists.
     pub result: Result<Vec<(String, StreamInfo)>, String>,
+    /// Twitch rejected the token (HTTP 401): refresh it, or ask for a new one.
+    pub unauthorized: bool,
 }
 
 const HELIX: &str = "https://api.twitch.tv/helix";
 const MAX_BODY: u64 = 1 << 20;
+const UNAUTHORIZED: &str = "the API token is invalid or expired";
 
 /// Runs a live check (blocking).
 pub fn check(req: LiveRequest) -> LiveResult {
     let mut client_id = req.client_id.clone();
     let mut ids = req.ids.clone();
     let result = run(&req, &mut client_id, &mut ids);
+    let unauthorized = matches!(&result, Err(e) if e == UNAUTHORIZED);
     if result.is_err() {
         // The token may have been replaced or revoked; validate again next time.
         client_id = None;
     }
-    LiveResult { network: req.network, client_id, ids, result }
+    LiveResult { network: req.network, client_id, ids, result, unauthorized }
 }
 
 fn run(
@@ -118,7 +122,7 @@ fn run(
             )?;
             let c = match r.status {
                 200 => parse_validate(&r.body)?,
-                401 => return Err("the API token is invalid or expired".into()),
+                401 => return Err(UNAUTHORIZED.into()),
                 s => return Err(format!("token validation failed (HTTP {s})")),
             };
             *client_id = Some(c.clone());
@@ -133,7 +137,7 @@ fn run(
         let r = schwaetz_net::http::get_with(&url, &headers, MAX_BODY, false)?;
         match r.status {
             200 => Ok(r.body),
-            401 => Err("the API token is invalid or expired".into()),
+            401 => Err(UNAUTHORIZED.into()),
             429 => Err("rate limited by Twitch".into()),
             s => Err(format!("{path} request failed (HTTP {s})")),
         }

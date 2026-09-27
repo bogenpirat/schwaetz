@@ -452,6 +452,7 @@ fn live_result(h: &Harness, statuses: &[(&str, bool, &str)]) -> schwaetz_core::h
         network: h.net,
         client_id: Some("cid".into()),
         ids: Default::default(),
+        unauthorized: false,
         result: Ok(statuses
             .iter()
             .map(|(login, live, title)| {
@@ -522,6 +523,7 @@ fn twitch_live_checks_follow_autojoin_manual_joins_and_interval() {
         client_id: None,
         ids: Default::default(),
         result: Err("the API token is invalid or expired".into()),
+        unauthorized: true,
     };
     h.app.tick(h.now + 400_000);
     h.app.on_live_result(err(&h));
@@ -540,4 +542,106 @@ fn twitch_without_api_token_never_checks() {
     h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>", ":me!me@me.tmi.twitch.tv JOIN #alpha"]);
     h.app.tick(h.now + 1_000_000);
     assert!(live_requests(&mut h.app).is_empty());
+}
+
+#[test]
+fn twitch_sign_in_feeds_live_checks_and_refreshes_on_401() {
+    use schwaetz_core::twitch_auth::{AuthRequest, AuthResponse};
+    let mut h = Harness::new(NetworkKind::Twitch, &["#alpha"]);
+    h.app.use_memory_secrets();
+    h.app.networks.get_mut(&h.net).unwrap().cfg.twitch_client_id = Some("cid".into());
+    h.app.reload_twitch_auth(h.net);
+    h.connect();
+    h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>", ":me!me@me.tmi.twitch.tv JOIN #alpha"]);
+    assert!(live_requests(&mut h.app).is_empty(), "no token, no checks");
+
+    let auth_requests = |app: &mut App| -> Vec<AuthRequest> {
+        app.take_effects()
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::TwitchAuth { request, .. } => Some(request),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Sign in: device code → browser → poll → tokens.
+    h.app.twitch_sign_in(h.net);
+    let start = auth_requests(&mut h.app).remove(0);
+    assert_eq!(start, AuthRequest::StartDevice { client_id: "cid".into() });
+    let device = AuthResponse::Device {
+        device_code: "dc".into(),
+        user_code: "ABCDEFGH".into(),
+        verification_uri: "https://www.twitch.tv/activate?public=true&device-code=ABCDEFGH".into(),
+        expires_in: 1800,
+        interval: 5,
+    };
+    h.app.on_auth_result(h.net, start, device);
+    assert!(h.app.take_effects().iter().any(|e| matches!(e, Effect::OpenUrl(u) if u.contains("ABCDEFGH"))));
+    assert_eq!(h.app.twitch_auth(h.net).unwrap().user_code(), Some("ABCDEFGH"));
+    h.app.tick(h.now + 6_000);
+    let poll = auth_requests(&mut h.app).remove(0);
+    let tokens = AuthResponse::Tokens {
+        access: "acc1".into(),
+        refresh: "ref1".into(),
+        expires_in: 14_400,
+        login: "alice".into(),
+    };
+    h.app.on_auth_result(h.net, poll, tokens);
+    assert_eq!(h.app.twitch_auth(h.net).unwrap().login(), Some("alice"));
+
+    // Signing in starts live checks with the new token and the app's client ID.
+    let reqs: Vec<_> = h
+        .app
+        .take_effects()
+        .into_iter()
+        .filter_map(|e| match e {
+            Effect::TwitchLive(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!((reqs[0].token.as_str(), reqs[0].client_id.as_deref()), ("acc1", Some("cid")));
+    assert_eq!(reqs[0].logins, ["alpha"]);
+
+    // The tokens survive a restart (stored, then loaded again).
+    h.app.reload_twitch_auth(h.net);
+    assert_eq!(h.app.twitch_auth(h.net).unwrap().access_token(), Some("acc1"));
+
+    // A 401 from the API refreshes right away; the new token is used for the next check.
+    let unauthorized = schwaetz_core::helix::LiveResult {
+        network: h.net,
+        client_id: None,
+        ids: Default::default(),
+        result: Err("the API token is invalid or expired".into()),
+        unauthorized: true,
+    };
+    h.app.on_live_result(unauthorized);
+    h.app.tick(h.now + 7_000);
+    let refresh = auth_requests(&mut h.app).remove(0);
+    assert_eq!(refresh, AuthRequest::Refresh { client_id: "cid".into(), refresh_token: "ref1".into() });
+    let tokens = AuthResponse::Tokens {
+        access: "acc2".into(),
+        refresh: "ref2".into(),
+        expires_in: 14_400,
+        login: String::new(),
+    };
+    h.app.on_auth_result(h.net, refresh, tokens);
+    let next: Vec<_> = h
+        .app
+        .take_effects()
+        .into_iter()
+        .filter_map(|e| match e {
+            Effect::TwitchLive(r) => Some(r.token),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(next, ["acc2"]);
+    assert_eq!(h.app.twitch_auth(h.net).unwrap().login(), Some("alice"), "login kept across refreshes");
+
+    // Signing out revokes and forgets the tokens.
+    h.app.twitch_sign_out(h.net);
+    assert!(matches!(&auth_requests(&mut h.app)[..], [AuthRequest::Revoke { token, .. }] if token == "acc2"));
+    h.app.reload_twitch_auth(h.net);
+    assert_eq!(h.app.twitch_auth(h.net).unwrap().access_token(), None);
 }

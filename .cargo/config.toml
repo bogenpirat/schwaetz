@@ -1,0 +1,6 @@
+[env]
+# Twitch application used for "Sign in with Twitch" (OAuth device code flow). It must be
+# registered with the *Public* client type, so no client secret is needed or shipped. Client IDs
+# are public identifiers, not secrets. Set SCHWAETZ_TWITCH_CLIENT_ID in the environment to build
+# with a different application; an empty value builds without Twitch sign-in.
+SCHWAETZ_TWITCH_CLIENT_ID = "el58vrvctcaubqzassbyaf6k0cjvp1"
