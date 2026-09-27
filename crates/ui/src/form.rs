@@ -375,6 +375,7 @@ impl Form {
             text("live_check_secs", "Live check every (seconds)", "at least 30", &c.live_check_secs.to_string()),
             check("twitch_colors", "Show Twitch name colors in the chat", c.twitch_colors),
             check("twitch_popout", "Open streams in the popout player", c.twitch_popout),
+            check("twitch_live_first", "List live channels first", c.twitch_live_first),
         ];
         let title = match cfg {
             Some(c) => format!("Edit network — {}", c.name),
@@ -577,6 +578,7 @@ impl Form {
             live_check_secs,
             twitch_colors: self.check("twitch_colors"),
             twitch_popout: self.check("twitch_popout"),
+            twitch_live_first: self.check("twitch_live_first"),
             ..base
         };
         Ok((cfg, secrets))

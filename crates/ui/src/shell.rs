@@ -69,6 +69,9 @@ enum Drag {
     Chat,
     Input,
     Splitter,
+    /// A channel row pressed in the sidebar; it becomes a rearranging drag once the pointer has
+    /// moved a few pixels (`row_drag_from`).
+    Row(BufferId),
 }
 
 pub struct Services {
@@ -136,6 +139,8 @@ pub struct Ui {
     stream_btn: Option<Rect>,
     /// Sidebar row under a pressed middle button (acts on release over the same row).
     middle_pressed: Option<BufferId>,
+    /// Pointer height where a channel row was pressed (a drag starts a few pixels away).
+    row_drag_from: f32,
 }
 
 thread_local! {
@@ -274,6 +279,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         anims: Default::default(),
         stream_btn: None,
         middle_pressed: None,
+        row_drag_from: 0.0,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -1428,6 +1434,13 @@ impl Ui {
     }
 
     fn key_down(&mut self, vk: u16) -> bool {
+        if vk == VK_ESCAPE.0 && self.sidebar.drag.is_some() {
+            // Cancel rearranging a channel.
+            self.sidebar.drag = None;
+            self.drag = Drag::None;
+            self.invalidate();
+            return true;
+        }
         let ctrl = win::key_down(VK_CONTROL.0);
         let shift = win::key_down(VK_SHIFT.0);
         let alt = win::key_down(VK_MENU.0);
@@ -1731,6 +1744,11 @@ impl Ui {
         }
         if let Some(id) = self.sidebar.hit(x, y) {
             self.switch_to(id);
+            // Channels can be dragged to another position within their network.
+            if self.app.buffer(id).is_some_and(|b| b.kind == BufferKind::Channel) {
+                self.drag = Drag::Row(id);
+                self.row_drag_from = y;
+            }
             return;
         }
         if self.show_nicklist && self.nicklist.rect.contains(x, y) {
@@ -1855,6 +1873,20 @@ impl Ui {
                 self.input.click(x - inner.x, y - inner.y, true);
                 self.invalidate();
             }
+            Drag::Row(id) => {
+                if self.sidebar.drag.is_none() && (y - self.row_drag_from).abs() < 5.0 {
+                    return;
+                }
+                let drag = self.sidebar.drop_target(id, y).map(|(before, line_y)| crate::lists::RowDrag {
+                    id,
+                    before,
+                    line_y,
+                });
+                if drag != self.sidebar.drag {
+                    self.sidebar.drag = drag;
+                    self.invalidate();
+                }
+            }
             Drag::None => {
                 let hover = self.sidebar.hit(x, y);
                 if hover != self.sidebar.hover {
@@ -1908,6 +1940,12 @@ impl Ui {
         {
             let action = f.release(self.win_rect, x, y);
             self.form_action(action);
+        }
+        if let Drag::Row(id) = self.drag
+            && let Some(d) = self.sidebar.drag.take()
+        {
+            self.app.move_channel(id, d.before);
+            self.after_update();
         }
         if self.drag == Drag::Chat {
             self.chat.selecting = false;
@@ -2051,6 +2089,9 @@ impl Ui {
         }
         if self.on_splitter(x) || self.drag == Drag::Splitter {
             return IDC_SIZEWE;
+        }
+        if self.sidebar.drag.is_some() {
+            return IDC_SIZENS;
         }
         if (self.reply_rect.h > 0.0 && self.reply_close_rect().contains(x, y))
             || self.stream_btn.is_some_and(|r| r.contains(x, y))

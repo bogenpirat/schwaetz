@@ -703,3 +703,57 @@ fn twitch_stream_link_follows_the_popout_setting() {
     irc.lines(&[":me!u@h JOIN #chan"]);
     assert_eq!(irc.app.twitch_stream_url(irc.buffer("#chan")), None);
 }
+
+fn channel_names(h: &Harness) -> Vec<String> {
+    h.app
+        .sidebar_order()
+        .into_iter()
+        .filter_map(|id| h.app.buffer(id))
+        .filter(|b| b.kind == BufferKind::Channel)
+        .map(|b| b.name.clone())
+        .collect()
+}
+
+#[test]
+fn channels_can_be_arranged_and_twitch_can_list_live_first() {
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.connect();
+    h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>"]);
+    for c in ["#delta", "#alpha", "#charlie", "#bravo"] {
+        h.lines(&[&format!(":me!me@me.tmi.twitch.tv JOIN {c}")]);
+    }
+    assert_eq!(channel_names(&h), ["#alpha", "#bravo", "#charlie", "#delta"], "alphabetical until arranged");
+
+    // Drag #delta above #bravo, then #alpha to the end.
+    h.app.move_channel(h.buffer("#delta"), Some(h.buffer("#bravo")));
+    assert_eq!(channel_names(&h), ["#alpha", "#delta", "#bravo", "#charlie"]);
+    h.app.move_channel(h.buffer("#alpha"), None);
+    assert_eq!(channel_names(&h), ["#delta", "#bravo", "#charlie", "#alpha"]);
+    assert_eq!(h.app.config.networks[0].channel_order, ["#delta", "#bravo", "#charlie", "#alpha"], "saved");
+    assert!(h.app.take_effects().iter().any(|e| matches!(e, Effect::SaveConfig)));
+
+    // Channels joined later go after the arranged ones.
+    h.lines(&[":me!me@me.tmi.twitch.tv JOIN #echo"]);
+    assert_eq!(channel_names(&h), ["#delta", "#bravo", "#charlie", "#alpha", "#echo"]);
+
+    // Live first: live channels, then offline ones, each in the arranged order.
+    h.app.networks.get_mut(&h.net).unwrap().cfg.twitch_live_first = true;
+    let live = |h: &Harness, logins: &[&str]| schwaetz_core::helix::LiveResult {
+        network: h.net,
+        client_id: None,
+        ids: Default::default(),
+        result: Ok(logins
+            .iter()
+            .map(|l| {
+                let info = schwaetz_core::helix::StreamInfo { live: true, ..Default::default() };
+                (l.to_string(), info)
+            })
+            .collect()),
+        unauthorized: false,
+    };
+    h.app.on_live_result(live(&h, &["alpha", "charlie"]));
+    assert_eq!(channel_names(&h), ["#charlie", "#alpha", "#delta", "#bravo", "#echo"]);
+    // Arranging still works within the groups.
+    h.app.move_channel(h.buffer("#alpha"), Some(h.buffer("#charlie")));
+    assert_eq!(channel_names(&h), ["#alpha", "#charlie", "#delta", "#bravo", "#echo"]);
+}

@@ -291,6 +291,13 @@ pub struct NetworkConfig {
     pub twitch_colors: bool,
     /// Twitch: "Open stream" opens the popout player instead of the channel page.
     pub twitch_popout: bool,
+    /// Twitch: list live channels before offline ones in the sidebar (each group keeping
+    /// `channel_order`).
+    pub twitch_live_first: bool,
+    /// Sidebar order of the channels, as arranged by dragging (empty: alphabetical). Channels not
+    /// listed come after, alphabetically.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub channel_order: Vec<String>,
 }
 
 impl Default for NetworkConfig {
@@ -325,6 +332,8 @@ impl Default for NetworkConfig {
             live_check_secs: 120,
             twitch_colors: true,
             twitch_popout: false,
+            twitch_live_first: false,
+            channel_order: Vec::new(),
         }
     }
 }

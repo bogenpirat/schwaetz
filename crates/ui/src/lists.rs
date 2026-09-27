@@ -42,6 +42,20 @@ struct Row {
     id: BufferId,
     y: f32,
     h: f32,
+    /// Network of the row and whether it is a channel (only channels can be rearranged, and
+    /// only within their network).
+    net: Option<u32>,
+    channel: bool,
+}
+
+/// A channel row being dragged to a new position.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RowDrag {
+    pub id: BufferId,
+    /// Where it would land: before this channel (`None` = at the end), and the y of the line
+    /// showing it.
+    pub before: Option<BufferId>,
+    pub line_y: f32,
 }
 
 #[derive(Default)]
@@ -52,6 +66,8 @@ pub struct Sidebar {
     pub hover: Option<BufferId>,
     content_h: f32,
     buttons: Vec<(SidebarButton, Rect)>,
+    /// Channel being dragged (set by the shell while the mouse moves).
+    pub drag: Option<RowDrag>,
     /// Settings buttons at the right end of network rows: (server buffer, bounds).
     net_buttons: Vec<(BufferId, Rect)>,
 }
@@ -155,10 +171,21 @@ impl Sidebar {
                     p.circle(r.x + 25.0, r.y + r.h / 2.0 + 5.0, 2.5, th.online);
                 }
             }
-            self.rows.push(Row { id, y: row_y, h: row_h });
+            if self.drag.is_some_and(|d| d.id == id) {
+                // The dragged row stays in place, faded, until dropped.
+                p.fill(Rect::new(x, row_y, w, row_h), with_alpha(th.backdrop_opaque, 0.6));
+            }
+            let (net, channel) = (b.network.map(|n| n.0), b.kind == BufferKind::Channel);
+            self.rows.push(Row { id, y: row_y, h: row_h, net, channel });
             y += h;
         }
         self.content_h = y + self.scroll - list.y;
+        if let Some(d) = self.drag {
+            // Where the dragged channel would land.
+            let lx = x + 8.0 + INDENT;
+            p.fill_round(Rect::new(lx, d.line_y - 1.0, w - 16.0 - INDENT, 2.0), 1.0, th.accent);
+            p.circle(lx, d.line_y, 3.0, th.accent);
+        }
         p.unclip();
         self.render_footer(p, text, th, app, anims);
     }
@@ -207,6 +234,20 @@ impl Sidebar {
             return None;
         }
         self.rows.iter().find(|r| y >= r.y && y < r.y + r.h).map(|r| r.id)
+    }
+
+    /// Where a dragged channel would be dropped for pointer height `y`: before which channel of
+    /// its network (`None` = after the last), and the y of the insertion line.
+    pub fn drop_target(&self, dragged: BufferId, y: f32) -> Option<(Option<BufferId>, f32)> {
+        let d = self.rows.iter().find(|r| r.id == dragged && r.channel)?;
+        let group: Vec<&Row> = self.rows.iter().filter(|r| r.channel && r.net == d.net).collect();
+        for r in &group {
+            if y < r.y + r.h / 2.0 {
+                return Some((Some(r.id), r.y));
+            }
+        }
+        let last = group.last()?;
+        Some((None, last.y + last.h))
     }
 
     /// The settings button of a network row under the pointer: (server buffer, bounds).

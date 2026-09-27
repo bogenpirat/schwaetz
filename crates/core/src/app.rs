@@ -261,7 +261,11 @@ impl App {
             let cm = net.session.casemapping();
             let mut chans: Vec<&Buffer> =
                 self.buffers.iter().filter(|b| b.network == Some(net.id) && b.kind == BufferKind::Channel).collect();
-            chans.sort_by_key(|b| cm.fold(&b.name).into_owned());
+            let live_first = net.is_twitch() && net.cfg.twitch_live_first;
+            chans.sort_by_key(|b| {
+                let live = live_first && b.stream.as_ref().is_some_and(|s| s.live);
+                (!live, channel_rank(&net.cfg.channel_order, cm, &b.name), cm.fold(&b.name).into_owned())
+            });
             out.extend(chans.iter().map(|b| b.id));
             let mut queries: Vec<&Buffer> = self
                 .buffers
@@ -2634,6 +2638,46 @@ impl App {
                     format!("Could not refresh the Twitch sign-in ({e}); retrying in 5 minutes."),
                 ),
             }
+        }
+        self.dirty.sidebar = true;
+    }
+}
+
+/// Position of a channel in a network's arranged order (`usize::MAX` if not arranged).
+fn channel_rank(order: &[String], cm: schwaetz_proto::CaseMapping, name: &str) -> usize {
+    order.iter().position(|c| cm.eq(c, name)).unwrap_or(usize::MAX)
+}
+
+impl App {
+    /// Moves a channel in the sidebar to just before `before` (another channel of the same
+    /// network), or to the end with `None`, and stores the resulting order in the config.
+    pub fn move_channel(&mut self, id: BufferId, before: Option<BufferId>) {
+        if before == Some(id) {
+            return;
+        }
+        let Some(b) = self.buffer(id).filter(|b| b.kind == BufferKind::Channel) else { return };
+        let Some(net_id) = b.network else { return };
+        let moving = b.name.clone();
+        let target = before.and_then(|t| self.buffer(t)).filter(|t| t.network == Some(net_id)).map(|t| t.name.clone());
+        let Some(n) = self.networks.get(&net_id) else { return };
+        let cm = n.session.casemapping();
+        // The arranged order of all this network's channels, without the live-first grouping.
+        let mut names: Vec<String> = self
+            .buffers
+            .iter()
+            .filter(|b| b.network == Some(net_id) && b.kind == BufferKind::Channel)
+            .map(|b| b.name.clone())
+            .collect();
+        names.sort_by_key(|c| (channel_rank(&n.cfg.channel_order, cm, c), cm.fold(c).into_owned()));
+        names.retain(|c| !cm.eq(c, &moving));
+        let at = target.and_then(|t| names.iter().position(|c| cm.eq(c, &t))).unwrap_or(names.len());
+        names.insert(at, moving);
+        let n = self.networks.get_mut(&net_id).unwrap();
+        n.cfg.channel_order = names.clone();
+        let name = n.cfg.name.clone();
+        if let Some(c) = self.config.networks.iter_mut().find(|c| c.name == name) {
+            c.channel_order = names;
+            self.effects.push(Effect::SaveConfig);
         }
         self.dirty.sidebar = true;
     }
