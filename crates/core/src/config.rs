@@ -263,6 +263,9 @@ pub struct NetworkConfig {
     /// Twitch: Client-ID for badge images / OAuth device flow (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub twitch_client_id: Option<String>,
+    /// Twitch: how often (seconds) joined channels are checked for being live when a Helix API
+    /// token is stored.
+    pub live_check_secs: u32,
 }
 
 impl Default for NetworkConfig {
@@ -294,6 +297,7 @@ impl Default for NetworkConfig {
             flood_burst: 5,
             flood_interval_ms: 2000,
             twitch_client_id: None,
+            live_check_secs: 120,
         }
     }
 }

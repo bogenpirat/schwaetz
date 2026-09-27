@@ -6,6 +6,8 @@ pub enum SecretKind {
     Sasl,
     ServerPassword,
     TwitchToken,
+    /// Twitch Helix API OAuth token (live checks).
+    TwitchApi,
 }
 
 impl SecretKind {
@@ -14,6 +16,7 @@ impl SecretKind {
             SecretKind::Sasl => "sasl",
             SecretKind::ServerPassword => "pass",
             SecretKind::TwitchToken => "twitch",
+            SecretKind::TwitchApi => "twitch-api",
         }
     }
 }

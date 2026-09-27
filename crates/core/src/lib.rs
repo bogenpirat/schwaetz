@@ -9,6 +9,7 @@ pub mod commands;
 pub mod completion;
 pub mod config;
 pub mod filter;
+pub mod helix;
 pub mod paths;
 pub mod secrets;
 pub mod services;

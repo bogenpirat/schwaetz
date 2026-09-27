@@ -67,7 +67,7 @@ cmds! {
     "reconnect", "/reconnect", "Reconnect to the current network now.";
     "reload", "/reload", "Reload scripts.";
     "say", "/say <text>", "Send text as a message (even if it starts with /).";
-    "secret", "/secret <network> <sasl|pass|twitch> <value>", "Store a password or token in Windows Credential Manager (never in config.toml).";
+    "secret", "/secret <network> <sasl|pass|twitch|twitch-api> <value>", "Store a password or token in Windows Credential Manager (never in config.toml).";
     "search", "/search [-n] <text>", "Search the message history (all networks, or -n for the current one).";
     "server", "/server <host[:[+]port]>", "Connect to a server.";
     "set", "/set [key [value]]", "Show or change a setting, e.g. /set appearance.font_size 14.";
@@ -837,8 +837,11 @@ impl App {
                 use crate::secrets::{SecretKind, set};
                 // `/secret <network name, may contain spaces> <kind> <value>`.
                 let words: Vec<&str> = args.split(' ').collect();
-                let Some(ki) =
-                    words.iter().skip(1).position(|w| matches!(*w, "sasl" | "pass" | "twitch")).map(|i| i + 1)
+                let Some(ki) = words
+                    .iter()
+                    .skip(1)
+                    .position(|w| matches!(*w, "sasl" | "pass" | "twitch" | "twitch-api"))
+                    .map(|i| i + 1)
                 else {
                     return self.usage(buffer, "secret");
                 };
@@ -850,12 +853,19 @@ impl App {
                     "sasl" => SecretKind::Sasl,
                     "pass" => SecretKind::ServerPassword,
                     "twitch" => SecretKind::TwitchToken,
+                    "twitch-api" => SecretKind::TwitchApi,
                     _ => return self.usage(buffer, "secret"),
                 };
                 if net.is_empty() || value.is_empty() {
                     return self.usage(buffer, "secret");
                 }
                 let text = if set(net, kind, value) {
+                    if kind == SecretKind::TwitchApi
+                        && let Some(id) = self.network_by_name(net)
+                    {
+                        // Live checks start (or resume) right away.
+                        self.live_on_config(id);
+                    }
                     format!("Stored {kind:?} secret for {net} in Windows Credential Manager (used on next connect).")
                 } else {
                     "Could not store the secret.".to_owned()

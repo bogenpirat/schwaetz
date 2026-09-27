@@ -436,3 +436,108 @@ fn twitch_hides_hostmasks_and_has_no_queries() {
     assert!(h.app.buffer(c).unwrap().lines.iter().any(|l| &*l.text == "bob (b@example.org) has joined"));
     assert_eq!(h.app.twitch_profile_url(c, "bob"), None);
 }
+
+fn live_requests(app: &mut App) -> Vec<Vec<String>> {
+    app.take_effects()
+        .into_iter()
+        .filter_map(|e| match e {
+            Effect::TwitchLive(r) => Some(r.logins),
+            _ => None,
+        })
+        .collect()
+}
+
+fn live_result(h: &Harness, statuses: &[(&str, bool, &str)]) -> schwaetz_core::helix::LiveResult {
+    schwaetz_core::helix::LiveResult {
+        network: h.net,
+        client_id: Some("cid".into()),
+        ids: Default::default(),
+        result: Ok(statuses
+            .iter()
+            .map(|(login, live, title)| {
+                let info = schwaetz_core::helix::StreamInfo {
+                    live: *live,
+                    title: title.to_string(),
+                    game: "Just Chatting".into(),
+                    viewers: if *live { 1234 } else { 0 },
+                    ..Default::default()
+                };
+                (login.to_string(), info)
+            })
+            .collect()),
+    }
+}
+
+#[test]
+fn twitch_live_checks_follow_autojoin_manual_joins_and_interval() {
+    let mut h = Harness::new(NetworkKind::Twitch, &["#alpha", "#beta"]);
+    h.app.set_twitch_api_token(h.net, Some("oauth:tok".into()));
+    h.connect();
+    h.lines(&[
+        ":tmi.twitch.tv CAP * ACK :twitch.tv/tags twitch.tv/commands",
+        ":tmi.twitch.tv 001 me :hi",
+        ":tmi.twitch.tv 376 me :>",
+    ]);
+    assert!(live_requests(&mut h.app).is_empty(), "waits for the autojoin channels");
+
+    // The first check runs once every autojoin channel is joined, for all of them.
+    h.lines(&[":me!me@me.tmi.twitch.tv JOIN #alpha"]);
+    assert!(live_requests(&mut h.app).is_empty());
+    h.lines(&[":me!me@me.tmi.twitch.tv JOIN #beta"]);
+    assert_eq!(live_requests(&mut h.app), [vec!["alpha".to_string(), "beta".to_string()]]);
+
+    // A manual join while that check runs is queued, then checked on its own.
+    h.lines(&[":me!me@me.tmi.twitch.tv JOIN #gamma"]);
+    assert!(live_requests(&mut h.app).is_empty());
+    let r = live_result(&h, &[("alpha", true, "hello chat"), ("beta", false, "old title")]);
+    h.app.on_live_result(r);
+    assert_eq!(live_requests(&mut h.app), [vec!["gamma".to_string()]]);
+
+    // Title and game show where a topic would be, and the first result is printed like one.
+    let alpha = h.buffer("#alpha");
+    assert_eq!(h.app.topic_for(alpha).1, "🔴 Live · Just Chatting — hello chat · 1,234 viewers");
+    assert_eq!(h.app.topic_for(h.buffer("#beta")).1, "Offline · Just Chatting — old title");
+    let last = |h: &Harness, b| h.app.buffer(b).unwrap().lines.back().unwrap().text.to_string();
+    assert_eq!(last(&h, alpha), "Stream: 🔴 Live · Just Chatting — hello chat · 1,234 viewers");
+
+    // A manual join when idle is checked immediately.
+    h.app.on_live_result(live_result(&h, &[("gamma", false, "")]));
+    h.lines(&[":me!me@me.tmi.twitch.tv JOIN #delta"]);
+    assert_eq!(live_requests(&mut h.app), [vec!["delta".to_string()]]);
+    h.app.on_live_result(live_result(&h, &[]));
+
+    // Periodic re-check of every joined channel after the configured interval (default 120 s).
+    h.app.tick(h.now + 60_000);
+    assert!(live_requests(&mut h.app).is_empty());
+    h.app.tick(h.now + 121_000);
+    assert_eq!(live_requests(&mut h.app).len(), 1);
+
+    // Going offline is announced; viewer-count changes alone are not.
+    h.app.on_live_result(live_result(&h, &[("alpha", false, "hello chat")]));
+    assert_eq!(last(&h, alpha), "alpha went offline");
+
+    // Errors are reported once.
+    let err = |h: &Harness| schwaetz_core::helix::LiveResult {
+        network: h.net,
+        client_id: None,
+        ids: Default::default(),
+        result: Err("the API token is invalid or expired".into()),
+    };
+    h.app.tick(h.now + 400_000);
+    h.app.on_live_result(err(&h));
+    h.app.tick(h.now + 600_000);
+    h.app.on_live_result(err(&h));
+    let sb = h.app.network(h.net).unwrap().server_buffer;
+    let n = h.app.buffer(sb).unwrap().lines.iter().filter(|l| l.text.contains("Twitch API")).count();
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn twitch_without_api_token_never_checks() {
+    let mut h = Harness::new(NetworkKind::Twitch, &["#alpha"]);
+    h.app.set_twitch_api_token(h.net, Some(String::new()));
+    h.connect();
+    h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>", ":me!me@me.tmi.twitch.tv JOIN #alpha"]);
+    h.app.tick(h.now + 1_000_000);
+    assert!(live_requests(&mut h.app).is_empty());
+}

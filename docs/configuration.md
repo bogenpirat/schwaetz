@@ -29,13 +29,21 @@ auto_connect = true
 | `reconnect`, `reconnect_max_attempts` | Automatic reconnects (exponential backoff) |
 | `rejoin_on_kick`, `sasl_required`, `previews` | As named |
 | `flood_burst`, `flood_interval_ms` | Flood control: burst size, then one line per interval |
+| `live_check_secs` | Twitch: seconds between live checks (default 120, at least 30) |
 
 Secrets: `/secret <network> sasl <password>`, `/secret <network> pass <password>`,
-`/secret Twitch twitch oauth:<token>` — or the network dialog. They go to the Windows Credential
+`/secret Twitch twitch oauth:<token>`, `/secret Twitch twitch-api <token>` — or the network dialog. They go to the Windows Credential
 Manager (`schwaetz:<network>:…`).
 
 **Twitch:** use `kind = "twitch"`, server `irc.chat.twitch.tv:+6697`. With a token you can chat;
 with a nick like `justinfan12345` and no token you can read anonymously.
+
+**Twitch live status:** store a Helix API OAuth token (network dialog → Twitch, or
+`/secret <network> twitch-api <token>`; any user token works, no scopes needed). Joined channels
+are then checked for being live: after connecting once all autojoin channels are joined, right
+away for channels you join later, and every `live_check_secs` after that. The stream title and
+game show in the topic bar (`🔴 Live · Game — Title · 1,234 viewers` or `Offline · Game — Title`),
+and going live, going offline and title or game changes are printed in the channel.
 
 **ZNC:** `/znc <command>` talks to `*status`; `/znc import` offers to add your other ZNC networks.
 

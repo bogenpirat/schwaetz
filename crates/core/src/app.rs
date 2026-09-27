@@ -58,6 +58,8 @@ pub enum Effect {
     SaveConfig,
     ConfigChanged,
     OpenUrl(String),
+    /// Run a Twitch live check on a worker thread and pass the result to `App::on_live_result`.
+    TwitchLive(crate::helix::LiveRequest),
     ReloadScripts,
     /// Open the settings dialog.
     OpenSettings,
@@ -102,6 +104,24 @@ pub struct Network {
     /// Newest message time seen on this network, for ZNC playback.
     pub last_seen: i64,
     pub user_quit: bool,
+    pub(crate) live: LiveCheck,
+}
+
+/// Twitch live-check scheduling for one network.
+#[derive(Default)]
+pub(crate) struct LiveCheck {
+    /// After connecting: autojoin channels not joined yet, and when to stop waiting for them.
+    waiting: Option<(Vec<String>, i64)>,
+    /// Next periodic check (Unix ms; 0 = none scheduled).
+    next_at: i64,
+    in_flight: bool,
+    /// Channels to check once the running check returns.
+    queued: Vec<String>,
+    client_id: Option<String>,
+    ids: std::collections::HashMap<String, String>,
+    last_error: Option<String>,
+    /// Token set by tests instead of the Credential Manager.
+    pub(crate) token_override: Option<String>,
 }
 
 impl Network {
@@ -547,6 +567,7 @@ impl App {
                 twitch_self: None,
                 last_seen: 0,
                 user_quit: false,
+                live: LiveCheck::default(),
             },
         );
         self.dirty.sidebar = true;
@@ -823,6 +844,9 @@ impl App {
                         self.status(bid, LineKind::Error, text.clone());
                     }
                 }
+                if let Some(net) = self.networks.get_mut(&id) {
+                    net.live.stop();
+                }
                 self.status(sb, LineKind::Error, text);
                 self.dirty = Dirty { sidebar: true, lines: true, nicklist: true, topic: true, input: false };
             }
@@ -845,6 +869,7 @@ impl App {
                 n.session.tick(now);
             }
             self.flush(id);
+            self.live_tick(id);
         }
         // Expire typing indicators.
         let active = self.active;
@@ -1339,6 +1364,7 @@ impl App {
             self.input_line(sb, &cmd);
         }
         self.flush(net_id);
+        self.live_on_ready(net_id);
     }
 
     fn server_text(&mut self, net_id: NetworkId, msg: &Message, time: i64, label_buffer: Option<BufferId>) {
@@ -1709,6 +1735,9 @@ impl App {
         };
         self.membership_line(net_id, bid, LineKind::Join, user, text, time, own, history);
         self.dirty.nicklist = true;
+        if own && !history {
+            self.live_on_join(net_id, channel);
+        }
     }
 
     /// Adds a join/part/quit/nick line applying the smart filter.
@@ -1972,6 +2001,10 @@ impl App {
             BufferKind::Channel => {
                 let ch = net.session.channel(&b.name);
                 let mut sub = ch.and_then(|c| c.topic.clone()).unwrap_or_default();
+                if let Some(s) = &b.stream {
+                    // Twitch channels have no topic; the stream title and game take its place.
+                    sub = s.summary();
+                }
                 let chips = twitch::room_state_summary(&b.room_state);
                 if !chips.is_empty() {
                     sub = format!("[{}] {sub}", chips.join(", "));
@@ -2157,6 +2190,7 @@ impl App {
                     b.name = cfg.name.clone();
                 }
                 self.dirty.sidebar = true;
+                self.live_on_config(id);
                 id
             }
             None => {
@@ -2185,4 +2219,201 @@ fn worth_logging(l: &Line) -> bool {
         | LineKind::Netsplit => true,
         LineKind::Status | LineKind::Error | LineKind::Server | LineKind::Motd | LineKind::Ctcp => false,
     }
+}
+
+// ----- Twitch live checks ------------------------------------------------------------------------
+
+impl LiveCheck {
+    /// Connection lost: nothing is scheduled until the next registration.
+    fn stop(&mut self) {
+        self.waiting = None;
+        self.next_at = 0;
+        self.queued.clear();
+    }
+}
+
+impl App {
+    /// The network's Helix API token, if it is a Twitch network and one is stored.
+    fn api_token(&self, net: NetworkId) -> Option<String> {
+        let n = self.networks.get(&net).filter(|n| n.is_twitch())?;
+        n.live
+            .token_override
+            .clone()
+            .or_else(|| secrets::get(&n.cfg.name, SecretKind::TwitchApi))
+            .filter(|t| !crate::helix::normalize_token(t).is_empty())
+    }
+
+    /// Uses `token` instead of the Credential Manager (tests, automation).
+    #[doc(hidden)]
+    pub fn set_twitch_api_token(&mut self, net: NetworkId, token: Option<String>) {
+        if let Some(n) = self.networks.get_mut(&net) {
+            n.live.token_override = token;
+        }
+    }
+
+    /// Registered: check every channel once the autojoin channels are in (or right away if
+    /// there are none), then periodically.
+    fn live_on_ready(&mut self, net: NetworkId) {
+        if self.api_token(net).is_none() {
+            return;
+        }
+        let now = self.now;
+        let n = self.networks.get_mut(&net).unwrap();
+        n.live.stop();
+        let pending: Vec<String> =
+            n.session.config().autojoin.iter().map(|(c, _)| channel_login(c)).filter(|c| !c.is_empty()).collect();
+        if pending.is_empty() {
+            self.check_live(net, None);
+        } else {
+            // Twitch confirms joins quickly; don't wait forever for one that never comes.
+            n.live.waiting = Some((pending, now + 20_000));
+        }
+    }
+
+    /// We joined a Twitch channel: part of the autojoin batch, or a manual join (checked now).
+    fn live_on_join(&mut self, net: NetworkId, channel: &str) {
+        if self.api_token(net).is_none() {
+            return;
+        }
+        let login = channel_login(channel);
+        let n = self.networks.get_mut(&net).unwrap();
+        match n.live.waiting.as_mut() {
+            Some((pending, _)) if pending.contains(&login) => {
+                pending.retain(|c| *c != login);
+                if pending.is_empty() {
+                    n.live.waiting = None;
+                    self.check_live(net, None);
+                }
+            }
+            _ => self.check_live(net, Some(vec![login])),
+        }
+    }
+
+    fn live_tick(&mut self, net: NetworkId) {
+        let now = self.now;
+        let Some(n) = self.networks.get_mut(&net) else { return };
+        if n.conn != ConnState::Ready || !n.is_twitch() {
+            return;
+        }
+        if let Some((_, deadline)) = &n.live.waiting {
+            if now >= *deadline {
+                n.live.waiting = None;
+                self.check_live(net, None);
+            }
+        } else if n.live.next_at != 0 && now >= n.live.next_at {
+            self.check_live(net, None);
+        }
+    }
+
+    /// Settings or the token changed: forget what belonged to the old token and check now.
+    pub(crate) fn live_on_config(&mut self, net: NetworkId) {
+        let Some(n) = self.networks.get_mut(&net).filter(|n| n.is_twitch()) else { return };
+        n.live.client_id = None;
+        n.live.last_error = None;
+        if n.conn == ConnState::Ready && n.live.waiting.is_none() {
+            self.check_live(net, None);
+        }
+    }
+
+    /// Checks `only` these channels, or every joined channel (which also schedules the next
+    /// periodic check).
+    fn check_live(&mut self, net: NetworkId, only: Option<Vec<String>>) {
+        let Some(token) = self.api_token(net) else {
+            if let Some(n) = self.networks.get_mut(&net) {
+                n.live.next_at = 0;
+            }
+            return;
+        };
+        let now = self.now;
+        let full = only.is_none();
+        let logins = only.unwrap_or_else(|| {
+            self.buffers
+                .iter()
+                .filter(|b| b.network == Some(net) && b.kind == BufferKind::Channel && b.joined)
+                .map(|b| channel_login(&b.name))
+                .collect()
+        });
+        let Some(n) = self.networks.get_mut(&net) else { return };
+        if full {
+            n.live.next_at = now + i64::from(n.cfg.live_check_secs.max(30)) * 1000;
+        }
+        if logins.is_empty() {
+            return;
+        }
+        if n.live.in_flight {
+            for l in logins {
+                if !n.live.queued.contains(&l) {
+                    n.live.queued.push(l);
+                }
+            }
+            return;
+        }
+        n.live.in_flight = true;
+        let req = crate::helix::LiveRequest {
+            network: net,
+            token,
+            client_id: n.live.client_id.clone(),
+            ids: n.live.ids.clone(),
+            logins,
+        };
+        self.effects.push(Effect::TwitchLive(req));
+    }
+
+    /// A live check finished (see [`Effect::TwitchLive`]).
+    pub fn on_live_result(&mut self, r: crate::helix::LiveResult) {
+        let Some(n) = self.networks.get_mut(&r.network) else { return };
+        n.live.in_flight = false;
+        n.live.client_id = r.client_id;
+        n.live.ids = r.ids;
+        let sb = n.server_buffer;
+        let queued = std::mem::take(&mut n.live.queued);
+        match r.result {
+            Err(e) => {
+                // Report each problem once, not on every interval.
+                if n.live.last_error.as_deref() != Some(e.as_str()) {
+                    n.live.last_error = Some(e.clone());
+                    self.status(sb, LineKind::Error, format!("Twitch API: {e}"));
+                }
+            }
+            Ok(list) => {
+                n.live.last_error = None;
+                for (login, info) in list {
+                    self.apply_stream(r.network, &login, info);
+                }
+            }
+        }
+        if !queued.is_empty() {
+            self.check_live(r.network, Some(queued));
+        }
+    }
+
+    fn apply_stream(&mut self, net: NetworkId, login: &str, info: crate::helix::StreamInfo) {
+        let Some(bid) = self.find_buffer(net, &format!("#{login}")) else { return };
+        let Some(b) = self.buffer_mut(bid) else { return };
+        let old = b.stream.replace(info.clone());
+        let what = info.what();
+        let text = match &old {
+            None => Some(format!("Stream: {}", info.summary())),
+            Some(o) if o.live != info.live && info.live => Some(if what.is_empty() {
+                format!("{login} is now live")
+            } else {
+                format!("{login} is now live: {what}")
+            }),
+            Some(o) if o.live != info.live => Some(format!("{login} went offline")),
+            Some(o) if info.differs_from(o) => Some(format!("Stream changed to: {what}")),
+            _ => None,
+        };
+        if let Some(t) = text {
+            self.print(bid, LineKind::Topic, "", &t);
+        }
+        if bid == self.active {
+            self.dirty.topic = true;
+        }
+        self.dirty.sidebar = true;
+    }
+}
+
+/// `#Name` → `name` (Twitch logins are lowercase).
+fn channel_login(channel: &str) -> String {
+    channel.trim_start_matches('#').to_ascii_lowercase()
 }

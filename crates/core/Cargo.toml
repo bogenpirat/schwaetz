@@ -12,6 +12,7 @@ schwaetz-client.workspace = true
 schwaetz-net.workspace = true
 serde.workspace = true
 toml.workspace = true
+serde_json.workspace = true
 regex-lite.workspace = true
 tracing.workspace = true
 

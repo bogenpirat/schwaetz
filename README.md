@@ -13,7 +13,8 @@ A fast, native IRC client for Windows, written in Rust.
 - **Bouncers.** ZNC (`*playback`, self-message, importing your other ZNC networks) and soju
   (`bouncer-networks`, chathistory, read markers).
 - **Twitch.** Badges, user colors, inline emotes, sub/raid notices, timeouts and deletions,
-  room modes. Works anonymously (read-only) or with an OAuth token.
+  room modes, live status with stream title and game (with a Helix API token). Works
+  anonymously (read-only) or with an OAuth token.
 - **Comforts.** Quick switcher, tab completion, highlights, ignores, aliases, notifications, tray
   icon, searchable history with scroll-back, logs, link previews (opt-in), session restore, raw
   protocol log, channel list, network and settings dialogs.
@@ -30,7 +31,7 @@ Useful keys: **Ctrl+J** quick switcher · **Alt+1…9** buffers · **Alt+A** nex
 **Shift+Enter** new line. `/help` lists all commands.
 
 Passwords and tokens are stored in the Windows Credential Manager, never in the config file
-(`/secret <network> sasl|pass|twitch <value>` or the network dialog).
+(`/secret <network> sasl|pass|twitch|twitch-api <value>` or the network dialog).
 
 Configuration, themes and scripts live in `%APPDATA%\schwaetz`, history and caches in
 `%LOCALAPPDATA%\schwaetz`. Put an empty `portable.txt` next to the exe to keep everything in a

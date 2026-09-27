@@ -1,4 +1,4 @@
-//! Minimal blocking HTTPS client for link previews, emote images and scripts.
+//! Minimal blocking HTTPS client for link previews, emote images, scripts and the Twitch API.
 //!
 //! Uses the same rustls/ring stack and Windows certificate store as IRC connections. Call from
 //! worker threads only.
@@ -36,11 +36,20 @@ fn agent() -> ureq::Agent {
 
 /// GETs an `https://` (or `http://` if `allow_http`) URL, reading at most `max_bytes`.
 pub fn get(url: &str, max_bytes: u64, allow_http: bool) -> Result<Response, String> {
+    get_with(url, &[], max_bytes, allow_http)
+}
+
+/// Like [`get`], with extra request headers (API tokens and the like).
+pub fn get_with(url: &str, headers: &[(&str, &str)], max_bytes: u64, allow_http: bool) -> Result<Response, String> {
     let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("https://") || allow_http && lower.starts_with("http://")) {
         return Err("only https URLs are fetched".into());
     }
-    let resp = agent().get(url).header("Accept-Encoding", "gzip").call().map_err(|e| e.to_string())?;
+    let mut req = agent().get(url).header("Accept-Encoding", "gzip");
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = req.call().map_err(|e| e.to_string())?;
     let status = resp.status().as_u16();
     let content_type =
         resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();

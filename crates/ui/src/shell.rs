@@ -31,6 +31,8 @@ use windows::core::{HSTRING, Interface, PCWSTR, w};
 
 pub const WM_APP_NET: u32 = WM_APP + 1;
 pub const WM_APP_MEDIA: u32 = WM_APP + 3;
+/// A Twitch live check finished on its worker thread.
+pub const WM_APP_LIVE: u32 = WM_APP + 4;
 /// `dwData` tag for WM_COPYDATA messages carrying input for the running instance.
 pub const COPYDATA_MAGIC: usize = 0x5357_4158;
 const TIMER_TICK: usize = 1;
@@ -90,6 +92,11 @@ pub struct Ui {
     media: schwaetz_media::Media,
     images: std::rc::Rc<std::cell::RefCell<crate::images::ImageStore>>,
     preview_pending: std::collections::HashSet<String>,
+    /// Finished Twitch live checks (workers post `WM_APP_LIVE`).
+    live_results: (
+        std::sync::mpsc::Sender<schwaetz_core::helix::LiveResult>,
+        std::sync::mpsc::Receiver<schwaetz_core::helix::LiveResult>,
+    ),
     active_window: bool,
     /// Buffer to reselect once it exists again after startup (network, buffer).
     restore_active: Option<(String, String)>,
@@ -226,6 +233,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         media,
         images: Default::default(),
         preview_pending: Default::default(),
+        live_results: std::sync::mpsc::channel(),
         active_window: true,
         restore_active: None,
         form: None,
@@ -830,6 +838,16 @@ impl Ui {
             }
             Effect::ConfigChanged => self.apply_appearance(),
             Effect::OpenUrl(u) => win::open_url(&u),
+            Effect::TwitchLive(req) => {
+                let tx = self.live_results.0.clone();
+                let hwnd = self.hwnd.0 as isize;
+                let _ = std::thread::Builder::new().name("twitch-live".into()).spawn(move || {
+                    let _ = tx.send(schwaetz_core::helix::check(req));
+                    unsafe {
+                        let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_LIVE, WPARAM(0), LPARAM(0));
+                    }
+                });
+            }
             Effect::ReloadScripts => {
                 if let Some(h) = self.services.scripts.as_mut() {
                     h.reload(&mut self.app);
@@ -1141,7 +1159,12 @@ impl Ui {
                             use schwaetz_core::secrets::{SecretKind, get, set};
                             if let Some(old) = original.as_deref().filter(|o| *o != cfg.name) {
                                 // Renamed: carry stored secrets over.
-                                for k in [SecretKind::Sasl, SecretKind::ServerPassword, SecretKind::TwitchToken] {
+                                for k in [
+                                    SecretKind::Sasl,
+                                    SecretKind::ServerPassword,
+                                    SecretKind::TwitchToken,
+                                    SecretKind::TwitchApi,
+                                ] {
                                     if let Some(v) = get(old, k) {
                                         set(&cfg.name, k, &v);
                                     }
@@ -2177,6 +2200,14 @@ impl Ui {
             WM_ERASEBKGND => Some(LRESULT(1)),
             WM_APP_MEDIA => {
                 self.process_media();
+                Some(LRESULT(0))
+            }
+            WM_APP_LIVE => {
+                while let Ok(r) = self.live_results.1.try_recv() {
+                    self.app.on_live_result(r);
+                }
+                self.after_update();
+                self.invalidate();
                 Some(LRESULT(0))
             }
             WM_APP_NET => {

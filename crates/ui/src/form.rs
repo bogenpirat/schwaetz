@@ -236,6 +236,9 @@ impl Form {
             text("perform", "Commands on connect", "separate with ;  e.g. /mode $nick +x", &c.perform.join(" ; ")),
             check("rejoin_on_kick", "Rejoin when kicked", c.rejoin_on_kick),
             check("previews", "Link previews on this network", c.previews),
+            header("Twitch"),
+            password("twitch_api", "API token (live status)", has(SecretKind::TwitchApi)),
+            text("live_check_secs", "Live check every (seconds)", "at least 30", &c.live_check_secs.to_string()),
         ];
         let title = match cfg {
             Some(c) => format!("Edit network — {}", c.name),
@@ -370,6 +373,20 @@ impl Form {
             let k = if kind == NetworkKind::Twitch { SecretKind::TwitchToken } else { SecretKind::ServerPassword };
             secrets.push((k, server_pw.clone()));
         }
+        let api = self.text("twitch_api");
+        if !api.is_empty() {
+            secrets.push((SecretKind::TwitchApi, api));
+        }
+        let live_check_secs = match self.text("live_check_secs") {
+            s if s.is_empty() => 120,
+            s => match s.parse::<u32>() {
+                Ok(n) if n >= 30 => n,
+                _ => {
+                    return Err(self
+                        .fail("live_check_secs", "The live check interval must be a number of seconds, at least 30."));
+                }
+            },
+        };
         let sasl_pw = self.text("sasl_password");
         if !sasl_pw.is_empty() {
             secrets.push((SecretKind::Sasl, sasl_pw));
@@ -405,6 +422,7 @@ impl Form {
             perform: self.list("perform", ';'),
             rejoin_on_kick: self.check("rejoin_on_kick"),
             previews: self.check("previews"),
+            live_check_secs,
             ..base
         };
         Ok((cfg, secrets))
