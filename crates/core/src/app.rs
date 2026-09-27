@@ -74,6 +74,15 @@ pub enum Effect {
     Quit,
 }
 
+/// The topic bar of a buffer, split so the UI can shorten only `body`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TopicParts {
+    pub title: String,
+    pub lead: String,
+    pub body: String,
+    pub tail: String,
+}
+
 /// What the UI has to refresh after a batch of updates.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Dirty {
@@ -2029,6 +2038,21 @@ impl App {
     }
 
     /// Topic-bar text for the active buffer: (title, subtitle).
+    /// The topic bar split for display: `lead` and `tail` must stay visible, `body` (a topic or a
+    /// stream title) is what gets shortened when the line is too long.
+    pub fn topic_parts(&self, id: BufferId) -> TopicParts {
+        let (title, sub) = self.topic_for(id);
+        if let Some(b) = self.buffer(id).filter(|b| b.kind == BufferKind::Channel)
+            && let Some(s) = &b.stream
+        {
+            let chips = twitch::room_state_summary(&b.room_state);
+            let chips = if chips.is_empty() { String::new() } else { format!("[{}] ", chips.join(", ")) };
+            let (lead, body, tail) = s.parts();
+            return TopicParts { title, lead: chips + &lead, body, tail };
+        }
+        TopicParts { title, lead: String::new(), body: sub, tail: String::new() }
+    }
+
     pub fn topic_for(&self, id: BufferId) -> (String, String) {
         let Some(b) = self.buffer(id) else { return Default::default() };
         let Some(net) = b.network.and_then(|n| self.networks.get(&n)) else {

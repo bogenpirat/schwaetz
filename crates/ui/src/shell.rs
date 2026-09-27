@@ -586,7 +586,8 @@ impl Ui {
         let tr = self.topic_rect;
         p.fill(tr, th.topic_bg);
         p.line(tr.x, tr.bottom() - 0.5, tr.right(), tr.bottom() - 0.5, th.border, 1.0);
-        let (title, sub) = self.app.topic_for(self.app.active);
+        let parts = self.app.topic_parts(self.app.active);
+        let title = parts.title.clone();
         let f = &self.text.fonts;
         // Twitch channels: "Open stream" at the right end (with a red dot while live).
         self.stream_btn = None;
@@ -614,9 +615,7 @@ impl Ui {
         }
         let tl = self.text.layout(&title, &f.title, text_w, 30.0);
         p.text(&tl, tr.x + 18.0, tr.y + 9.0, th.text);
-        let sub = schwaetz_proto::format::strip(&sub).replace(['\n', '\r'], " ");
-        let sl = self.text.layout(&sub, &f.ui, text_w, 20.0);
-        p.text(&sl, tr.x + 18.0, tr.y + 32.0, th.text_dim);
+        self.draw_topic_line(&p, &th, &parts, tr.x + 18.0, tr.y + 32.0, text_w);
 
         // Chat.
         let id = self.app.active;
@@ -1091,6 +1090,54 @@ impl Ui {
         self.app.input(id, command);
         self.after_update();
         self.invalidate();
+    }
+
+    /// The topic bar's second line: `lead` and `tail` (room modes, live status, game, viewers) always
+    /// show; only `body` (topic or stream title) is shortened with an ellipsis to fit `width`.
+    fn draw_topic_line(&self, p: &Painter, th: &Theme, parts: &schwaetz_core::TopicParts, x: f32, y: f32, width: f32) {
+        let f = &self.text.fonts;
+        let clean = |s: &str| schwaetz_proto::format::strip(s).replace(['\n', '\r'], " ");
+        let (mut lead, body, tail) = (clean(&parts.lead), clean(&parts.body), clean(&parts.tail));
+        let measure = |s: &str| {
+            if s.is_empty() {
+                0.0
+            } else {
+                text::metrics(&self.text.layout(s, &f.ui, 10_000.0, 20.0)).widthIncludingTrailingWhitespace
+            }
+        };
+        let tail_w = measure(&tail);
+        // What fits of the body: all or part of it (shortened with an ellipsis), a lone
+        // ellipsis, or nothing, in which case the dash that introduced it goes too.
+        let room = width - measure(&lead) - tail_w;
+        let body_shown = if body.is_empty() {
+            None
+        } else if room >= 28.0 {
+            Some(body.as_str())
+        } else if room >= measure("…") {
+            Some("…")
+        } else {
+            if let Some(stripped) = lead.strip_suffix(" — ") {
+                lead = stripped.to_owned();
+            }
+            None
+        };
+        let mut cx = x;
+        if !lead.is_empty() {
+            // The fixed parts win; if even they do not fit, the lead is shortened too.
+            let l = self.text.layout(&lead, &f.ui, (width - tail_w).max(1.0), 20.0);
+            p.text(&l, cx, y, th.text_dim);
+            cx += text::metrics(&l).widthIncludingTrailingWhitespace.min(width - tail_w);
+        }
+        if let Some(b) = body_shown {
+            let room = width - (cx - x) - tail_w;
+            let l = self.text.layout(b, &f.ui, room.max(1.0), 20.0);
+            p.text(&l, cx, y, th.text_dim);
+            cx += text::metrics(&l).width.min(room.max(0.0));
+        }
+        if !tail.is_empty() {
+            let l = self.text.layout(&tail, &f.ui, width, 20.0);
+            p.text(&l, cx, y, th.text_dim);
+        }
     }
 
     /// Opens the settings dialog (the Scripts page lists the script host's files).
@@ -2552,6 +2599,30 @@ impl Ui {
             "submit" => {
                 self.input.set_text(arg, None);
                 self.submit();
+            }
+            "stream" => {
+                // Test data for the Twitch live display without API access:
+                // `!stream <login> live|offline <viewers> <game> | <title>`.
+                let mut words = arg.splitn(4, ' ');
+                let (Some(login), Some(state), Some(viewers)) = (words.next(), words.next(), words.next()) else {
+                    return true;
+                };
+                let (game, title) = words.next().unwrap_or("").split_once(" | ").unwrap_or(("", ""));
+                let Some(network) = self.app.network_of(self.app.active).map(|n| n.id) else { return true };
+                let info = schwaetz_core::helix::StreamInfo {
+                    live: state == "live",
+                    title: title.to_owned(),
+                    game: game.to_owned(),
+                    viewers: viewers.parse().unwrap_or(0),
+                    started_at: String::new(),
+                };
+                self.app.on_live_result(schwaetz_core::helix::LiveResult {
+                    network,
+                    client_id: None,
+                    ids: Default::default(),
+                    result: Ok(vec![(login.to_ascii_lowercase(), info)]),
+                    unauthorized: false,
+                });
             }
             _ => return false,
         }

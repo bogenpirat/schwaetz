@@ -18,7 +18,7 @@ pub mod twitch;
 pub mod twitch_auth;
 pub mod znc;
 
-pub use app::{App, ConnState, Dirty, Effect, Network};
+pub use app::{App, ConnState, Dirty, Effect, Network, TopicParts};
 pub use buffer::{Activity, Buffer, BufferId, BufferKind, Line, LineExtra, LineFlags, LineKind, NotifyLevel};
 pub use config::{Config, NetworkConfig, NetworkKind};
 pub use paths::Paths;

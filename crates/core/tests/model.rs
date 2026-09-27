@@ -784,3 +784,35 @@ fn live_chat_lines_keep_their_raw_form() {
         b.lines.iter().filter(|l| l.kind == LineKind::Join).all(|l| l.extra.as_ref().is_none_or(|e| e.raw.is_none()))
     );
 }
+
+#[test]
+fn twitch_topic_keeps_status_game_and_viewers_apart_from_the_title() {
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.connect();
+    h.lines(&[
+        ":tmi.twitch.tv 001 me :hi",
+        ":tmi.twitch.tv 376 me :>",
+        ":me!me@me.tmi.twitch.tv JOIN #xqc",
+        "@followers-only=10;room-id=1;slow=0;subs-only=0 :tmi.twitch.tv ROOMSTATE #xqc",
+    ]);
+    let info = schwaetz_core::helix::StreamInfo {
+        live: true,
+        title: "a long title".into(),
+        game: "Just Chatting".into(),
+        viewers: 45123,
+        ..Default::default()
+    };
+    h.app.on_live_result(schwaetz_core::helix::LiveResult {
+        network: h.net,
+        client_id: None,
+        ids: Default::default(),
+        result: Ok(vec![("xqc".into(), info)]),
+        unauthorized: false,
+    });
+    let t = h.app.topic_parts(h.buffer("#xqc"));
+    assert!(t.lead.starts_with('[') && t.lead.ends_with("🔴 Live · Just Chatting — "), "{t:?}");
+    assert_eq!(t.body, "a long title");
+    assert_eq!(t.tail, " · 45,123 viewers");
+    let (_, joined) = h.app.topic_for(h.buffer("#xqc"));
+    assert_eq!(joined, format!("{}{}{}", t.lead, t.body, t.tail));
+}

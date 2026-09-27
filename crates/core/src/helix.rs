@@ -31,15 +31,25 @@ impl StreamInfo {
         }
     }
 
-    /// One-line summary for the topic bar.
+    /// One-line summary ("🔴 Live · Game — Title · 1,234 viewers").
     pub fn summary(&self) -> String {
-        let what = self.what();
-        let sep = if what.is_empty() { "" } else { " · " };
-        if self.live {
-            format!("🔴 Live{sep}{what} · {} viewers", group_digits(self.viewers))
-        } else {
-            format!("Offline{sep}{what}")
-        }
+        let (lead, title, tail) = self.parts();
+        format!("{lead}{title}{tail}")
+    }
+
+    /// The summary in three pieces for the topic bar: status and game (always shown), the title
+    /// (the part to shorten when space runs out) and the viewer count (always shown).
+    pub fn parts(&self) -> (String, String, String) {
+        let status = if self.live { "🔴 Live" } else { "Offline" };
+        let (game, title) = (self.game.trim(), self.title.trim());
+        let lead = match (game.is_empty(), title.is_empty()) {
+            (false, false) => format!("{status} · {game} — "),
+            (false, true) => format!("{status} · {game}"),
+            (true, false) => format!("{status} · "),
+            (true, true) => status.to_owned(),
+        };
+        let tail = if self.live { format!(" · {} viewers", group_digits(self.viewers)) } else { String::new() };
+        (lead, title.to_owned(), tail)
     }
 
     /// Whether the change from `old` is worth a line in the channel (not just viewer counts).
