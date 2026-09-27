@@ -174,12 +174,29 @@ fn build_menu(items: &[MenuItem]) -> HMENU {
 
 /// Shows a context menu at the cursor; returns the chosen id (0 = cancelled).
 pub fn popup_menu(hwnd: HWND, items: &[MenuItem]) -> u32 {
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    track_menu(hwnd, items, pt, TRACK_POPUP_MENU_FLAGS(0))
+}
+
+/// Shows a popup menu for a button: its bottom-left corner at client point (`x`, `y`) in pixels,
+/// so it opens upwards from there. Returns the chosen id, or 0.
+pub fn popup_menu_above(hwnd: HWND, items: &[MenuItem], x: i32, y: i32) -> u32 {
+    let mut pt = POINT { x, y };
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut pt);
+    }
+    track_menu(hwnd, items, pt, TPM_BOTTOMALIGN)
+}
+
+fn track_menu(hwnd: HWND, items: &[MenuItem], pt: POINT, align: TRACK_POPUP_MENU_FLAGS) -> u32 {
     unsafe {
         let m = build_menu(items);
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
         let _ = SetForegroundWindow(hwnd);
-        let r = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, None, hwnd, None);
+        let flags = TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | align;
+        let r = TrackPopupMenu(m, flags, pt.x, pt.y, None, hwnd, None);
         let _ = DestroyMenu(m);
         r.0 as u32
     }

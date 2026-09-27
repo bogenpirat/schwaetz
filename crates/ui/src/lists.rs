@@ -15,7 +15,6 @@ pub const FOOTER_H: f32 = 52.0;
 
 /// Segoe Fluent Icons / MDL2 Assets code points.
 const ICON_STATUS: &str = "\u{E8BD}";
-const ICON_ADD: &str = "\u{E710}";
 const ICON_SETTINGS: &str = "\u{E713}";
 
 /// Buttons in the sidebar footer.
@@ -23,7 +22,7 @@ const ICON_SETTINGS: &str = "\u{E713}";
 pub enum SidebarButton {
     /// The global status buffer (client messages, script output).
     Status,
-    AddNetwork,
+    /// Opens a menu: settings, add network.
     Settings,
 }
 
@@ -32,8 +31,7 @@ impl SidebarButton {
     pub fn tooltip(self) -> Option<&'static str> {
         match self {
             SidebarButton::Status => None,
-            SidebarButton::AddNetwork => Some("Add network"),
-            SidebarButton::Settings => Some("Settings"),
+            SidebarButton::Settings => Some("Settings and networks"),
         }
     }
 }
@@ -190,7 +188,7 @@ impl Sidebar {
         self.render_footer(p, text, th, app, anims);
     }
 
-    /// Status button (with the status buffer's unread count), then the icon buttons.
+    /// Status button (with the status buffer's unread count), then the settings menu button.
     fn render_footer(&mut self, p: &Painter, text: &Text, th: &Theme, app: &App, anims: &Anims) {
         let f = &text.fonts;
         self.buttons.clear();
@@ -198,8 +196,7 @@ impl Sidebar {
         p.line(self.rect.x + 12.0, fy + 0.5, self.rect.right() - 12.0, fy + 0.5, th.border, 1.0);
         let icon = 32.0;
         let settings = Rect::new(self.rect.right() - 8.0 - icon, fy + 10.0, icon, icon);
-        let add = Rect::new(settings.x - 4.0 - icon, fy + 10.0, icon, icon);
-        let status = Rect::new(self.rect.x + 8.0, fy + 8.0, (add.x - 8.0 - self.rect.x - 8.0).max(40.0), 36.0);
+        let status = Rect::new(self.rect.x + 8.0, fy + 8.0, (settings.x - 8.0 - self.rect.x - 8.0).max(40.0), 36.0);
 
         let sb = app.status_buffer;
         let active = app.active == sb;
@@ -214,16 +211,12 @@ impl Sidebar {
         p.text(&l, status.x + 36.0, status.y + (status.h - lh) / 2.0, th.sidebar_header);
         self.buttons.push((SidebarButton::Status, status));
 
-        for (button, r, glyph) in
-            [(SidebarButton::AddNetwork, add, ICON_ADD), (SidebarButton::Settings, settings, ICON_SETTINGS)]
-        {
-            let c = if button == SidebarButton::AddNetwork { Control::SidebarAdd } else { Control::SidebarSettings };
-            let face = icon_face(p, th, r, anims.hover(c), anims.press(c));
-            let g = text.layout(glyph, &f.icons, r.w, r.h);
-            let m = text::metrics(&g);
-            p.text(&g, face.x + (face.w - m.width) / 2.0, face.y + (face.h - m.height) / 2.0, th.sidebar_fg);
-            self.buttons.push((button, r));
-        }
+        let c = Control::SidebarSettings;
+        let face = icon_face(p, th, settings, anims.hover(c), anims.press(c));
+        let g = text.layout(ICON_SETTINGS, &f.icons, settings.w, settings.h);
+        let m = text::metrics(&g);
+        p.text(&g, face.x + (face.w - m.width) / 2.0, face.y + (face.h - m.height) / 2.0, th.sidebar_fg);
+        self.buttons.push((SidebarButton::Settings, settings));
     }
 
     pub fn hit(&self, x: f32, y: f32) -> Option<BufferId> {

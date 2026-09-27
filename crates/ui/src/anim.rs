@@ -15,7 +15,6 @@ use std::time::Instant;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Control {
     SidebarStatus,
-    SidebarAdd,
     SidebarSettings,
     /// The settings button of a network row (server buffer id).
     NetworkSettings(u32),
@@ -163,16 +162,16 @@ mod tests {
     fn transitions_run_and_settle() {
         let mut a = Anims::default();
         a.begin_frame();
-        assert_eq!(a.hover(Control::SidebarAdd), 0.0);
+        assert_eq!(a.hover(Control::SidebarSettings), 0.0);
         assert!(!a.moving());
-        a.hot = Some(Control::SidebarAdd);
+        a.hot = Some(Control::SidebarSettings);
         a.begin_frame();
-        let first = a.hover(Control::SidebarAdd);
+        let first = a.hover(Control::SidebarSettings);
         assert!(first > 0.0 && first < 1.0, "starts moving: {first}");
         assert!(a.moving());
         std::thread::sleep(std::time::Duration::from_millis(250));
         a.begin_frame();
-        assert_eq!(a.hover(Control::SidebarAdd), 1.0);
+        assert_eq!(a.hover(Control::SidebarSettings), 1.0);
         assert!(!a.moving());
         // Switches start where they are, then slide.
         assert_eq!(a.switch(Control::DialogField(3), true), 1.0);

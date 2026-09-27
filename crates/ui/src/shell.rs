@@ -2125,7 +2125,6 @@ impl Ui {
         if let Some((b, _)) = self.sidebar.button_at(x, y) {
             return Some(match b {
                 SidebarButton::Status => Control::SidebarStatus,
-                SidebarButton::AddNetwork => Control::SidebarAdd,
                 SidebarButton::Settings => Control::SidebarSettings,
             });
         }
@@ -2202,10 +2201,7 @@ impl Ui {
                 let sb = self.app.status_buffer;
                 self.switch_to(sb);
             }
-            Pressed::Sidebar(SidebarButton::AddNetwork) => {
-                self.form = Some(Box::new(crate::form::Form::network(None)));
-            }
-            Pressed::Sidebar(SidebarButton::Settings) => self.open_settings(),
+            Pressed::Sidebar(SidebarButton::Settings) => self.settings_menu(x, y),
             Pressed::ReplyClose => {
                 self.reply = None;
                 self.layout();
@@ -2398,6 +2394,19 @@ impl Ui {
             }
         }
         self.process_net();
+        self.invalidate();
+    }
+
+    /// The menu of the settings button in the sidebar footer, opening upwards from the button.
+    fn settings_menu(&mut self, x: f32, y: f32) {
+        let Some((_, r)) = self.sidebar.button_at(x, y) else { return };
+        let items = [MenuItem::Item(1, "Settings…"), MenuItem::Item(2, "Add network…")];
+        let (px, py) = ((r.x * self.scale) as i32, ((r.y - 4.0) * self.scale) as i32);
+        match win::popup_menu_above(self.hwnd, &items, px, py) {
+            1 => self.open_settings(),
+            2 => self.form = Some(Box::new(crate::form::Form::network(None))),
+            _ => {}
+        }
         self.invalidate();
     }
 
