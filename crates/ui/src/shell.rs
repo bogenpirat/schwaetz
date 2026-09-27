@@ -1264,6 +1264,22 @@ impl Ui {
                     }
                 }
             }
+            FormAction::ScriptSwitch { name, enabled } => {
+                // Script switches apply (and are saved) right away; the row shows the result.
+                let disabled = &mut self.app.config.scripts.disabled;
+                disabled.retain(|n| !n.eq_ignore_ascii_case(&name));
+                if !enabled {
+                    disabled.push(name);
+                }
+                if let Err(e) = self.app.config.save(&self.paths.config_file()) {
+                    form.set_error(format!("Could not save: {e}"));
+                }
+                if let Some(h) = self.services.scripts.as_mut() {
+                    h.refresh(&mut self.app);
+                    form.set_scripts(&h.list(&self.app));
+                }
+                self.after_update();
+            }
             FormAction::Button(_) => {}
             FormAction::Delete => {
                 if let FormKind::Network { original: Some(name) } = form.kind.clone() {

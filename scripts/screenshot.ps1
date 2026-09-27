@@ -2,7 +2,7 @@
 #
 # Usage: .\scripts\screenshot.ps1 [-Out shot.png] [-ProcessId 1234]
 
-param([string]$Out = "schwaetz.png", [int]$ProcessId = 0)
+param([Parameter(Position = 0)][string]$Out = "schwaetz.png", [int]$ProcessId = 0)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
@@ -15,7 +15,11 @@ public static class Shot {
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 }
 '@
-$p = if ($ProcessId) { Get-Process -Id $ProcessId } else { Get-Process schwaetz | Select-Object -First 1 }
+$p = if ($ProcessId) { Get-Process -Id $ProcessId } else {
+    $all = @(Get-Process schwaetz -ErrorAction Stop)
+    if ($all.Count -gt 1) { throw "Several schwaetz instances are running (processes $(($all.Id) -join ', ')); pass -ProcessId." }
+    $all[0]
+}
 $h = $p.MainWindowHandle
 if ($h -eq [IntPtr]::Zero) { throw "schwaetz has no main window" }
 $r = New-Object Shot+RECT

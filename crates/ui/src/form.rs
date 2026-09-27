@@ -61,6 +61,11 @@ pub enum FormAction {
     Delete,
     /// A button field was pressed (its key).
     Button(&'static str),
+    /// A script's switch was flipped (takes effect immediately, not on Save).
+    ScriptSwitch {
+        name: String,
+        enabled: bool,
+    },
 }
 
 pub struct Form {
@@ -131,7 +136,7 @@ fn script_note(s: &ScriptInfo) -> (String, bool) {
     if !s.running {
         return match &s.error {
             Some(e) => (format!("Failed: {}", e.lines().next().unwrap_or_default()), true),
-            None => ("Starting…".into(), false),
+            None => ("Not running".into(), false),
         };
     }
     let mut parts = vec!["Running".to_owned()];
@@ -194,36 +199,27 @@ impl Form {
         }
     }
 
-    /// Replaces the script rows with the host's current list, keeping on/off changes that are
-    /// not saved yet.
+    /// Replaces the script rows with the host's current list (after a switch, reload or new
+    /// examples), keeping the focus on the same row.
     pub fn set_scripts(&mut self, infos: &[ScriptInfo]) {
-        let pending: Vec<(String, bool)> = self
-            .fields
-            .iter()
-            .filter_map(|f| match &f.kind {
-                FieldKind::Script { name, enabled, .. } => Some((name.clone(), *enabled)),
-                _ => None,
-            })
-            .collect();
-        let focused = self.fields.get(self.focus).map(|f| f.key);
+        let focused_key = self.fields.get(self.focus).map(|f| f.key);
+        let focused_script = match self.fields.get(self.focus).map(|f| &f.kind) {
+            Some(FieldKind::Script { name, .. }) => Some(name.clone()),
+            _ => None,
+        };
         self.fields.retain(|f| !matches!(f.kind, FieldKind::Script { .. }));
         let at = self.fields.iter().rposition(|f| f.key.starts_with("scripts_")).map_or(self.fields.len(), |i| i + 1);
-        let rows = infos.iter().map(|s| {
-            let mut s = s.clone();
-            if let Some((_, on)) = pending.iter().find(|(n, _)| *n == s.name) {
-                s.enabled = *on;
-            }
-            script_row(&s)
-        });
-        self.fields.splice(at..at, rows);
+        self.fields.splice(at..at, infos.iter().map(script_row));
         self.sections = sections(&self.fields);
         self.section = self.section.min(self.sections.len().saturating_sub(1));
-        if focused != Some("script")
-            && let Some(i) = self.fields.iter().position(|f| Some(f.key) == focused)
-        {
-            self.focus = i;
-        } else if !self.page().contains(&self.focus) {
-            self.focus = self.page().start;
+        let refocus = match &focused_script {
+            Some(n) => self.fields.iter().position(|f| matches!(&f.kind, FieldKind::Script { name, .. } if name == n)),
+            None => self.fields.iter().position(|f| Some(f.key) == focused_key),
+        };
+        match refocus {
+            Some(i) => self.focus = i,
+            None if !self.page().contains(&self.focus) => self.focus = self.page().start,
+            None => {}
         }
         self.dropdown = None;
     }
@@ -598,26 +594,6 @@ impl Form {
         c.general.history_days = history_days;
         c.general.minimize_to_tray = self.check("minimize_to_tray");
         c.general.close_to_tray = self.check("close_to_tray");
-        // Scripts switched off; entries for files that are gone are kept.
-        let rows: Vec<(&str, bool)> = self
-            .fields
-            .iter()
-            .filter_map(|f| match &f.kind {
-                FieldKind::Script { name, enabled, .. } => Some((name.as_str(), *enabled)),
-                _ => None,
-            })
-            .collect();
-        if self.fields.iter().any(|f| f.key == "scripts_folder") {
-            let mut disabled: Vec<String> = c
-                .scripts
-                .disabled
-                .iter()
-                .filter(|d| !rows.iter().any(|(n, _)| n.eq_ignore_ascii_case(d)))
-                .cloned()
-                .collect();
-            disabled.extend(rows.iter().filter(|(_, on)| !on).map(|(n, _)| (*n).to_owned()));
-            c.scripts.disabled = disabled;
-        }
         Ok(())
     }
 
@@ -890,7 +866,10 @@ impl Form {
             return if ctl.contains(x, y) { FormAction::Button(self.fields[i].key) } else { FormAction::None };
         }
         match &mut self.fields[i].kind {
-            FieldKind::Check(on) | FieldKind::Script { enabled: on, .. } => *on = !*on,
+            FieldKind::Check(on) => *on = !*on,
+            FieldKind::Script { name, enabled, .. } => {
+                return FormAction::ScriptSwitch { name: name.clone(), enabled: !*enabled };
+            }
             FieldKind::Choice(_, idx) => {
                 if ctl.contains(x, y) {
                     self.dropdown = Some((i, *idx));
@@ -1032,7 +1011,10 @@ impl Form {
                     }
                     _ => {}
                 },
-                FieldKind::Check(on) | FieldKind::Script { enabled: on, .. } if v == VK_SPACE => *on = !*on,
+                FieldKind::Check(on) if v == VK_SPACE => *on = !*on,
+                FieldKind::Script { name, enabled, .. } if v == VK_SPACE => {
+                    return FormAction::ScriptSwitch { name: name.clone(), enabled: !*enabled };
+                }
                 FieldKind::Choice(_, idx) if v == VK_SPACE || v == VK_F4 => self.dropdown = Some((self.focus, *idx)),
                 FieldKind::Choice(opts, idx) if v == VK_RIGHT => *idx = (*idx + 1) % opts.len(),
                 FieldKind::Choice(opts, idx) if v == VK_LEFT => *idx = (*idx + opts.len() - 1) % opts.len(),
@@ -1101,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn scripts_page_saves_switched_off_scripts() {
+    fn script_switches_apply_immediately() {
         let info = |name: &str, enabled: bool| ScriptInfo {
             name: name.into(),
             file: format!("{name}.js"),
@@ -1112,19 +1094,25 @@ mod tests {
             commands: Vec::new(),
         };
         let mut c = Config::default();
-        c.scripts.disabled = vec!["gone".into(), "b".into()];
-        let mut f = Form::settings(&c, Some((&[info("a", true), info("b", false)], r"C:\scripts")));
+        c.scripts.disabled = vec!["b".into()];
+        let mut f = Form::settings(&c, Some((&[info("a", true), info("b", false)], r"C:scripts")));
         assert_eq!(f.sections.last().unwrap().0, "Scripts");
-        // Switch "a" off and "b" on.
-        for field in &mut f.fields {
-            if let FieldKind::Script { enabled, .. } = &mut field.kind {
-                *enabled = !*enabled;
-            }
-        }
-        // A reload keeps unsaved switches and adds new files.
-        f.set_scripts(&[info("a", true), info("b", false), info("c", true)]);
+        f.show_section(f.sections.len() - 1);
+
+        // Space on a script row asks to switch it right away instead of waiting for Save.
+        f.focus =
+            f.fields.iter().position(|x| matches!(&x.kind, FieldKind::Script { name, .. } if name == "b")).unwrap();
+        let action = f.key(VK_SPACE, false, false, || None);
+        assert!(matches!(action, FormAction::ScriptSwitch { ref name, enabled: true } if name == "b"));
+
+        // The rows then show what the host reports, and the focus stays on the same script.
+        f.set_scripts(&[info("a", true), info("b", true), info("c", true)]);
+        assert!(matches!(&f.fields[f.focus].kind, FieldKind::Script { name, enabled: true, .. } if name == "b"));
+        assert_eq!(f.fields.iter().filter(|x| matches!(x.kind, FieldKind::Script { .. })).count(), 3);
+
+        // Save leaves the script list alone (it is already applied).
         f.apply_settings(&mut c).unwrap();
-        assert_eq!(c.scripts.disabled, ["gone", "a"]);
+        assert_eq!(c.scripts.disabled, ["b"]);
     }
 
     #[test]

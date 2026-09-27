@@ -5,8 +5,8 @@ loaded at startup and reloaded automatically when you save them; `/reload` reloa
 Messages and errors from scripts appear in the **scripts** buffer.
 
 **Settings → Scripts** lists every script with its state (running, off, or why it failed, plus
-its network access and commands). Switch scripts on or off there (applied on Save; stored as
-`[scripts] disabled` in `config.toml`), open the scripts folder, reload everything, or add the
+its network access and commands). Switch scripts on or off there (this takes effect and is saved
+immediately, as `[scripts] disabled` in `config.toml`), open the scripts folder, reload everything, or add the
 bundled example scripts (they arrive switched off). A script that fails to load is retried when
 you save the file again.
 
