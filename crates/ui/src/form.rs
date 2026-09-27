@@ -54,6 +54,13 @@ pub enum FormKind {
     Settings,
 }
 
+/// A button-like control in a dialog, remembered between press and release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    Footer(usize),
+    Field(usize),
+}
+
 pub enum FormAction {
     None,
     Save,
@@ -86,6 +93,8 @@ pub struct Form {
     rows: Vec<(usize, Rect, Rect, f32)>,
     /// Text field being drag-selected with the mouse.
     selecting: Option<usize>,
+    /// Button or switch under a pressed left button (it acts on release).
+    pressed: Option<Target>,
     nav: Vec<Rect>,
     nav_hover: Option<usize>,
     buttons: Vec<(FormAction, Rect)>,
@@ -192,6 +201,7 @@ impl Form {
             error_key: Cell::new(""),
             rows: Vec::new(),
             selecting: None,
+            pressed: None,
             nav: Vec::new(),
             nav_hover: None,
             buttons: Vec::new(),
@@ -833,23 +843,48 @@ impl Form {
         }
     }
 
-    /// A left click; `double` for the second click of a double-click, `shift` extends the
-    /// selection in text fields.
-    pub fn click(&mut self, win: Rect, x: f32, y: f32, double: bool, shift: bool) -> FormAction {
-        // With a dropdown open, a click picks an option or just closes it.
-        if let Some((fi, _)) = self.dropdown.take() {
-            if let Some(i) = self.popup.iter().position(|r| r.contains(x, y))
-                && let FieldKind::Choice(_, idx) = &mut self.fields[fi].kind
-            {
-                *idx = i;
+    /// The button-like control under a point (acts on release): footer buttons, button fields,
+    /// switches and script switches.
+    fn target_at(&self, win: Rect, x: f32, y: f32) -> Option<Target> {
+        if !self.panel(win).contains(x, y) {
+            return None;
+        }
+        if let Some(i) = self.buttons.iter().position(|(_, r)| r.contains(x, y)) {
+            return Some(Target::Footer(i));
+        }
+        if !self.list_rect(win).contains(x, y) {
+            return None;
+        }
+        let &(i, _, ctl, _) = self.rows.iter().find(|(_, r, ..)| r.contains(x, y))?;
+        match self.fields[i].kind {
+            FieldKind::Button { .. } if ctl.contains(x, y) => Some(Target::Field(i)),
+            // A switch toggles from anywhere on its row.
+            FieldKind::Check(_) | FieldKind::Script { .. } => Some(Target::Field(i)),
+            _ => None,
+        }
+    }
+
+    /// Left button pressed. Selecting things (pages, text, opening a dropdown, the scrollbar)
+    /// happens now; buttons and switches only remember the press and act in [`Form::release`].
+    /// `double` is the second press of a double-click, `shift` extends text selections.
+    pub fn press(&mut self, win: Rect, x: f32, y: f32, double: bool, shift: bool) -> FormAction {
+        self.pressed = None;
+        if self.dropdown.is_some() {
+            // Options are picked on release; pressing anywhere else closes the list.
+            if !self.popup.iter().any(|r| r.contains(x, y)) {
+                self.dropdown = None;
             }
+            return FormAction::None;
+        }
+        if let Some(t) = self.target_at(win, x, y) {
+            if let Target::Field(i) = t {
+                self.focus = i;
+            }
+            self.pressed = Some(t);
             return FormAction::None;
         }
         if !self.panel(win).contains(x, y) {
             return FormAction::None;
-        }
-        if let Some(i) = self.buttons.iter().position(|(_, r)| r.contains(x, y)) {
-            return std::mem::replace(&mut self.buttons[i].0, FormAction::None);
         }
         if let Some(s) = self.nav.iter().position(|r| r.contains(x, y)) {
             self.show_section(s);
@@ -874,14 +909,7 @@ impl Form {
             return FormAction::None;
         };
         self.focus = i;
-        if matches!(self.fields[i].kind, FieldKind::Button { .. }) {
-            return if ctl.contains(x, y) { FormAction::Button(self.fields[i].key) } else { FormAction::None };
-        }
         match &mut self.fields[i].kind {
-            FieldKind::Check(on) => *on = !*on,
-            FieldKind::Script { name, enabled, .. } => {
-                return FormAction::ScriptSwitch { name: name.clone(), enabled: !*enabled };
-            }
             FieldKind::Choice(_, idx) => {
                 if ctl.contains(x, y) {
                     self.dropdown = Some((i, *idx));
@@ -896,9 +924,41 @@ impl Form {
                     self.selecting = Some(i);
                 }
             }
-            FieldKind::Header | FieldKind::Button { .. } => {}
+            _ => {}
         }
         FormAction::None
+    }
+
+    /// Left button released: a pressed button or switch acts if the pointer is still on it, and
+    /// an open dropdown takes the option under the pointer (also after dragging from the box).
+    pub fn release(&mut self, win: Rect, x: f32, y: f32) -> FormAction {
+        self.selecting = None;
+        self.grab = None;
+        let pressed = self.pressed.take();
+        if let Some((fi, _)) = self.dropdown {
+            if let Some(i) = self.popup.iter().position(|r| r.contains(x, y)) {
+                if let FieldKind::Choice(_, idx) = &mut self.fields[fi].kind {
+                    *idx = i;
+                }
+                self.dropdown = None;
+            }
+            return FormAction::None;
+        }
+        let Some(t) = pressed.filter(|t| self.target_at(win, x, y) == Some(*t)) else { return FormAction::None };
+        match t {
+            Target::Footer(i) => std::mem::replace(&mut self.buttons[i].0, FormAction::None),
+            Target::Field(i) => match &mut self.fields[i].kind {
+                FieldKind::Check(on) => {
+                    *on = !*on;
+                    FormAction::None
+                }
+                FieldKind::Script { name, enabled, .. } => {
+                    FormAction::ScriptSwitch { name: name.clone(), enabled: !*enabled }
+                }
+                FieldKind::Button { .. } => FormAction::Button(self.fields[i].key),
+                _ => FormAction::None,
+            },
+        }
     }
 
     /// Pointer movement; returns whether the dialog needs a repaint.
@@ -928,11 +988,6 @@ impl Form {
             changed = true;
         }
         changed
-    }
-
-    pub fn mouse_up(&mut self) -> bool {
-        self.selecting = None;
-        self.grab.take().is_some()
     }
 
     fn drag_to(&mut self, y: f32) {

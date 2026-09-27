@@ -86,6 +86,7 @@ pub struct Metrics {
 }
 
 /// What a point in the chat view refers to.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Hit {
     Link(LinkTarget),
     /// The reply button of a line.

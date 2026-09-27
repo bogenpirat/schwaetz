@@ -288,6 +288,38 @@ impl Overlay {
     }
 
     /// Result of a click inside the overlay.
+    pub fn target(&self, win: Rect, x: f32, y: f32) -> OverlayTarget {
+        let panel = self.panel(win);
+        if !panel.contains(x, y) {
+            return OverlayTarget::Outside;
+        }
+        match self {
+            Overlay::QuickSwitch { results, .. } => {
+                let i = ((y - (panel.y + 12.0 + 40.0 + 8.0)) / 34.0).floor();
+                if i >= 0.0 && (i as usize) < results.len() {
+                    OverlayTarget::Row(i as usize)
+                } else {
+                    OverlayTarget::Other
+                }
+            }
+            Overlay::Confirm { .. } => {
+                let (yes, no) = confirm_buttons(panel);
+                if yes.contains(x, y) {
+                    OverlayTarget::Yes
+                } else if no.contains(x, y) {
+                    OverlayTarget::No
+                } else {
+                    OverlayTarget::Other
+                }
+            }
+            Overlay::ChannelList { rows, scroll, .. } => {
+                let top = panel.y + 50.0 + 36.0 + 8.0;
+                let i = ((y - top + *scroll) / 26.0) as usize;
+                if y >= top && i < rows.len() { OverlayTarget::Row(i) } else { OverlayTarget::Other }
+            }
+        }
+    }
+
     pub fn click(&mut self, win: Rect, x: f32, y: f32) -> OverlayClick {
         let panel = self.panel(win);
         if !panel.contains(x, y) {
@@ -340,6 +372,17 @@ pub enum OverlayClick {
     None,
     Accept,
     Dismiss,
+}
+
+/// What a point in an overlay refers to. Clicks act on release, when press and release hit the
+/// same target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayTarget {
+    Outside,
+    Row(usize),
+    Yes,
+    No,
+    Other,
 }
 
 fn confirm_buttons(panel: Rect) -> (Rect, Rect) {

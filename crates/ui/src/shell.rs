@@ -34,6 +34,18 @@ pub const WM_APP_MEDIA: u32 = WM_APP + 3;
 /// Background work (Twitch API) finished on its worker thread.
 pub const WM_APP_LIVE: u32 = WM_APP + 4;
 
+/// A button-like control pressed with the left mouse button (acts on release, like Windows
+/// buttons, and not at all if the pointer was dragged off it).
+#[derive(Clone, Debug, PartialEq)]
+enum Pressed {
+    Overlay(crate::overlay::OverlayTarget),
+    NetworkSettings(BufferId),
+    Sidebar(SidebarButton),
+    ReplyClose,
+    JumpPill,
+    Chat(Hit),
+}
+
 enum WorkerResult {
     Live(schwaetz_core::helix::LiveResult),
     Auth(schwaetz_net::NetworkId, schwaetz_core::twitch_auth::AuthRequest, schwaetz_core::twitch_auth::AuthResponse),
@@ -113,6 +125,8 @@ pub struct Ui {
     mouse_tracking: bool,
     /// Hovered inline emote: (code, image url, bounds).
     tooltip: Option<(String, String, Rect)>,
+    /// Button-like control under a pressed left button; it acts on release if still under it.
+    pressed: Option<Pressed>,
 }
 
 thread_local! {
@@ -247,6 +261,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         reply_rect: Rect::default(),
         mouse_tracking: false,
         tooltip: None,
+        pressed: None,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -1613,18 +1628,13 @@ impl Ui {
         if self.overlay.is_none()
             && let Some(f) = self.form.as_mut()
         {
-            let action = f.click(self.win_rect, x, y, double, win::key_down(VK_SHIFT.0));
+            let action = f.press(self.win_rect, x, y, double, win::key_down(VK_SHIFT.0));
             self.form_action(action);
             self.invalidate();
             return;
         }
-        if let Some(o) = self.overlay.as_mut() {
-            match o.click(self.win_rect, x, y) {
-                OverlayClick::Accept => self.overlay_accept(),
-                OverlayClick::Dismiss => self.overlay = None,
-                OverlayClick::None => {}
-            }
-            self.invalidate();
+        if let Some(o) = self.overlay.as_ref() {
+            self.pressed = Some(Pressed::Overlay(o.target(self.win_rect, x, y)));
             return;
         }
         if self.on_splitter(x) {
@@ -1632,29 +1642,11 @@ impl Ui {
             return;
         }
         if let Some((sb, _)) = self.sidebar.network_button_at(x, y) {
-            // The gear on a network row opens that network's settings.
-            let name = self
-                .app
-                .buffer(sb)
-                .and_then(|b| b.network)
-                .and_then(|n| self.app.network(n))
-                .map(|n| n.cfg.name.clone());
-            if let Some(cfg) = name.and_then(|n| self.app.config.network(&n).cloned()) {
-                self.form = Some(Box::new(crate::form::Form::network(Some(&cfg))));
-            }
-            self.invalidate();
+            self.pressed = Some(Pressed::NetworkSettings(sb));
             return;
         }
         if let Some((button, _)) = self.sidebar.button_at(x, y) {
-            match button {
-                SidebarButton::Status => {
-                    let sb = self.app.status_buffer;
-                    self.switch_to(sb);
-                }
-                SidebarButton::AddNetwork => self.form = Some(Box::new(crate::form::Form::network(None))),
-                SidebarButton::Settings => self.open_settings(),
-            }
-            self.invalidate();
+            self.pressed = Some(Pressed::Sidebar(button));
             return;
         }
         if let Some(id) = self.sidebar.hit(x, y) {
@@ -1679,9 +1671,7 @@ impl Ui {
         }
         if self.reply_rect.h > 0.0 && self.reply_rect.contains(x, y) {
             if self.reply_close_rect().contains(x, y) {
-                self.reply = None;
-                self.layout();
-                self.invalidate();
+                self.pressed = Some(Pressed::ReplyClose);
             }
             return;
         }
@@ -1698,8 +1688,7 @@ impl Ui {
         }
         if self.chat.rect.contains(x, y) {
             if self.chat.jump_pill(x, y) {
-                self.chat.scroll_to_bottom();
-                self.invalidate();
+                self.pressed = Some(Pressed::JumpPill);
                 return;
             }
             match self.chat.hit(x, y) {
@@ -1724,16 +1713,12 @@ impl Ui {
                         self.last_click = (1, x, y, t);
                     }
                 }
-                Hit::Link(target) => {
+                // Links and buttons act on release (see mouse_up); the nick menu opens right away.
+                hit @ (Hit::Link(_) | Hit::Reply(_) | Hit::LoadPreview(_)) => {
                     self.last_click = (3, x, y, 0);
-                    self.open_link(target);
+                    self.pressed = Some(Pressed::Chat(hit));
                 }
                 Hit::Nick(nick) => self.nick_menu(&nick),
-                Hit::Reply(line) => self.start_reply(line),
-                Hit::LoadPreview(url) => {
-                    self.images.borrow_mut().requested.insert(url);
-                    self.chat.invalidate_styles();
-                }
                 Hit::Nothing => self.chat.selection = None,
             }
             self.invalidate();
@@ -1827,14 +1812,21 @@ impl Ui {
         }
     }
 
-    fn mouse_up(&mut self) {
+    fn mouse_up(&mut self, x: f32, y: f32) {
         unsafe {
             let _ = ReleaseCapture();
         }
-        if let Some(f) = self.form.as_mut()
-            && f.mouse_up()
+        // A pressed button acts only if the pointer is still on it.
+        if let Some(p) = self.pressed.take()
+            && self.pressed_at(x, y).as_ref() == Some(&p)
         {
-            self.invalidate();
+            self.activate(p, x, y);
+        }
+        if self.overlay.is_none()
+            && let Some(f) = self.form.as_mut()
+        {
+            let action = f.release(self.win_rect, x, y);
+            self.form_action(action);
         }
         if self.drag == Drag::Chat {
             self.chat.selecting = false;
@@ -1845,6 +1837,76 @@ impl Ui {
             }
         }
         self.drag = Drag::None;
+        self.invalidate();
+    }
+
+    /// The button-like control under a point, compared with the pressed one on release.
+    fn pressed_at(&self, x: f32, y: f32) -> Option<Pressed> {
+        if let Some(o) = &self.overlay {
+            return Some(Pressed::Overlay(o.target(self.win_rect, x, y)));
+        }
+        if let Some((sb, _)) = self.sidebar.network_button_at(x, y) {
+            return Some(Pressed::NetworkSettings(sb));
+        }
+        if let Some((b, _)) = self.sidebar.button_at(x, y) {
+            return Some(Pressed::Sidebar(b));
+        }
+        if self.reply_rect.h > 0.0 && self.reply_close_rect().contains(x, y) {
+            return Some(Pressed::ReplyClose);
+        }
+        if self.chat.rect.contains(x, y) {
+            if self.chat.jump_pill(x, y) {
+                return Some(Pressed::JumpPill);
+            }
+            return Some(Pressed::Chat(self.chat.hit(x, y)));
+        }
+        None
+    }
+
+    /// Runs a control that was pressed and released over the same spot.
+    fn activate(&mut self, p: Pressed, x: f32, y: f32) {
+        match p {
+            Pressed::Overlay(_) => {
+                let Some(o) = self.overlay.as_mut() else { return };
+                match o.click(self.win_rect, x, y) {
+                    OverlayClick::Accept => self.overlay_accept(),
+                    OverlayClick::Dismiss => self.overlay = None,
+                    OverlayClick::None => {}
+                }
+            }
+            Pressed::NetworkSettings(sb) => {
+                // The gear on a network row opens that network's settings.
+                let name = self
+                    .app
+                    .buffer(sb)
+                    .and_then(|b| b.network)
+                    .and_then(|n| self.app.network(n))
+                    .map(|n| n.cfg.name.clone());
+                if let Some(cfg) = name.and_then(|n| self.app.config.network(&n).cloned()) {
+                    self.form = Some(Box::new(crate::form::Form::network(Some(&cfg))));
+                }
+            }
+            Pressed::Sidebar(SidebarButton::Status) => {
+                let sb = self.app.status_buffer;
+                self.switch_to(sb);
+            }
+            Pressed::Sidebar(SidebarButton::AddNetwork) => {
+                self.form = Some(Box::new(crate::form::Form::network(None)));
+            }
+            Pressed::Sidebar(SidebarButton::Settings) => self.open_settings(),
+            Pressed::ReplyClose => {
+                self.reply = None;
+                self.layout();
+            }
+            Pressed::JumpPill => self.chat.scroll_to_bottom(),
+            Pressed::Chat(Hit::Link(target)) => self.open_link(target),
+            Pressed::Chat(Hit::Reply(line)) => self.start_reply(line),
+            Pressed::Chat(Hit::LoadPreview(url)) => {
+                self.images.borrow_mut().requested.insert(url);
+                self.chat.invalidate_styles();
+            }
+            Pressed::Chat(_) => {}
+        }
         self.invalidate();
     }
 
@@ -2282,7 +2344,7 @@ impl Ui {
                 if let Some((x, y)) = xy() {
                     self.mouse_move(x, y);
                     self.mouse_down(x, y, false);
-                    self.mouse_up();
+                    self.mouse_up(x, y);
                 }
             }
             "drag" => {
@@ -2291,7 +2353,7 @@ impl Ui {
                     self.mouse_move(x0, y0);
                     self.mouse_down(x0, y0, false);
                     self.mouse_move(x1, y1);
-                    self.mouse_up();
+                    self.mouse_up(x1, y1);
                 }
             }
             "key" => {
@@ -2527,7 +2589,8 @@ impl Ui {
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
-                self.mouse_up();
+                let (x, y) = self.pt(lp);
+                self.mouse_up(x, y);
                 Some(LRESULT(0))
             }
             WM_RBUTTONUP => {
