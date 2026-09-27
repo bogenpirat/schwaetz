@@ -1796,6 +1796,9 @@ impl Ui {
         if self.on_splitter(x) || self.drag == Drag::Splitter {
             return IDC_SIZEWE;
         }
+        if self.reply_rect.h > 0.0 && self.reply_close_rect().contains(x, y) {
+            return IDC_HAND;
+        }
         if self.input_rect.contains(x, y) {
             return IDC_IBEAM;
         }
@@ -1804,11 +1807,11 @@ impl Ui {
                 return IDC_HAND;
             }
             return match self.chat.hit(x, y) {
-                Hit::Link(_) | Hit::Nick(_) => IDC_HAND,
+                Hit::Link(_) | Hit::Nick(_) | Hit::Reply(_) | Hit::LoadPreview(_) => IDC_HAND,
                 _ => IDC_IBEAM,
             };
         }
-        if self.sidebar.hit(x, y).is_some() {
+        if self.sidebar.hit(x, y).is_some() || self.sidebar.button_at(x, y).is_some() {
             return IDC_HAND;
         }
         IDC_ARROW
