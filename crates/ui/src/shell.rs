@@ -2475,7 +2475,6 @@ impl Ui {
                 }
                 _ => {
                     let has_sel = self.chat.selection.is_some();
-                    let filtered = self.chat.show_filtered;
                     // The line under the pointer, if it was received live (raw form known).
                     let raw = self.chat.line_at(y).and_then(|id| {
                         let b = self.app.active_buffer();
@@ -2490,15 +2489,10 @@ impl Ui {
                         items.push(MenuItem::Item(4, "View raw message"));
                         items.push(MenuItem::Separator);
                     }
-                    items.push(MenuItem::Check(2, "Show hidden joins/parts", filtered));
                     items.push(MenuItem::Item(3, "Clear buffer"));
                     match win::popup_menu(self.hwnd, &items) {
                         1 => {
                             self.copy();
-                        }
-                        2 => {
-                            self.chat.show_filtered = !filtered;
-                            self.chat.invalidate_styles();
                         }
                         3 => {
                             let id = self.app.active;

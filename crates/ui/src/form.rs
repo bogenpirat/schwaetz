@@ -415,6 +415,12 @@ impl Form {
                 ],
                 c.unread_badges.as_deref().unwrap_or(""),
             ),
+            choice(
+                "joins_parts",
+                "Joins and parts",
+                vec![("all", "Show"), ("smart", "Only for active users"), ("none", "Hide")],
+                c.joins_parts_mode(),
+            ),
             header("Twitch"),
             button("twitch_signin", "Account", "Sign in with Twitch"),
             password("twitch_api", "Manual API token", has(SecretKind::TwitchApi)),
@@ -463,12 +469,6 @@ impl Form {
             check("mica", "Mica backdrop (Windows 11)", a.mica),
             check("gpu_acceleration", "GPU rendering (uses more memory)", a.gpu_acceleration),
             header("Chat"),
-            choice(
-                "show_joins_parts",
-                "Joins and parts",
-                vec![("smart", "Only for active users"), ("all", "Always"), ("none", "Never")],
-                &g.show_joins_parts,
-            ),
             text("highlight_words", "Highlight words", "comma-separated", &c.highlight.words.join(", ")),
             text("scrollback_lines", "Lines kept in memory", "", &g.scrollback_lines.to_string()),
             check("ctcp_replies", "Answer CTCP requests", g.ctcp_replies),
@@ -641,6 +641,9 @@ impl Form {
             twitch_popout: self.check("twitch_popout"),
             twitch_live_first: self.check("twitch_live_first"),
             unread_badges: Some(self.choice("unread_badges")).filter(|m| !m.is_empty()).map(str::to_owned),
+            joins_parts: Some(self.choice("joins_parts"))
+                .filter(|m| *m != NetworkConfig::default_joins_parts(kind))
+                .map(str::to_owned),
             ..base
         };
         Ok((cfg, secrets))
@@ -680,7 +683,6 @@ impl Form {
         c.appearance.unread_badges = self.choice("unread_badges").into();
         c.appearance.mica = self.check("mica");
         c.appearance.gpu_acceleration = self.check("gpu_acceleration");
-        c.general.show_joins_parts = self.choice("show_joins_parts").into();
         c.highlight.words = self.list("highlight_words", ',');
         c.general.scrollback_lines = scrollback;
         c.general.ctcp_replies = self.check("ctcp_replies");

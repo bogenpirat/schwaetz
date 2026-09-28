@@ -114,7 +114,6 @@ pub struct ChatView {
     pub selecting: bool,
     /// Unread-marker snapshot taken when the buffer was opened.
     pub marker: Option<i64>,
-    pub show_filtered: bool,
     /// Set when the top of the buffer came into view (load older history).
     pub wants_older: bool,
     pub style_gen: u64,
@@ -140,7 +139,7 @@ pub struct ChatView {
 #[derive(Default)]
 struct NickFit {
     /// Buffer, graphics generation, style generation and filter setting it was measured for.
-    key: (Option<BufferId>, u64, u64, bool),
+    key: (Option<BufferId>, u64, u64),
     /// Buffer generation last scanned.
     seen: Option<u64>,
     /// Lines up to this id were measured.
@@ -190,7 +189,6 @@ impl Default for ChatView {
             selection: None,
             selecting: false,
             marker: None,
-            show_filtered: false,
             wants_older: false,
             style_gen: 0,
             hover: None,
@@ -205,8 +203,8 @@ impl Default for ChatView {
     }
 }
 
-fn visible(l: &Line, show_filtered: bool) -> bool {
-    show_filtered || !l.flags.has(LineFlags::FILTERED)
+fn visible(l: &Line) -> bool {
+    !l.flags.has(LineFlags::FILTERED)
 }
 
 impl ChatView {
@@ -619,7 +617,7 @@ impl ChatView {
     pub fn scroll(&mut self, c: &mut Ctx, b: &Buffer, dy: f32) {
         self.fit_nicks(c, b);
         self.check_cache_key(c);
-        let vis: Vec<usize> = (0..b.lines.len()).filter(|&i| visible(&b.lines[i], self.show_filtered)).collect();
+        let vis: Vec<usize> = (0..b.lines.len()).filter(|&i| visible(&b.lines[i])).collect();
         if vis.is_empty() {
             return;
         }
@@ -677,7 +675,7 @@ impl ChatView {
         if !c.nick_column || !c.nick_column_auto {
             return;
         }
-        let key = (self.buffer, c.gfx_gen, self.style_gen, self.show_filtered);
+        let key = (self.buffer, c.gfx_gen, self.style_gen);
         if key != self.nick_fit.key || b.lines.is_empty() {
             self.nick_fit = NickFit { key, ..Default::default() };
         }
@@ -691,7 +689,7 @@ impl ChatView {
         let upto = self.nick_fit.upto;
         for line in b.lines.iter().filter(|l| l.id > upto) {
             self.nick_fit.upto = self.nick_fit.upto.max(line.id);
-            if !visible(line, self.show_filtered) {
+            if !visible(line) {
                 continue;
             }
             let (full, _) = nick_column_text(line);
@@ -722,7 +720,7 @@ impl ChatView {
 
     /// Scrolls to a scrollbar position: 0 shows the oldest lines, 1 the newest.
     pub fn scroll_to(&mut self, c: &mut Ctx, b: &Buffer, pos: f32) {
-        let vis: Vec<usize> = (0..b.lines.len()).filter(|&i| visible(&b.lines[i], self.show_filtered)).collect();
+        let vis: Vec<usize> = (0..b.lines.len()).filter(|&i| visible(&b.lines[i])).collect();
         if vis.is_empty() {
             return;
         }
@@ -752,7 +750,7 @@ impl ChatView {
         if self.nicks.len() > 2000 {
             self.nicks.clear();
         }
-        let vis: Vec<usize> = (0..b.lines.len()).filter(|&i| visible(&b.lines[i], self.show_filtered)).collect();
+        let vis: Vec<usize> = (0..b.lines.len()).filter(|&i| visible(&b.lines[i])).collect();
         self.bar = None;
         if vis.is_empty() {
             return;
@@ -1100,7 +1098,7 @@ impl ChatView {
         let mut out = String::new();
         for i in ai..=zi {
             let line = &b.lines[i];
-            if !visible(line, self.show_filtered) {
+            if !visible(line) {
                 continue;
             }
             let plain = match self.cache.get(&line.id) {

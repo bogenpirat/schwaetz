@@ -54,9 +54,8 @@ pub struct General {
     pub part_message: String,
     /// In-memory lines per buffer; older lines are paged from history on demand.
     pub scrollback_lines: usize,
-    /// "all", "smart" (only for recently active users) or "none".
-    pub show_joins_parts: String,
-    /// Seconds a user must have spoken within for smart filtering to show their part/quit.
+    /// Seconds a user must have spoken within for a network's "smart" `joins_parts` mode to show
+    /// their joins and parts.
     pub smart_filter_secs: u64,
     pub ctcp_replies: bool,
     pub log_to_files: bool,
@@ -84,7 +83,6 @@ impl Default for General {
             quit_message: "schwätz — https://github.com/bogenpirat/schwaetz".into(),
             part_message: String::new(),
             scrollback_lines: 1500,
-            show_joins_parts: "smart".into(),
             smart_filter_secs: 1200,
             ctcp_replies: true,
             log_to_files: true,
@@ -313,6 +311,10 @@ pub struct NetworkConfig {
     /// `appearance.unread_badges`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unread_badges: Option<String>,
+    /// Joins, parts, quits and nick changes of others: "all", "smart" (only for users who spoke
+    /// within `general.smart_filter_secs`) or "none"; unset shows them except on Twitch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub joins_parts: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -350,6 +352,7 @@ impl Default for NetworkConfig {
             twitch_live_first: false,
             channel_order: Vec::new(),
             unread_badges: None,
+            joins_parts: None,
         }
     }
 }
@@ -365,6 +368,17 @@ impl NetworkConfig {
             flood_interval_ms: 1500,
             ..Default::default()
         }
+    }
+
+    /// The `joins_parts` mode in effect.
+    pub fn joins_parts_mode(&self) -> &str {
+        self.joins_parts.as_deref().unwrap_or(Self::default_joins_parts(self.kind))
+    }
+
+    /// The `joins_parts` mode of a network that doesn't set one: hidden on Twitch, where
+    /// membership is batched and mostly lurkers, shown elsewhere.
+    pub fn default_joins_parts(kind: NetworkKind) -> &'static str {
+        if kind == NetworkKind::Twitch { "none" } else { "all" }
     }
 
     /// Parses `host:port`, `host:+port`, `host` (TLS 6697) and `ircs://host:port` forms.

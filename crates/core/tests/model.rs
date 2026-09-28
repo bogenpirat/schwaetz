@@ -136,6 +136,7 @@ fn join_command_switches_buffer_and_queries_open() {
 #[test]
 fn smart_filter_hides_inactive_users() {
     let mut h = Harness::new(NetworkKind::Irc, &[]);
+    h.app.networks.get_mut(&h.net).unwrap().cfg.joins_parts = Some("smart".into());
     h.register();
     h.lines(&[
         ":me!u@h JOIN #c",
@@ -150,6 +151,28 @@ fn smart_filter_hides_inactive_users() {
     assert!(find(LineKind::Join, "lurker").has(LineFlags::FILTERED));
     assert!(!find(LineKind::Part, "talker").has(LineFlags::FILTERED));
     assert!(find(LineKind::Quit, "lurker").has(LineFlags::FILTERED));
+}
+
+#[test]
+fn joins_parts_default_to_hidden_on_twitch_only() {
+    let mut h = Harness::new(NetworkKind::Irc, &[]);
+    h.register();
+    h.lines(&[":me!u@h JOIN #c", ":lurker!l@h JOIN #c"]);
+    let b = h.app.buffer(h.buffer("#c")).unwrap();
+    assert!(
+        b.lines.iter().any(|l| l.kind == LineKind::Join && &*l.nick == "lurker" && !l.flags.has(LineFlags::FILTERED))
+    );
+
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.connect();
+    h.lines(&[
+        ":tmi.twitch.tv 001 me :hi",
+        ":tmi.twitch.tv 376 me :>",
+        ":me!me@me.tmi.twitch.tv JOIN #chan",
+        ":bob!bob@bob.tmi.twitch.tv JOIN #chan",
+    ]);
+    let b = h.app.buffer(h.buffer("#chan")).unwrap();
+    assert!(b.lines.iter().any(|l| l.kind == LineKind::Join && &*l.nick == "bob" && l.flags.has(LineFlags::FILTERED)));
 }
 
 #[test]
@@ -251,11 +274,11 @@ fn set_command_edits_config() {
     let mut h = Harness::new(NetworkKind::Irc, &[]);
     let s = h.app.status_buffer;
     h.app.input(s, "/set appearance.font_size 15.5");
-    h.app.input(s, "/set general.show_joins_parts all");
+    h.app.input(s, "/set general.smart_filter_secs 60");
     h.app.input(s, "/set notifications.sound yes");
     h.app.input(s, "/set highlight.words rust, irc");
     assert_eq!(h.app.config.appearance.font_size, 15.5);
-    assert_eq!(h.app.config.general.show_joins_parts, "all");
+    assert_eq!(h.app.config.general.smart_filter_secs, 60);
     assert!(h.app.config.notifications.sound);
     assert_eq!(h.app.config.highlight.words, ["rust", "irc"]);
     h.app.input(s, "/set nope.nothing 1");
@@ -407,7 +430,7 @@ fn replies_use_the_right_tag_and_show_context() {
 #[test]
 fn twitch_hides_hostmasks_and_has_no_queries() {
     let mut h = Harness::new(NetworkKind::Twitch, &[]);
-    h.app.config.general.show_joins_parts = "all".into();
+    h.app.networks.get_mut(&h.net).unwrap().cfg.joins_parts = Some("all".into());
     h.connect();
     h.lines(&[
         ":tmi.twitch.tv CAP * ACK :twitch.tv/tags twitch.tv/commands twitch.tv/membership",
@@ -429,7 +452,6 @@ fn twitch_hides_hostmasks_and_has_no_queries() {
 
     // Regular IRC keeps the mask.
     let mut h = Harness::new(NetworkKind::Irc, &[]);
-    h.app.config.general.show_joins_parts = "all".into();
     h.connect();
     h.lines(&[":srv 001 me :hi", ":srv 376 me :end", ":me!u@h JOIN #c", ":bob!b@example.org JOIN #c"]);
     let c = h.buffer("#c");

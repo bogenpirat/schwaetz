@@ -1832,20 +1832,15 @@ impl App {
     ) {
         let net = &self.networks[&net_id];
         let cm = net.session.casemapping();
-        let twitch = net.is_twitch();
-        let mode = self.config.general.show_joins_parts.as_str();
         let window = self.config.general.smart_filter_secs as i64 * 1000;
         let filtered = !own
-            && match mode {
+            && match net.cfg.joins_parts_mode() {
                 "none" => true,
                 "all" => false,
-                _ => {
-                    twitch
-                        || self
-                            .buffer(bid)
-                            .and_then(|b| b.last_spoke.get(cm.fold(&user.nick).as_ref()))
-                            .is_none_or(|t| time - *t > window)
-                }
+                _ => self
+                    .buffer(bid)
+                    .and_then(|b| b.last_spoke.get(cm.fold(&user.nick).as_ref()))
+                    .is_none_or(|t| time - *t > window),
             };
         if history && self.buffer(bid).is_some_and(|b| b.has_equivalent(time, &user.nick, &text)) {
             // Replayed by the server (event-playback) and already shown live.

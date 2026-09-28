@@ -39,6 +39,7 @@ auto_connect = true
 | `twitch_popout` | Twitch: "Open stream" (topic bar button, channel menu) opens the popout player instead of the channel page |
 | `twitch_live_first` | Twitch: list live channels before offline ones in the sidebar, each group in your arranged order |
 | `unread_badges` | Unread badges for this network: `all`, `highlights` or `none` (unset: as in `[appearance]`) |
+| `joins_parts` | Joins, parts, quits and nick changes of others: `all`, `smart` (only for people who spoke within `smart_filter_secs`) or `none` (unset: `none` on Twitch, `all` elsewhere) |
 | `channel_order` | Sidebar order of the channels; drag channels in the sidebar to arrange them (empty = alphabetical, unlisted channels go last) |
 
 Secrets: `/secret <network> sasl <password>`, `/secret <network> pass <password>`,
@@ -74,9 +75,8 @@ offered, if any API token is available. 7TV/FFZ/BTTV emotes come from scripts, s
 ## General (`[general]`)
 
 `nick`, `alt_nicks`, `username`, `realname`, `quit_message`, `part_message`,
-`scrollback_lines` (in memory; older lines load from history), `show_joins_parts`
-(`smart` shows joins/parts only for people who spoke recently, `all`, `none`),
-`smart_filter_secs`, `ctcp_replies`, `log_to_files`, `history_days` (0 = keep forever),
+`scrollback_lines` (in memory; older lines load from history), `smart_filter_secs` (for a
+network's `joins_parts = "smart"`), `ctcp_replies`, `log_to_files`, `history_days` (0 = keep forever),
 `confirm_paste_lines`, `remember_channels`, `minimize_to_tray`, `close_to_tray`,
 `copy_on_select` (on by default: text you select in the chat goes to the clipboard right away,
 no Ctrl+C needed).
