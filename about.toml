@@ -1,0 +1,23 @@
+# cargo-about configuration: collects the licenses of the crates compiled into schwaetz.exe into
+# THIRD-PARTY-LICENSES.html for release builds. A dependency whose license is not listed here
+# fails the build; only add licenses compatible with GPL-3.0-only.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "Zlib",
+    "BSL-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    # schwätz's own crates; about.hbs leaves them out of the listing.
+    "GPL-3.0-only",
+]
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+workarounds = ["ring"]

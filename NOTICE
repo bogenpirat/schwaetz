@@ -1,0 +1,32 @@
+schwätz, a native IRC client for Windows
+Copyright (C) 2026 julian <https://github.com/bogenpirat/schwaetz>
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License, version 3 only, as
+published by the Free Software Foundation.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+Public License for more details.
+
+You should have received a copy of the GNU General Public License along
+with this program, in the file LICENSE. If not, see
+<https://www.gnu.org/licenses/>.
+
+
+Additional terms under section 7(b) of the GNU General Public License
+
+You must preserve the author attribution "schwätz by bog
+<https://github.com/bogenpirat/schwaetz>" in the Appropriate Legal
+Notices displayed by the program and in this file, in all copies and in
+all modified versions you convey.
+
+
+Third-party material
+
+The IRC parser conformance vectors in tests/fixtures come from
+ircdocs/parser-tests (CC0), see tests/fixtures/LICENSE-parser-tests.
+
+Release builds ship THIRD-PARTY-LICENSES.html with the licenses of the
+Rust crates compiled into schwaetz.exe.

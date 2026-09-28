@@ -399,6 +399,10 @@ impl Ui {
         let sb = self.app.status_buffer;
         let lines = [
             format!("Welcome to schwätz {}.", env!("CARGO_PKG_VERSION")),
+            // Appropriate Legal Notices (GPL-3.0 section 5(d)); the attribution is required by NOTICE.
+            "schwätz by bog <https://github.com/bogenpirat/schwaetz> · Copyright (C) 2026 · free software under \
+             the GNU GPL v3 with ABSOLUTELY NO WARRANTY, see LICENSE and NOTICE."
+                .to_owned(),
             "Connect with /connect irc.libera.chat (or a configured network name), then /join #channel.".to_owned(),
             "Ctrl+J quick switcher · Alt+1…9 switch buffers · Alt+A next activity · Ctrl+W close · /help lists commands.".to_owned(),
             format!("Settings live in {} — edit with /set section.key value.", self.paths.config_file().display()),
@@ -408,7 +412,9 @@ impl Ui {
                 self.app.print(sb, LineKind::Status, "", &l);
             }
         } else {
-            self.app.print(sb, LineKind::Status, "", &lines[0]);
+            for l in &lines[..2] {
+                self.app.print(sb, LineKind::Status, "", l);
+            }
         }
     }
 

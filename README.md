@@ -12,7 +12,7 @@ Modern IRCv3, bouncers and Twitch, in one small executable.</p>
 [![Downloads](https://img.shields.io/github/downloads/bogenpirat/schwaetz/total)](https://github.com/bogenpirat/schwaetz/releases)
 ![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![License: MIT](https://img.shields.io/github/license/bogenpirat/schwaetz)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/github/license/bogenpirat/schwaetz)](LICENSE)
 
 [**Download**](https://github.com/bogenpirat/schwaetz/releases/latest) ·
 [Features](#features) ·
@@ -63,8 +63,3 @@ cargo build --release
 
 Tests, the Twitch app setup and the project layout are described in
 [docs/development.md](docs/development.md).
-
-## License
-
-[MIT](LICENSE). The IRC parser conformance vectors in `tests/fixtures` come from
-[ircdocs/parser-tests](https://github.com/ircdocs/parser-tests) (CC0).

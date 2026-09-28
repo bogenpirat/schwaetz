@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>schwätz third-party licenses</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 "Segoe UI", system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }
+  pre { white-space: pre-wrap; font-size: 13px; padding: 1rem; border: 1px solid #8884; border-radius: 6px; }
+  ul.used-by { columns: 3 14rem; }
+  h2 { margin-top: 2.5rem; }
+</style>
+</head>
+<body>
+<h1>Third-party licenses</h1>
+<p>schwätz is licensed under the GNU General Public License, version 3 (see <code>LICENSE</code>
+and <code>NOTICE</code>). It includes the following Rust crates, which are available under the
+licenses below.</p>
+<ul>
+{{#each overview}}{{#unless (eq id "GPL-3.0-only")}}  <li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+{{/unless}}{{/each}}</ul>
+{{!-- GPL-3.0-only is schwätz's own license (the workspace crates), already shipped as LICENSE. --}}
+{{#each licenses}}{{#unless (eq id "GPL-3.0-only")}}
+<h2 id="{{id}}">{{name}}</h2>
+<p>Used by:</p>
+<ul class="used-by">
+{{#each used_by}}  <li><a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">{{crate.name}} {{crate.version}}</a></li>
+{{/each}}</ul>
+<pre>{{text}}</pre>
+{{/unless}}{{/each}}
+</body>
+</html>

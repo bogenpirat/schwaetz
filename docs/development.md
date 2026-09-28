@@ -42,6 +42,13 @@ arm64 zips with checksums. Its tag must match the workspace version in `Cargo.to
 `[workspace.package] version`, build once so `Cargo.lock` follows, commit, push, then run it with
 `v<version>` (pre-release suffixes like `v0.1.0-rc.1` are allowed).
 
+## Licenses
+
+schwätz is GPL-3.0-only, so every dependency must be under a compatible license. The Release
+workflow runs [cargo-about](https://github.com/EmbarkStudios/cargo-about), which fails on any
+license not listed in `about.toml`, and ships its output as `THIRD-PARTY-LICENSES.html`. To check
+before releasing, run `cargo about generate about.hbs -o THIRD-PARTY-LICENSES.html`.
+
 ## Layout
 
 | Crate            | Purpose                                                                 |
