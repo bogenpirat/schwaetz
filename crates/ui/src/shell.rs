@@ -1149,11 +1149,11 @@ impl Ui {
         self.after_update();
     }
 
-    /// Middle-click on a sidebar row, like on a browser tab: closes the channel right away (leaving
-    /// it first if joined).
+    /// Middle-click on a sidebar row, like on a browser tab: closes the channel, query or other
+    /// buffer right away (leaving a joined channel first). Networks stay.
     fn middle_click_buffer(&mut self, id: BufferId) {
         let Some(b) = self.app.buffer(id) else { return };
-        if b.kind != BufferKind::Channel {
+        if b.kind == BufferKind::Server || id == self.app.status_buffer {
             return;
         }
         self.app.input(id, "/close");
@@ -1927,8 +1927,9 @@ impl Ui {
         }
         if let Some(id) = self.sidebar.hit(x, y) {
             self.switch_to(id);
-            // Channels can be dragged to another position within their network.
-            if self.app.buffer(id).is_some_and(|b| b.kind == BufferKind::Channel) {
+            // Channels can be dragged to another position within their network, networks among
+            // each other.
+            if self.app.buffer(id).is_some_and(|b| matches!(b.kind, BufferKind::Channel | BufferKind::Server)) {
                 self.drag = Drag::Row(id);
                 self.row_drag_from = y;
             }
@@ -2190,7 +2191,11 @@ impl Ui {
         if let Drag::Row(id) = self.drag
             && let Some(d) = self.sidebar.drag.take()
         {
-            self.app.move_channel(id, d.before);
+            if self.app.buffer(id).is_some_and(|b| b.kind == BufferKind::Server) {
+                self.app.move_network(id, d.before);
+            } else {
+                self.app.move_channel(id, d.before);
+            }
             self.after_update();
         }
         if self.drag == Drag::Chat {

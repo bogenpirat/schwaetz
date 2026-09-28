@@ -21,6 +21,10 @@ const LABEL_W: f32 = 190.0;
 const NAV_W: f32 = 190.0;
 const FOOTER_H: f32 = 68.0;
 const OPTION_H: f32 = 32.0;
+/// Space for the caption above a group of related fields: at the top of a page, and further
+/// down (with room to set it apart from the fields above).
+const GROUP_H: f32 = 30.0;
+const GROUP_GAP: f32 = 14.0;
 
 pub enum FieldKind {
     Header,
@@ -51,6 +55,15 @@ pub struct Field {
     pub kind: FieldKind,
     /// A text field for a file path, with a "Browse…" button that opens a file dialog.
     pub browse: bool,
+    /// Starts a group of related fields on its page, captioned with this.
+    pub group: Option<&'static str>,
+}
+
+impl Field {
+    /// Starts a captioned group of related fields with this one.
+    fn group(self, caption: &'static str) -> Field {
+        Field { group: Some(caption), ..self }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,7 +132,7 @@ pub struct Form {
 fn text(key: &'static str, label: &'static str, hint: &'static str, value: &str) -> Field {
     let mut e = Editor::single_line();
     e.set_text(value, None);
-    Field { browse: false, key, label, hint, kind: FieldKind::Text(e) }
+    Field { browse: false, group: None, key, label, hint, kind: FieldKind::Text(e) }
 }
 
 /// A text field for a file path, with a "Browse…" button.
@@ -131,21 +144,22 @@ fn password(key: &'static str, label: &'static str, stored: bool) -> Field {
     let mut e = Editor::single_line();
     e.masked = true;
     let hint = if stored { "stored — leave empty to keep" } else { "not set" };
-    Field { browse: false, key, label, hint, kind: FieldKind::Password(e, stored) }
+    Field { browse: false, group: None, key, label, hint, kind: FieldKind::Password(e, stored) }
 }
 
 fn check(key: &'static str, label: &'static str, value: bool) -> Field {
-    Field { browse: false, key, label, hint: "", kind: FieldKind::Check(value) }
+    Field { browse: false, group: None, key, label, hint: "", kind: FieldKind::Check(value) }
 }
 
 fn choice(key: &'static str, label: &'static str, options: Vec<(&'static str, &'static str)>, value: &str) -> Field {
     let idx = options.iter().position(|(v, _)| *v == value).unwrap_or(0);
-    Field { browse: false, key, label, hint: "", kind: FieldKind::Choice(options, idx) }
+    Field { browse: false, group: None, key, label, hint: "", kind: FieldKind::Choice(options, idx) }
 }
 
 fn button(key: &'static str, label: &'static str, caption: &str) -> Field {
     Field {
         browse: false,
+        group: None,
         key,
         label,
         hint: "",
@@ -156,7 +170,7 @@ fn button(key: &'static str, label: &'static str, caption: &str) -> Field {
 fn script_row(s: &ScriptInfo) -> Field {
     let (note, failed) = script_note(s);
     let kind = FieldKind::Script { name: s.name.clone(), file: s.file.clone(), enabled: s.enabled, note, failed };
-    Field { browse: false, key: "script", label: "", hint: "", kind }
+    Field { browse: false, group: None, key: "script", label: "", hint: "", kind }
 }
 
 /// One line about a script's state, and whether it is an error.
@@ -217,7 +231,7 @@ fn sections(fields: &[Field]) -> Vec<(&'static str, Range<usize>)> {
 }
 
 fn header(label: &'static str) -> Field {
-    Field { browse: false, key: "", label, hint: "", kind: FieldKind::Header }
+    Field { browse: false, group: None, key: "", label, hint: "", kind: FieldKind::Header }
 }
 
 impl Form {
@@ -370,7 +384,7 @@ impl Form {
             header("Authentication"),
             choice(
                 "sasl",
-                "SASL",
+                "Mechanism",
                 vec![
                     ("none", "None"),
                     ("plain", "PLAIN"),
@@ -378,12 +392,13 @@ impl Form {
                     ("external", "EXTERNAL (certificate)"),
                 ],
                 sasl,
-            ),
+            )
+            .group("SASL (services account)"),
             text("sasl_username", "Account", "empty = nickname", c.sasl_username.as_deref().unwrap_or("")),
             password("sasl_password", "Account password", has(SecretKind::Sasl)),
             check("sasl_required", "Disconnect if SASL fails", c.sasl_required),
-            text("znc_user", "ZNC user", "ZNC only", c.znc_user.as_deref().unwrap_or("")),
-            text("znc_network", "ZNC network", "ZNC only", c.znc_network.as_deref().unwrap_or("")),
+            text("znc_user", "ZNC user", "your ZNC username", c.znc_user.as_deref().unwrap_or("")).group("ZNC login"),
+            text("znc_network", "ZNC network", "network name in ZNC", c.znc_network.as_deref().unwrap_or("")),
             header("Channels"),
             text("autojoin", "Join on connect", "#chan, #other key", &c.autojoin.join(", ")),
             text("perform", "Commands on connect", "separate with ;  e.g. /mode $nick +x", &c.perform.join(" ; ")),
@@ -705,6 +720,27 @@ impl Form {
         self.sections.get(self.section).map_or(0..0, |(_, r)| r.clone())
     }
 
+    /// Height of field `i`'s row, including the caption of a group it starts.
+    fn row_h(&self, i: usize) -> f32 {
+        ROW_H + self.caption_h(i)
+    }
+
+    /// Space above field `i` for the caption of a group it starts.
+    fn caption_h(&self, i: usize) -> f32 {
+        match self.fields[i].group {
+            None => 0.0,
+            Some(_) if i == self.page().start => GROUP_H,
+            Some(_) => GROUP_H + GROUP_GAP,
+        }
+    }
+
+    /// Top of field `i`'s row (below its group caption) relative to the top of the page.
+    fn row_top(&self, i: usize) -> f32 {
+        let page = self.page();
+        let before: f32 = (page.start..i.max(page.start)).map(|j| self.row_h(j)).sum();
+        before + self.caption_h(i)
+    }
+
     pub fn render(&mut self, p: &Painter, text: &Text, th: &Theme, win: Rect, caret_on: bool, anims: &Anims) {
         let f = &text.fonts;
         p.fill(win, th.overlay_scrim);
@@ -739,7 +775,7 @@ impl Form {
             p.text(&l, list.x + 16.0, list.y - 36.0, th.text);
         }
         let page = self.page();
-        self.content_h = page.len() as f32 * ROW_H + 8.0;
+        self.content_h = page.clone().map(|i| self.row_h(i)).sum::<f32>() + 8.0;
         self.list_h = list.h;
         let overflow = self.content_h > list.h;
         self.scroll = self.scroll.clamp(0.0, (self.content_h - list.h).max(0.0));
@@ -751,7 +787,19 @@ impl Form {
         for i in page {
             let focused = i == self.focus;
             let open = self.dropdown.is_some_and(|(d, _)| d == i);
+            let caption_h = self.caption_h(i);
             let field = &mut self.fields[i];
+            if let Some(caption) = field.group {
+                // Caption with a hairline running to the right edge, just above the group.
+                let cl = text.layout(caption, &f.ui_semibold, list.w - 32.0, 20.0);
+                let cm = text::metrics(&cl);
+                let cy = y + caption_h - GROUP_H + 8.0;
+                p.text(&cl, list.x + 16.0, cy, th.text_dim);
+                let lx = list.x + 16.0 + cm.width + 12.0;
+                let ly = (cy + cm.height / 2.0).round() + 0.5;
+                p.line(lx, ly, list.right() - 16.0, ly, th.border, 1.0);
+                y += caption_h;
+            }
             let row = Rect::new(list.x, y, list.w, ROW_H);
             let mut text_dx = 0.0;
             let mut ctl = Rect::new(list.x + LABEL_W, y + 4.0, ctl_w, ROW_H - 8.0);
@@ -1146,9 +1194,10 @@ impl Form {
 
     /// Scrolls so the focused row is visible.
     fn reveal_focus(&mut self) {
-        let top = self.focus.saturating_sub(self.page().start) as f32 * ROW_H;
+        let top = self.row_top(self.focus);
         if top < self.scroll {
-            self.scroll = top;
+            // A group's first field brings its caption into view too.
+            self.scroll = top - self.caption_h(self.focus);
         } else if top + ROW_H + 8.0 > self.scroll + self.list_h {
             self.scroll = top + ROW_H + 8.0 - self.list_h;
         }

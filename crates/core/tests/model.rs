@@ -759,6 +759,42 @@ fn channels_can_be_arranged_and_twitch_can_list_live_first() {
 }
 
 #[test]
+fn networks_can_be_arranged() {
+    let mut h = Harness::new(NetworkKind::Irc, &[]);
+    for name in ["Second", "Third"] {
+        h.app.upsert_network(
+            None,
+            NetworkConfig { name: name.into(), servers: vec!["irc.x:6667".into()], ..Default::default() },
+        );
+    }
+    let names = |h: &Harness| -> Vec<String> { h.app.network_order().iter().map(|n| n.cfg.name.clone()).collect() };
+    let server =
+        |h: &Harness, name: &str| h.app.network_order().iter().find(|n| n.cfg.name == name).unwrap().server_buffer;
+    assert_eq!(names(&h), ["Test", "Second", "Third"]);
+    h.app.take_effects();
+
+    // Drag Third above Test, then Test to the end.
+    h.app.move_network(server(&h, "Third"), Some(server(&h, "Test")));
+    assert_eq!(names(&h), ["Third", "Test", "Second"]);
+    h.app.move_network(server(&h, "Test"), None);
+    assert_eq!(names(&h), ["Third", "Second", "Test"]);
+    let saved: Vec<&str> = h.app.config.networks.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(saved, ["Third", "Second", "Test"], "saved");
+    assert!(h.app.take_effects().iter().any(|e| matches!(e, Effect::SaveConfig)));
+
+    // The sidebar follows: each server buffer before its network's other buffers.
+    let order = h.app.sidebar_order();
+    let pos = |id| order.iter().position(|x| *x == id).unwrap();
+    assert!(
+        pos(server(&h, "Third")) < pos(server(&h, "Second")) && pos(server(&h, "Second")) < pos(server(&h, "Test"))
+    );
+
+    // Dropping a network where it already is changes nothing.
+    h.app.move_network(server(&h, "Second"), Some(server(&h, "Test")));
+    assert!(h.app.take_effects().iter().all(|e| !matches!(e, Effect::SaveConfig)));
+}
+
+#[test]
 fn live_chat_lines_keep_their_raw_form() {
     let mut h = Harness::new(NetworkKind::Twitch, &[]);
     h.connect();

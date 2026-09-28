@@ -40,18 +40,19 @@ struct Row {
     id: BufferId,
     y: f32,
     h: f32,
-    /// Network of the row and whether it is a channel (only channels can be rearranged, and
-    /// only within their network).
+    /// Network of the row and whether it is a channel (channels can be rearranged only within
+    /// their network) or a network (rearranged together with its buffers).
     net: Option<u32>,
     channel: bool,
+    server: bool,
 }
 
-/// A channel row being dragged to a new position.
+/// A channel or network row being dragged to a new position.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RowDrag {
     pub id: BufferId,
-    /// Where it would land: before this channel (`None` = at the end), and the y of the line
-    /// showing it.
+    /// Where it would land: before this channel or network (`None` = at the end), and the y of
+    /// the line showing it.
     pub before: Option<BufferId>,
     pub line_y: f32,
 }
@@ -64,7 +65,7 @@ pub struct Sidebar {
     pub hover: Option<BufferId>,
     content_h: f32,
     buttons: Vec<(SidebarButton, Rect)>,
-    /// Channel being dragged (set by the shell while the mouse moves).
+    /// Channel or network being dragged (set by the shell while the mouse moves).
     pub drag: Option<RowDrag>,
     /// Settings buttons at the right end of network rows: (server buffer, bounds).
     net_buttons: Vec<(BufferId, Rect)>,
@@ -85,6 +86,8 @@ impl Sidebar {
         let x = list.x;
         let w = list.w;
         let mut y = list.y + 10.0 - self.scroll;
+        // A dragged network fades with all its buffers.
+        let dragged = self.drag.and_then(|d| app.buffer(d.id)).map(|b| (b.id, b.kind == BufferKind::Server, b.network));
         for id in app.sidebar_order() {
             // The status buffer lives in the footer.
             if id == app.status_buffer {
@@ -169,19 +172,20 @@ impl Sidebar {
                     p.circle(r.x + 25.0, r.y + r.h / 2.0 + 5.0, 2.5, th.online);
                 }
             }
-            if self.drag.is_some_and(|d| d.id == id) {
+            if dragged.is_some_and(|(d, server, net)| d == id || (server && net.is_some() && net == b.network)) {
                 // The dragged row stays in place, faded, until dropped.
                 p.fill(Rect::new(x, row_y, w, row_h), with_alpha(th.backdrop_opaque, 0.6));
             }
-            let (net, channel) = (b.network.map(|n| n.0), b.kind == BufferKind::Channel);
-            self.rows.push(Row { id, y: row_y, h: row_h, net, channel });
+            let (net, channel, server) = (b.network.map(|n| n.0), b.kind == BufferKind::Channel, is_net);
+            self.rows.push(Row { id, y: row_y, h: row_h, net, channel, server });
             y += h;
         }
         self.content_h = y + self.scroll - list.y;
         if let Some(d) = self.drag {
-            // Where the dragged channel would land.
-            let lx = x + 8.0 + INDENT;
-            p.fill_round(Rect::new(lx, d.line_y - 1.0, w - 16.0 - INDENT, 2.0), 1.0, th.accent);
+            // Where the dragged row would land (networks at their own, unindented level).
+            let indent = if dragged.is_some_and(|(_, server, _)| server) { 0.0 } else { INDENT };
+            let lx = x + 8.0 + indent;
+            p.fill_round(Rect::new(lx, d.line_y - 1.0, w - 16.0 - indent, 2.0), 1.0, th.accent);
             p.circle(lx, d.line_y, 3.0, th.accent);
         }
         p.unclip();
@@ -226,10 +230,14 @@ impl Sidebar {
         self.rows.iter().find(|r| y >= r.y && y < r.y + r.h).map(|r| r.id)
     }
 
-    /// Where a dragged channel would be dropped for pointer height `y`: before which channel of
-    /// its network (`None` = after the last), and the y of the insertion line.
+    /// Where a dragged channel or network would be dropped for pointer height `y`: before which
+    /// channel of its network or which network (`None` = after the last), and the y of the
+    /// insertion line.
     pub fn drop_target(&self, dragged: BufferId, y: f32) -> Option<(Option<BufferId>, f32)> {
-        let d = self.rows.iter().find(|r| r.id == dragged && r.channel)?;
+        let d = self.rows.iter().find(|r| r.id == dragged && (r.channel || r.server))?;
+        if d.server {
+            return self.network_drop_target(y);
+        }
         let group: Vec<&Row> = self.rows.iter().filter(|r| r.channel && r.net == d.net).collect();
         for r in &group {
             if y < r.y + r.h / 2.0 {
@@ -238,6 +246,28 @@ impl Sidebar {
         }
         let last = group.last()?;
         Some((None, last.y + last.h))
+    }
+
+    /// A network goes before the first network whose block (its row and buffers) has its middle
+    /// below `y`; the line sits in the gap above that network's row.
+    fn network_drop_target(&self, y: f32) -> Option<(Option<BufferId>, f32)> {
+        let mut blocks: Vec<(BufferId, f32, f32)> = Vec::new();
+        for r in &self.rows {
+            if r.server {
+                blocks.push((r.id, r.y, r.y + r.h));
+            } else if let Some(last) = blocks.last_mut()
+                && r.net.is_some()
+            {
+                last.2 = r.y + r.h;
+            }
+        }
+        for (id, top, bottom) in &blocks {
+            if y < (top + bottom) / 2.0 {
+                return Some((Some(*id), top - 3.0));
+            }
+        }
+        let (_, _, bottom) = blocks.last()?;
+        Some((None, bottom + 3.0))
     }
 
     /// The settings button of a network row under the pointer: (server buffer, bounds).

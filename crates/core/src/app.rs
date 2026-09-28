@@ -287,11 +287,18 @@ impl App {
             .map(|b| b.id)
     }
 
+    /// Networks in sidebar order: as arranged in the config, then any not in it.
+    pub fn network_order(&self) -> Vec<&Network> {
+        let mut nets: Vec<&Network> = self.networks.values().collect();
+        nets.sort_by_key(|n| network_rank(&self.config.networks, &n.cfg.name));
+        nets
+    }
+
     /// Buffers in sidebar order: status buffer, then per network its server buffer, channels and
     /// queries (each sorted), then other special buffers.
     pub fn sidebar_order(&self) -> Vec<BufferId> {
         let mut out = vec![self.status_buffer];
-        for net in self.networks.values() {
+        for net in self.network_order() {
             out.push(net.server_buffer);
             let cm = net.session.casemapping();
             let mut chans: Vec<&Buffer> =
@@ -2715,7 +2722,37 @@ fn channel_rank(order: &[String], cm: schwaetz_proto::CaseMapping, name: &str) -
     order.iter().position(|c| cm.eq(c, name)).unwrap_or(usize::MAX)
 }
 
+/// Position of a network in the config's list (`usize::MAX` if not there).
+fn network_rank(order: &[NetworkConfig], name: &str) -> usize {
+    order.iter().position(|c| c.name.eq_ignore_ascii_case(name)).unwrap_or(usize::MAX)
+}
+
 impl App {
+    /// Moves a network (given by its server buffer) in the sidebar to just before the network of
+    /// server buffer `before`, or to the end with `None`, by rearranging the config's list.
+    pub fn move_network(&mut self, id: BufferId, before: Option<BufferId>) {
+        if before == Some(id) {
+            return;
+        }
+        let name_of = |app: &App, b: BufferId| {
+            app.buffer(b)
+                .filter(|b| b.kind == BufferKind::Server)
+                .and_then(|_| app.network_of(b))
+                .map(|n| n.cfg.name.clone())
+        };
+        let Some(moving) = name_of(self, id) else { return };
+        let target = before.and_then(|t| name_of(self, t));
+        let nets = &mut self.config.networks;
+        let Some(from) = nets.iter().position(|c| c.name.eq_ignore_ascii_case(&moving)) else { return };
+        let cfg = nets.remove(from);
+        let at = target.and_then(|t| nets.iter().position(|c| c.name.eq_ignore_ascii_case(&t))).unwrap_or(nets.len());
+        nets.insert(at, cfg);
+        if at != from {
+            self.effects.push(Effect::SaveConfig);
+        }
+        self.dirty.sidebar = true;
+    }
+
     /// Moves a channel in the sidebar to just before `before` (another channel of the same
     /// network), or to the end with `None`, and stores the resulting order in the config.
     pub fn move_channel(&mut self, id: BufferId, before: Option<BufferId>) {
