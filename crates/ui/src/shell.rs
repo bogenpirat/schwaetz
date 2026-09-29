@@ -134,6 +134,7 @@ pub struct Ui {
     caret_on: bool,
     last_click: (u32, f32, f32, u32),
     tray: Tray,
+    toasts: crate::toast::Toasts,
     notify_buffer: Option<BufferId>,
     high_surrogate: Option<u16>,
     last_typing_sent: i64,
@@ -262,6 +263,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         let sb = app.status_buffer;
         app.print(sb, LineKind::Status, "", &note);
     }
+    let toasts = crate::toast::Toasts::new(hwnd, paths.cache_dir.join("notification-icon.png"));
     let mut ui = Box::new(Ui {
         hwnd,
         gfx: Some(gfx),
@@ -290,6 +292,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         caret_on: true,
         last_click: (0, 0.0, 0.0, 0),
         tray: Tray::new(hwnd),
+        toasts,
         notify_buffer: None,
         high_surrogate: None,
         last_typing_sent: 0,
@@ -907,8 +910,10 @@ impl Ui {
     fn effect(&mut self, e: Effect) {
         match e {
             Effect::Notify { title, body, buffer } => {
-                self.notify_buffer = Some(buffer);
-                self.tray.notify(&title, &body);
+                if self.toasts.show(&title, &body, buffer).is_err() {
+                    self.notify_buffer = Some(buffer);
+                    self.tray.notify(&title, &body);
+                }
             }
             Effect::FlashTaskbar => unsafe {
                 let fi = FLASHWINFO {
@@ -2991,6 +2996,11 @@ impl Ui {
                 }
                 self.after_update();
                 self.invalidate();
+                Some(LRESULT(0))
+            }
+            crate::toast::WM_APP_TOAST => {
+                self.restore();
+                self.switch_to(BufferId(wp.0 as u32));
                 Some(LRESULT(0))
             }
             WM_APP_NET => {

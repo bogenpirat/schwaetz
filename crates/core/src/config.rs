@@ -148,6 +148,8 @@ impl Default for Appearance {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Notifications {
+    /// Desktop notifications at all; networks can additionally opt out.
+    pub enabled: bool,
     pub on_highlight: bool,
     pub on_private: bool,
     /// Also notify when the window is focused but another buffer is active.
@@ -158,7 +160,14 @@ pub struct Notifications {
 
 impl Default for Notifications {
     fn default() -> Self {
-        Notifications { on_highlight: true, on_private: true, when_focused: false, flash_taskbar: true, sound: false }
+        Notifications {
+            enabled: false,
+            on_highlight: true,
+            on_private: true,
+            when_focused: false,
+            flash_taskbar: true,
+            sound: false,
+        }
     }
 }
 
@@ -286,6 +295,8 @@ pub struct NetworkConfig {
     pub reconnect_max_attempts: Option<u32>,
     pub rejoin_on_kick: bool,
     pub previews: bool,
+    /// Desktop notifications for this network (with `notifications.enabled`).
+    pub notifications: bool,
     /// Flood control: lines allowed in a burst, then one per `flood_interval_ms`.
     pub flood_burst: u32,
     pub flood_interval_ms: u64,
@@ -351,6 +362,7 @@ impl Default for NetworkConfig {
             reconnect_max_attempts: None,
             rejoin_on_kick: false,
             previews: true,
+            notifications: true,
             flood_burst: 5,
             flood_interval_ms: 2000,
             twitch_client_id: None,

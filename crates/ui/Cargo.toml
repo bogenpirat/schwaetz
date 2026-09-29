@@ -22,6 +22,9 @@ schwaetz-media.workspace = true
 [dependencies.windows]
 workspace = true
 features = [
+    "Data_Xml_Dom",
+    "Foundation",
+    "UI_Notifications",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
@@ -52,4 +55,5 @@ features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Networking_NetworkListManager",
+    "Win32_Security",
 ]

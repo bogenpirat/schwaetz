@@ -32,7 +32,7 @@ auto_connect = true
 | `client_cert` | PEM file for CertFP / SASL EXTERNAL |
 | `accept_invalid_certs` | Accept self-signed certificates (not recommended) |
 | `reconnect`, `reconnect_max_attempts` | Automatic reconnects (exponential backoff) |
-| `rejoin_on_kick`, `sasl_required`, `previews` | As named |
+| `rejoin_on_kick`, `sasl_required`, `previews`, `notifications` | As named |
 | `flood_burst`, `flood_interval_ms` | Flood control: burst size, then one line per interval |
 | `live_check_secs` | Twitch: seconds between live checks (default 120, at least 30) |
 | `twitch_colors` | Twitch: show the name colors users picked in the chat, exactly as Twitch sends them (your own included; default on), whatever `colored_nicks` says |
@@ -148,7 +148,9 @@ Alias variables: `$1`…`$9`, `$1-` (rest), `$nick`, `$channel`, `$network`.
 
 ## Notifications, previews
 
-`[notifications]`: `on_highlight`, `on_private`, `when_focused`, `flash_taskbar`.
+`[notifications]`: `enabled` (desktop notifications; off by default), `on_highlight`, `on_private`,
+`when_focused`, `flash_taskbar`. A network's `notifications = false` keeps it quiet even when
+they are on.
 Per buffer: `/notify all|default|highlights|mute` or the sidebar menu.
 
 `[previews]`: `enabled` (off by default), `auto_load` (otherwise click "Show preview"),

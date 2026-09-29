@@ -20,6 +20,7 @@ impl Harness {
         let mut cfg = Config::default();
         cfg.general.nick = "me".into();
         cfg.general.log_to_files = false;
+        cfg.notifications.enabled = true;
         cfg.networks.push(NetworkConfig {
             name: "Test".into(),
             kind,
@@ -237,6 +238,31 @@ fn history_gap_fill_dedupes() {
     assert!(msgs.iter().all(|l| l.flags.has(LineFlags::HISTORY)));
     // History never notifies.
     assert!(!h.app.take_effects().iter().any(|e| matches!(e, Effect::Notify { .. })));
+}
+
+#[test]
+fn notifications_switch_globally_and_per_network() {
+    assert!(!Config::default().notifications.enabled);
+    let mut h = Harness::new(NetworkKind::Irc, &["#c"]);
+    h.register();
+    h.lines(&[":me!u@h JOIN #c"]);
+    h.app.take_effects();
+    let notified = |h: &mut Harness| h.app.take_effects().iter().any(|e| matches!(e, Effect::Notify { .. }));
+
+    h.lines(&[":x!x@h PRIVMSG #c :me: one"]);
+    assert!(notified(&mut h));
+
+    h.app.config.notifications.enabled = false;
+    h.lines(&[":x!x@h PRIVMSG #c :me: two"]);
+    assert!(!notified(&mut h));
+
+    h.app.config.notifications.enabled = true;
+    h.app.networks.get_mut(&h.net).unwrap().cfg.notifications = false;
+    h.lines(&[":x!x@h PRIVMSG #c :me: three"]);
+    let effects = h.app.take_effects();
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Notify { .. })));
+    // The taskbar still flashes.
+    assert!(effects.iter().any(|e| matches!(e, Effect::FlashTaskbar)));
 }
 
 #[test]

@@ -1537,7 +1537,9 @@ impl App {
         if self.buffer(buffer).is_some_and(|b| b.notify == NotifyLevel::Mute) {
             return;
         }
-        self.effects.push(Effect::Notify { title, body, buffer });
+        if n.enabled && self.network_of(buffer).is_none_or(|net| net.cfg.notifications) {
+            self.effects.push(Effect::Notify { title, body, buffer });
+        }
         if n.flash_taskbar && !self.focused {
             self.effects.push(Effect::FlashTaskbar);
         }

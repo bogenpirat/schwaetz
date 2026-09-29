@@ -405,6 +405,7 @@ impl Form {
             text("perform", "Commands on connect", "separate with ;  e.g. /mode $nick +x", &c.perform.join(" ; ")),
             check("rejoin_on_kick", "Rejoin when kicked", c.rejoin_on_kick),
             check("previews", "Link previews on this network", c.previews),
+            check("notifications", "Desktop notifications on this network", c.notifications),
             choice(
                 "unread_badges",
                 "Unread badges",
@@ -482,6 +483,7 @@ impl Form {
             check("remember_channels", "Keep \"Join on connect\" in sync with joins and parts", g.remember_channels),
             check("copy_on_select", "Copy selected chat text right away", g.copy_on_select),
             header("Notifications"),
+            check("notifications_enabled", "Show desktop notifications", c.notifications.enabled),
             check("on_highlight", "Notify on highlights", c.notifications.on_highlight),
             check("on_private", "Notify on private messages", c.notifications.on_private),
             check("flash_taskbar", "Flash the taskbar", c.notifications.flash_taskbar),
@@ -643,6 +645,7 @@ impl Form {
             perform: self.list("perform", ';'),
             rejoin_on_kick: self.check("rejoin_on_kick"),
             previews: self.check("previews"),
+            notifications: self.check("notifications"),
             live_check_secs,
             twitch_colors: self.check("twitch_colors"),
             twitch_popout: self.check("twitch_popout"),
@@ -699,6 +702,7 @@ impl Form {
         c.general.ctcp_replies = self.check("ctcp_replies");
         c.general.remember_channels = self.check("remember_channels");
         c.general.copy_on_select = self.check("copy_on_select");
+        c.notifications.enabled = self.check("notifications_enabled");
         c.notifications.on_highlight = self.check("on_highlight");
         c.notifications.on_private = self.check("on_private");
         c.notifications.flash_taskbar = self.check("flash_taskbar");
