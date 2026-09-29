@@ -226,6 +226,7 @@ impl App {
         let b = self.buffer(buffer)?;
         let mut nicks: Vec<String> = Vec::new();
         let mut channels: Vec<String> = Vec::new();
+        let at_mentions = b.network.and_then(|n| self.networks.get(&n)).is_some_and(|n| n.is_twitch());
         if let Some(net) = b.network.and_then(|n| self.networks.get(&n)) {
             let cm = net.session.casemapping();
             if let Some(ch) = net.session.channel(&b.name) {
@@ -250,7 +251,7 @@ impl App {
         commands.extend(self.extra_commands.iter().map(|(n, _)| n.clone()));
         commands.sort();
         commands.dedup();
-        let c = Candidates { nicks: &nicks, channels: &channels, commands: &commands };
+        let c = Candidates { nicks: &nicks, channels: &channels, commands: &commands, at_mentions };
         self.completer.complete(input, cursor, &c, backwards)
     }
 

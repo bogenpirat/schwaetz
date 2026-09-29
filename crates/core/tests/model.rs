@@ -1112,3 +1112,25 @@ fn emote_fetches_follow_provider_switches() {
     want.sort_by_key(|j| format!("{j:?}"));
     assert_eq!(got, want);
 }
+
+#[test]
+fn at_mentions_complete_as_mentions_on_twitch_only() {
+    let mut irc = Harness::new(NetworkKind::Irc, &[]);
+    irc.register();
+    irc.lines(&[":me!u@h JOIN #c", ":irc.test 353 me = #c :me alice", ":irc.test 366 me #c :End"]);
+    let c = irc.buffer("#c");
+    assert_eq!(irc.app.complete(c, "@al", 3, false), Some(("alice: ".to_owned(), 7)));
+
+    let mut tw = Harness::new(NetworkKind::Twitch, &[]);
+    tw.connect();
+    tw.lines(&[
+        ":tmi.twitch.tv 001 me :hi",
+        ":tmi.twitch.tv 376 me :>",
+        ":me!me@me.tmi.twitch.tv JOIN #xqc",
+        ":me.tmi.twitch.tv 353 me = #xqc :me alice",
+        ":me.tmi.twitch.tv 366 me #xqc :End",
+    ]);
+    let c = tw.buffer("#xqc");
+    assert_eq!(tw.app.complete(c, "@al", 3, false), Some(("@alice ".to_owned(), 7)));
+    assert_eq!(tw.app.complete(c, "al", 2, false), Some(("alice: ".to_owned(), 7)), "without @ as before");
+}

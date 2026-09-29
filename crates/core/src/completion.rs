@@ -5,6 +5,8 @@ pub struct Candidates<'a> {
     pub nicks: &'a [String],
     pub channels: &'a [String],
     pub commands: &'a [String],
+    /// `@nick` completes to `@nick` (Twitch style) rather than to the nick alone.
+    pub at_mentions: bool,
 }
 
 struct State {
@@ -61,6 +63,9 @@ impl Completer {
             EMOJI.iter().filter(|(name, _)| name.starts_with(w)).map(|(_, e)| (*e).to_owned()).collect()
         } else if word.starts_with(['#', '&']) {
             c.channels.iter().filter(|ch| ch.to_lowercase().starts_with(&lw)).cloned().collect()
+        } else if let Some(w) = lw.strip_prefix('@').filter(|_| c.at_mentions) {
+            // Mentions stay mentions: `@nick` and a space, even at the start of the line.
+            c.nicks.iter().filter(|n| n.to_lowercase().starts_with(w)).map(|n| format!("@{n}")).collect()
         } else {
             let w = lw.trim_start_matches('@');
             c.nicks.iter().filter(|n| n.to_lowercase().starts_with(w)).cloned().collect()
@@ -177,7 +182,7 @@ mod tests {
     #[test]
     fn nick_at_start_and_cycling() {
         let (n, ch, cmd) = cands();
-        let c = Candidates { nicks: &n, channels: &ch, commands: &cmd };
+        let c = Candidates { nicks: &n, channels: &ch, commands: &cmd, at_mentions: false };
         let mut comp = Completer::default();
         let (s, cur) = comp.complete("al", 2, &c, false).unwrap();
         assert_eq!((s.as_str(), cur), ("alice: ", 7));
@@ -188,9 +193,32 @@ mod tests {
     }
 
     #[test]
+    fn at_mentions_keep_their_form_where_used() {
+        let (n, ch, cmd) = cands();
+        // IRC: the `@` goes, as usual for addressing someone.
+        let irc = Candidates { nicks: &n, channels: &ch, commands: &cmd, at_mentions: false };
+        let mut comp = Completer::default();
+        assert_eq!(comp.complete("@al", 3, &irc, false).unwrap(), ("alice: ".to_owned(), 7));
+        let c = Candidates { at_mentions: true, ..irc };
+        let mut comp = Completer::default();
+        let (s, cur) = comp.complete("@al", 3, &c, false).unwrap();
+        assert_eq!((s.as_str(), cur), ("@alice ", 7));
+        let (s, cur) = comp.complete(&s, cur, &c, false).unwrap();
+        assert_eq!((s.as_str(), cur), ("@Albert ", 8));
+        let (s, cur) = comp.complete(&s, cur, &c, false).unwrap();
+        assert_eq!(s, "@alice ");
+        let (s, _) = comp.complete(&s, cur, &c, true).unwrap();
+        assert_eq!(s, "@Albert ", "backwards too");
+        comp.reset();
+        assert_eq!(comp.complete("hi @BO there", 6, &c, false).unwrap(), ("hi @bob there".to_owned(), 7));
+        comp.reset();
+        assert!(comp.complete("@zz", 3, &c, false).is_none());
+    }
+
+    #[test]
     fn mid_line_and_suffix_preserved() {
         let (n, ch, cmd) = cands();
-        let c = Candidates { nicks: &n, channels: &ch, commands: &cmd };
+        let c = Candidates { nicks: &n, channels: &ch, commands: &cmd, at_mentions: false };
         let mut comp = Completer::default();
         let (s, cur) = comp.complete("hi bo there", 5, &c, false).unwrap();
         assert_eq!(s, "hi bob there");
@@ -200,7 +228,7 @@ mod tests {
     #[test]
     fn commands_channels_emoji() {
         let (n, ch, cmd) = cands();
-        let c = Candidates { nicks: &n, channels: &ch, commands: &cmd };
+        let c = Candidates { nicks: &n, channels: &ch, commands: &cmd, at_mentions: false };
         let mut comp = Completer::default();
         assert_eq!(comp.complete("/ju", 3, &c, false).unwrap().0, "/jump ");
         comp.reset();
