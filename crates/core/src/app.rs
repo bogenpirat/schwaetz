@@ -2902,14 +2902,16 @@ impl App {
         let room = b.room_id.as_deref();
         let sets = &n.emotes.sets;
         let mut out = Vec::new();
-        let twitch = |owner: &str| SetKey::Twitch { owner: owner.to_owned() };
-        out.extend(room.and_then(|r| sets.get(&twitch(r))).map(|s| (EmoteSource::Twitch, true, s)));
-        let mut others: Vec<_> = sets
+        let mut twitch: Vec<_> = sets
             .iter()
-            .filter(|(k, _)| matches!(k, SetKey::Twitch { owner } if Some(owner.as_str()) != room))
+            .filter_map(|(k, s)| match k {
+                SetKey::Twitch { owner, emote_type } => Some((Some(owner.as_str()) == room, owner, emote_type, s)),
+                _ => None,
+            })
             .collect();
-        others.sort_by(|a, b| a.0.cmp(b.0));
-        out.extend(others.into_iter().map(|(_, s)| (EmoteSource::Twitch, false, s)));
+        // The channel's own first.
+        twitch.sort_by(|a, b| (!a.0, a.1, a.2).cmp(&(!b.0, b.1, b.2)));
+        out.extend(twitch.into_iter().map(|(own, _, t, s)| (EmoteSource::Twitch(t.clone()), own, s)));
         let rooms = room.map(|r| Some(r.to_owned())).into_iter().chain([None]);
         for room in rooms {
             let own = room.is_some();
@@ -2930,7 +2932,7 @@ impl App {
     pub fn emote_lookup(&self, buffer: BufferId) -> Lookup<'_> {
         let mut l = Lookup::default();
         for (source, _, set) in self.channel_emote_sets(buffer) {
-            if source == EmoteSource::Twitch { &mut l.own } else { &mut l.sets }.push(set);
+            if matches!(source, EmoteSource::Twitch(_)) { &mut l.own } else { &mut l.sets }.push(set);
         }
         l
     }

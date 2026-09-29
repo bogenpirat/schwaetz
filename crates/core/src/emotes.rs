@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, HashMap};
 /// Where an emote comes from.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Source {
-    Twitch,
+    /// Twitch, with Helix's `emote_type` ("subscriptions", "follower", "globals" …).
+    Twitch(String),
     Provider(Provider),
     /// A script's set, named as the script called it.
     Script(String),
@@ -28,7 +29,7 @@ impl Source {
     /// Completion order: Twitch, then the providers (in [`Provider::ALL`] order), then scripts.
     fn order(&self) -> u8 {
         match self {
-            Source::Twitch => 0,
+            Source::Twitch(_) => 0,
             Source::Provider(p) => 1 + Provider::ALL.iter().position(|x| x == p).unwrap_or(0) as u8,
             Source::Script(_) => 1 + Provider::ALL.len() as u8,
         }
@@ -36,10 +37,27 @@ impl Source {
 
     fn name(&self) -> &str {
         match self {
-            Source::Twitch => "Twitch",
+            Source::Twitch(_) => "Twitch",
             Source::Provider(p) => p.short_name(),
             Source::Script(name) => name,
         }
+    }
+}
+
+/// What a Twitch emote is, from its `emote_type`, as shown in the completion list.
+fn twitch_kind(emote_type: &str) -> &str {
+    match emote_type {
+        "subscriptions" => "sub",
+        "follower" => "follower",
+        "bitstier" => "bits",
+        "hypetrain" => "hype train",
+        "limitedtime" => "limited",
+        "rewards" | "channelpoints" => "reward",
+        "prime" => "Prime",
+        "turbo" => "Turbo",
+        "twofactor" => "2FA",
+        "globals" | "smilies" | "" => "global",
+        other => other,
     }
 }
 
@@ -61,10 +79,15 @@ impl EmoteEntry {
         self.source.order() + if self.channel { 0 } else { 10 }
     }
 
-    /// Short source label for the list ("Twitch", "7TV", …; global ones marked as such).
+    /// Short source label for the list: Twitch emotes by kind ("Twitch · sub", "Twitch ·
+    /// global" …), others by source, global ones marked as such ("7TV", "7TV · global").
     pub fn label(&self) -> String {
         let name = self.source.name();
-        if self.channel { name.to_owned() } else { format!("{name} · global") }
+        match &self.source {
+            Source::Twitch(emote_type) => format!("{name} · {}", twitch_kind(emote_type)),
+            _ if self.channel => name.to_owned(),
+            _ => format!("{name} · global"),
+        }
     }
 }
 
@@ -167,8 +190,9 @@ pub enum Job {
 /// Where a fetched set is kept. Channels are identified by their Twitch user id (`room-id`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SetKey {
-    /// Twitch emotes the user may use, by the channel they belong to ("0": global ones).
-    Twitch { owner: String },
+    /// Twitch emotes the user may use, by the channel they belong to ("0": global ones) and
+    /// their `emote_type`.
+    Twitch { owner: String, emote_type: String },
     /// A provider's global set (`room` = None) or a channel's.
     Provider { provider: Provider, room: Option<String> },
 }
@@ -207,7 +231,7 @@ pub fn fetch(req: EmoteRequest) -> EmoteResult {
                 };
                 crate::helix::user_emotes(token, follower_of).map(|(list, limited)| {
                     out.twitch_limited |= limited;
-                    by_owner(list)
+                    twitch_sets(list)
                 })
             }
             Job::Provider { provider, room_id } => provider
@@ -222,14 +246,14 @@ pub fn fetch(req: EmoteRequest) -> EmoteResult {
     out
 }
 
-/// Twitch emotes, grouped by the channel they belong to.
-fn by_owner(list: Vec<crate::helix::TwitchEmote>) -> Vec<(SetKey, NamedUrls)> {
-    let mut sets: BTreeMap<String, NamedUrls> = BTreeMap::new();
+/// Twitch emotes, grouped by the channel they belong to and their type.
+fn twitch_sets(list: Vec<crate::helix::TwitchEmote>) -> Vec<(SetKey, NamedUrls)> {
+    let mut sets: BTreeMap<(String, String), NamedUrls> = BTreeMap::new();
     for e in list {
         let url = e.url();
-        sets.entry(e.owner_id).or_default().push((e.name, url));
+        sets.entry((e.owner_id, e.emote_type)).or_default().push((e.name, url));
     }
-    sets.into_iter().map(|(owner, list)| (SetKey::Twitch { owner }, list)).collect()
+    sets.into_iter().map(|((owner, emote_type), list)| (SetKey::Twitch { owner, emote_type }, list)).collect()
 }
 
 #[cfg(test)]
@@ -243,7 +267,7 @@ mod tests {
     #[test]
     fn channel_first_then_third_party_then_global() {
         let (twitch, seven, ffz, bttv) = (
-            Source::Twitch,
+            Source::Twitch("subscriptions".into()),
             Source::Provider(Provider::SevenTv),
             Source::Provider(Provider::Ffz),
             Source::Provider(Provider::Bttv),
@@ -270,6 +294,19 @@ mod tests {
     }
 
     #[test]
+    fn twitch_emotes_are_labelled_by_kind() {
+        let label = |emote_type: &str, channel| e("A", Source::Twitch(emote_type.into()), channel).label();
+        assert_eq!(label("subscriptions", false), "Twitch · sub");
+        assert_eq!(label("subscriptions", true), "Twitch · sub", "the channel's own too");
+        assert_eq!(label("follower", true), "Twitch · follower");
+        assert_eq!(label("bitstier", false), "Twitch · bits");
+        assert_eq!(label("globals", false), "Twitch · global");
+        assert_eq!(label("smilies", false), "Twitch · global");
+        assert_eq!(label("", false), "Twitch · global", "the global list has no types");
+        assert_eq!(label("somethingnew", false), "Twitch · somethingnew");
+    }
+
+    #[test]
     fn looks_up_words() {
         let set = |pairs: &[(&str, &str)]| EmoteSet {
             emotes: pairs.iter().map(|(n, u)| (n.to_string(), u.to_string())).collect(),
@@ -285,16 +322,25 @@ mod tests {
     }
 
     #[test]
-    fn twitch_emotes_by_owner() {
-        let t = |id: &str, name: &str, owner: &str| crate::helix::TwitchEmote {
+    fn twitch_emotes_by_owner_and_type() {
+        let t = |id: &str, name: &str, owner: &str, emote_type: &str| crate::helix::TwitchEmote {
             id: id.into(),
             name: name.into(),
             owner_id: owner.into(),
-            emote_type: String::new(),
+            emote_type: emote_type.into(),
         };
-        let sets = by_owner(vec![t("1", "xqcL", "71092938"), t("25", "Kappa", "0"), t("2", "xqcW", "71092938")]);
+        let sets = twitch_sets(vec![
+            t("1", "xqcL", "71092938", "subscriptions"),
+            t("25", "Kappa", "0", "globals"),
+            t("2", "xqcW", "71092938", "subscriptions"),
+            t("3", "xqcHi", "71092938", "follower"),
+        ]);
+        let key = |owner: &str, emote_type: &str| SetKey::Twitch { owner: owner.into(), emote_type: emote_type.into() };
         let keys: Vec<_> = sets.iter().map(|(k, l)| (k.clone(), l.len())).collect();
-        assert_eq!(keys, [(SetKey::Twitch { owner: "0".into() }, 1), (SetKey::Twitch { owner: "71092938".into() }, 2)]);
+        assert_eq!(
+            keys,
+            [(key("0", "globals"), 1), (key("71092938", "follower"), 1), (key("71092938", "subscriptions"), 2)]
+        );
         assert_eq!(sets[0].1[0].1, crate::twitch::emote_url("25", true));
     }
 }

@@ -70,7 +70,8 @@ messages show your Twitch emotes too (Twitch doesn't mark them in what you send)
 followed by a letter or digit at the start of a word lists matching emotes above the input (↑/↓,
 PgUp/PgDn to move, Tab or Enter to insert, Esc to close; clicking an entry inserts it too). Order:
 the channel's Twitch emotes you may use (follower, subscriber tiers), then the channel's 7TV, FFZ
-and BTTV emotes, then global ones. Twitch emotes need the Twitch sign-in (it asks for permission to
+and BTTV emotes, then global ones. Each entry names its source; Twitch emotes by kind (`sub`,
+`follower`, `bits`, `global` …). Twitch emotes need the Twitch sign-in (it asks for permission to
 read your emotes; sign-ins from before this was added need to sign in once more); without it only
 Twitch's global emotes are offered, if any API token is available. Emotes are loaded once per
 connection, so emotes from a new subscription or follow are offered after reconnecting.

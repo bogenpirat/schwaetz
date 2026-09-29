@@ -928,7 +928,10 @@ fn emotes_are_fetched_once_per_connection_and_ordered() {
     h.app.switch_to(c);
     assert!(emote_jobs(&mut h).is_empty());
 
-    let twitch = |owner: &str| SetKey::Twitch { owner: owner.into() };
+    let twitch = |owner: &str| {
+        let emote_type = if owner == "0" { "globals" } else { "subscriptions" };
+        SetKey::Twitch { owner: owner.into(), emote_type: emote_type.into() }
+    };
     let r = emote_result(
         &h,
         connection,
@@ -949,6 +952,9 @@ fn emotes_are_fetched_once_per_connection_and_ordered() {
     assert_eq!(names(&h, "lu"), ["LULW", "LUL", "LULE"], "7TV channel, then Twitch global, then BTTV global");
     assert_eq!(names(&h, "x"), ["xqcL", "xqcOther"], "the channel's Twitch emotes first");
     assert_eq!(h.app.emote_completions(c, "Scripted", 1)[0].label(), "mine");
+    let labels = |q: &str| h.app.emote_completions(c, q, 50).into_iter().map(|e| e.label()).collect::<Vec<_>>();
+    assert_eq!(labels("x"), ["Twitch · sub", "Twitch · sub"], "subscriber emotes, the channel's and others'");
+    assert_eq!(labels("LUL")[1], "Twitch · global");
     // Only Twitch channels complete emotes.
     let server = h.app.network(h.net).unwrap().server_buffer;
     assert!(h.app.emote_completions(server, "lu", 50).is_empty());
