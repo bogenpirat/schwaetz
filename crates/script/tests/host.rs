@@ -167,7 +167,7 @@ fn list_switch_off_and_failed_scripts() {
 
     // Examples are added once.
     let added = host.install_examples().unwrap();
-    assert!(added.contains(&"7tv-emotes".to_string()), "{added:?}");
+    assert!(added.contains(&"highlights".to_string()), "{added:?}");
     assert!(dir.join("classic.js").exists());
     assert!(host.install_examples().unwrap().is_empty());
 }

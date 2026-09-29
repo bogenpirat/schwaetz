@@ -875,11 +875,113 @@ fn twitch_topic_keeps_status_game_and_viewers_apart_from_the_title() {
     assert_eq!(joined, format!("{}{}{}", t.lead, t.body, t.tail));
 }
 
+/// The emote fetches requested since the last call.
+fn emote_requests(h: &mut Harness) -> Vec<schwaetz_core::emotes::EmoteRequest> {
+    h.app
+        .take_effects()
+        .into_iter()
+        .filter_map(|e| match e {
+            Effect::FetchEmotes(r) => Some(r),
+            _ => None,
+        })
+        .collect()
+}
+
+fn emote_jobs(h: &mut Harness) -> Vec<Vec<schwaetz_core::emotes::Job>> {
+    emote_requests(h).into_iter().map(|r| r.jobs).collect()
+}
+
+fn emote_result(
+    h: &Harness,
+    connection: u64,
+    sets: Vec<(schwaetz_core::emotes::SetKey, &[&str])>,
+) -> schwaetz_core::emotes::EmoteResult {
+    let sets = sets
+        .into_iter()
+        .map(|(key, names)| (key, names.iter().map(|n| (n.to_string(), format!("https://e/{n}"))).collect()))
+        .collect();
+    schwaetz_core::emotes::EmoteResult { network: h.net, connection, sets, twitch_limited: false }
+}
+
 #[test]
-fn emote_completion_orders_channel_twitch_then_third_party_then_global() {
-    use schwaetz_core::emotes::EmoteEntry;
+fn emotes_are_fetched_once_per_connection_and_ordered() {
+    use schwaetz_core::emote_providers::Provider;
+    use schwaetz_core::emotes::{Job, SetKey};
+    let provider = |provider, room: Option<&str>| Job::Provider { provider, room_id: room.map(str::to_owned) };
     let mut h = Harness::new(NetworkKind::Twitch, &[]);
     h.app.set_twitch_api_token(h.net, Some("tok".into()));
+    h.connect();
+    h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>"]);
+    // On connecting: the user's Twitch emotes (the same in every channel) apart from the rest.
+    let reqs = emote_requests(&mut h);
+    let connection = reqs[0].connection;
+    let jobs: Vec<_> = reqs.into_iter().map(|r| r.jobs).collect();
+    assert_eq!(jobs, [vec![Job::TwitchUser], Provider::ALL.map(|p| provider(p, None)).to_vec()]);
+
+    // A joined channel's provider sets are fetched right away (they show in its chat) …
+    h.lines(&[":me!me@me.tmi.twitch.tv JOIN #xqc", "@room-id=71092938 :tmi.twitch.tv ROOMSTATE #xqc"]);
+    assert_eq!(emote_jobs(&mut h), [Provider::ALL.map(|p| provider(p, Some("71092938"))).to_vec()]);
+    // … its follower emotes when it is looked at, once per connection.
+    let c = h.buffer("#xqc");
+    h.app.switch_to(c);
+    assert_eq!(emote_jobs(&mut h), [vec![Job::TwitchFollower { room_id: "71092938".into() }]]);
+    h.app.switch_to(c);
+    assert!(emote_jobs(&mut h).is_empty());
+
+    let twitch = |owner: &str| SetKey::Twitch { owner: owner.into() };
+    let r = emote_result(
+        &h,
+        connection,
+        vec![
+            (twitch("71092938"), &["xqcL"]),
+            (twitch("0"), &["LUL"]),
+            (twitch("123"), &["xqcOther"]),
+            (SetKey::Provider { provider: Provider::SevenTv, room: Some("71092938".into()) }, &["LULW"]),
+            (SetKey::Provider { provider: Provider::Bttv, room: None }, &["LULE"]),
+            (SetKey::Provider { provider: Provider::SevenTv, room: Some("999".into()) }, &["LULother"]),
+        ],
+    );
+    h.app.on_emote_result(r);
+    h.app.set_script_emotes("mine", Some("#xqc"), vec![("Scripted".into(), "https://s/Scripted".into())]);
+
+    let names =
+        |h: &Harness, q: &str| h.app.emote_completions(c, q, 50).into_iter().map(|e| e.name).collect::<Vec<_>>();
+    assert_eq!(names(&h, "lu"), ["LULW", "LUL", "LULE"], "7TV channel, then Twitch global, then BTTV global");
+    assert_eq!(names(&h, "x"), ["xqcL", "xqcOther"], "the channel's Twitch emotes first");
+    assert_eq!(h.app.emote_completions(c, "Scripted", 1)[0].label(), "mine");
+    // Only Twitch channels complete emotes.
+    let server = h.app.network(h.net).unwrap().server_buffer;
+    assert!(h.app.emote_completions(server, "lu", 50).is_empty());
+
+    // In the chat: the providers' and scripts' sets; Twitch emotes in our own lines only.
+    let l = h.app.emote_lookup(c);
+    assert_eq!(l.get("LULW", false), Some("https://e/LULW"));
+    assert_eq!(l.get("Scripted", false), Some("https://s/Scripted"));
+    assert_eq!(l.get("LULother", false), None, "another channel's set");
+    assert_eq!((l.get("xqcL", false), l.get("xqcL", true)), (None, Some("https://e/xqcL")));
+
+    // A reconnect starts over; results from the old connection are dropped.
+    h.app.on_net_event(NetEvent::Disconnected { id: h.net, reason: "gone".into(), retry_in: None }, h.now);
+    assert!(names(&h, "x").is_empty());
+    h.app.on_emote_result(emote_result(&h, connection, vec![(twitch("0"), &["stale"])]));
+    assert!(names(&h, "stale").is_empty());
+    h.connect();
+    h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>"]);
+    let reqs = emote_requests(&mut h);
+    assert!(reqs.iter().all(|r| r.connection != connection));
+    assert_eq!(reqs[0].jobs, [Job::TwitchUser]);
+    // Rejoining the channel being looked at fetches its sets and follower emotes again.
+    h.lines(&[":me!me@me.tmi.twitch.tv JOIN #xqc", "@room-id=71092938 :tmi.twitch.tv ROOMSTATE #xqc"]);
+    let jobs = emote_jobs(&mut h).concat();
+    assert!(jobs.contains(&Job::TwitchFollower { room_id: "71092938".into() }) && jobs.len() == 4, "{jobs:?}");
+}
+
+#[test]
+fn provider_emotes_follow_the_network_settings() {
+    use schwaetz_core::emote_providers::Provider;
+    use schwaetz_core::emotes::{Job, SetKey};
+    // No API token: 7TV/FFZ/BTTV need none.
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
     h.connect();
     h.lines(&[
         ":tmi.twitch.tv 001 me :hi",
@@ -887,44 +989,120 @@ fn emote_completion_orders_channel_twitch_then_third_party_then_global() {
         ":me!me@me.tmi.twitch.tv JOIN #xqc",
         "@room-id=71092938 :tmi.twitch.tv ROOMSTATE #xqc",
     ]);
+    let reqs = emote_requests(&mut h);
+    assert!(reqs.iter().flat_map(|r| &r.jobs).all(|j| matches!(j, Job::Provider { .. })));
     let c = h.buffer("#xqc");
-    h.app.take_effects();
+    let global = |p| SetKey::Provider { provider: p, room: None };
+    let sets = vec![(global(Provider::SevenTv), &["Clap"][..]), (global(Provider::Bttv), &["KEKW"][..])];
+    h.app.on_emote_result(emote_result(&h, reqs[0].connection, sets));
+    assert_eq!(h.app.emote_lookup(c).find("Clap KEKW", false), [(0, 4, "https://e/Clap"), (5, 9, "https://e/KEKW")]);
 
-    // Looking at the channel fetches its Twitch emotes (once).
-    h.app.switch_to(c);
-    let reqs: Vec<_> = h
-        .app
-        .take_effects()
-        .into_iter()
-        .filter_map(|e| match e {
-            Effect::TwitchEmotes(r) => Some(r),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(reqs.len(), 1);
-    assert_eq!((reqs[0].channel.as_str(), reqs[0].broadcaster_id.as_str()), ("#xqc", "71092938"));
-    h.app.switch_to(c);
-    assert!(!h.app.take_effects().iter().any(|e| matches!(e, Effect::TwitchEmotes(_))), "in flight");
+    // Switched-off providers are neither shown nor completed; completion can be switched off.
+    let mut cfg = h.app.networks[&h.net].cfg.clone();
+    let name = cfg.name.clone();
+    cfg.emotes_bttv = false;
+    h.app.upsert_network(Some(&name), cfg.clone());
+    assert_eq!(h.app.emote_lookup(c).get("KEKW", false), None);
+    assert!(h.app.emote_completions(c, "KEKW", 5).is_empty());
+    assert_eq!(h.app.emote_completions(c, "Clap", 5).len(), 1);
+    cfg.emote_completion = false;
+    h.app.upsert_network(Some(&name), cfg.clone());
+    assert!(h.app.emote_completions(c, "Clap", 5).is_empty());
+    assert_eq!(h.app.emote_lookup(c).get("Clap", false), Some("https://e/Clap"), "still shown");
 
-    let twitch = |name: &str, channel: bool| EmoteEntry {
-        name: name.into(),
-        url: format!("https://e/{name}"),
-        provider: "twitch".into(),
-        channel,
+    // Switching a provider back on fetches what was skipped, for every channel.
+    let mut h2 = Harness::new(NetworkKind::Twitch, &[]);
+    let mut cfg = h2.app.networks[&h2.net].cfg.clone();
+    cfg.emotes_ffz = false;
+    let name = cfg.name.clone();
+    h2.app.upsert_network(Some(&name), cfg.clone());
+    h2.connect();
+    h2.lines(&[
+        ":tmi.twitch.tv 001 me :hi",
+        ":tmi.twitch.tv 376 me :>",
+        ":me!me@me.tmi.twitch.tv JOIN #xqc",
+        "@room-id=71092938 :tmi.twitch.tv ROOMSTATE #xqc",
+    ]);
+    assert!(emote_jobs(&mut h2).concat().iter().all(|j| !matches!(j, Job::Provider { provider: Provider::Ffz, .. })));
+    cfg.emotes_ffz = true;
+    h2.app.upsert_network(Some(&name), cfg);
+    let ffz = |room: Option<&str>| Job::Provider { provider: Provider::Ffz, room_id: room.map(str::to_owned) };
+    assert_eq!(emote_jobs(&mut h2).concat(), [ffz(None), ffz(Some("71092938"))]);
+}
+
+#[test]
+fn emote_fetches_follow_provider_switches() {
+    use schwaetz_core::emote_providers::Provider;
+    use schwaetz_core::emotes::Job;
+    let room = "71092938";
+    let job = |provider, room: Option<&str>| Job::Provider { provider, room_id: room.map(str::to_owned) };
+    let both = |ps: &[Provider]| -> Vec<Job> {
+        let mut jobs: Vec<Job> = ps.iter().map(|&p| job(p, None)).collect();
+        jobs.extend(ps.iter().map(|&p| job(p, Some(room))));
+        jobs
     };
-    h.app.on_emote_result(schwaetz_core::helix::EmoteResult {
-        network: h.net,
-        channel: "#xqc".into(),
-        result: Ok((vec![twitch("xqcL", true), twitch("LUL", false)], false)),
-    });
-    h.app.set_script_emotes("7tv", Some("#xqc"), vec![("LULW".into(), "https://7tv/LULW".into())]);
-    h.app.set_script_emotes("bttv", None, vec![("LULE".into(), "https://bttv/LULE".into())]);
-    h.app.set_script_emotes("7tv", Some("#other"), vec![("LULother".into(), "https://7tv/x".into())]);
+    let join = [":me!me@me.tmi.twitch.tv JOIN #xqc", "@room-id=71092938 :tmi.twitch.tv ROOMSTATE #xqc"];
+    let ready = [":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>"];
 
-    let names = |q: &str| h.app.emote_completions(c, q, 50).into_iter().map(|e| e.name).collect::<Vec<_>>();
-    assert_eq!(names("lu"), ["LULW", "LUL", "LULE"], "7TV channel, then Twitch global, then BTTV global");
-    assert_eq!(names("x"), ["xqcL"]);
-    // Only Twitch channels complete emotes.
-    let server = h.app.network(h.net).unwrap().server_buffer;
-    assert!(h.app.emote_completions(server, "lu", 50).is_empty());
+    // All providers off: nothing is fetched from them; Twitch's own emotes still are.
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.app.set_twitch_api_token(h.net, Some("tok".into()));
+    let mut cfg = h.app.networks[&h.net].cfg.clone();
+    let name = cfg.name.clone();
+    for p in Provider::ALL {
+        cfg.set_emote_provider(p, false);
+    }
+    h.app.upsert_network(Some(&name), cfg.clone());
+    h.connect();
+    h.lines(&ready);
+    h.lines(&join);
+    h.app.switch_to(h.buffer("#xqc"));
+    let jobs = emote_jobs(&mut h).concat();
+    assert!(jobs.iter().all(|j| !matches!(j, Job::Provider { .. })), "{jobs:?}");
+    assert!(jobs.contains(&Job::TwitchUser) && jobs.contains(&Job::TwitchFollower { room_id: room.into() }));
+
+    // Switching two on fetches exactly their global and channel sets.
+    cfg.emotes_7tv = true;
+    cfg.emotes_bttv = true;
+    h.app.upsert_network(Some(&name), cfg.clone());
+    let mut got = emote_jobs(&mut h).concat();
+    let mut want = both(&[Provider::SevenTv, Provider::Bttv]);
+    got.sort_by_key(|j| format!("{j:?}"));
+    want.sort_by_key(|j| format!("{j:?}"));
+    assert_eq!(got, want);
+
+    // Switching one off, or emote completion, fetches nothing.
+    cfg.emotes_bttv = false;
+    h.app.upsert_network(Some(&name), cfg.clone());
+    assert!(emote_jobs(&mut h).is_empty());
+    cfg.emote_completion = false;
+    h.app.upsert_network(Some(&name), cfg.clone());
+    assert!(emote_jobs(&mut h).is_empty());
+
+    // Switching it back on during the same connection uses what was fetched already.
+    cfg.emotes_bttv = true;
+    h.app.upsert_network(Some(&name), cfg.clone());
+    assert!(emote_jobs(&mut h).is_empty());
+
+    // A reconnect fetches the providers switched on, and only those.
+    cfg.emotes_bttv = false;
+    h.app.upsert_network(Some(&name), cfg.clone());
+    h.app.on_net_event(NetEvent::Disconnected { id: h.net, reason: "gone".into(), retry_in: None }, h.now);
+    h.connect();
+    h.lines(&ready);
+    h.lines(&join);
+    let jobs = emote_jobs(&mut h).concat();
+    let providers: Vec<_> = jobs.into_iter().filter(|j| matches!(j, Job::Provider { .. })).collect();
+    assert_eq!(providers, both(&[Provider::SevenTv]));
+
+    // Channels joined while a provider is off get its sets once it is switched on.
+    h.lines(&[":me!me@me.tmi.twitch.tv JOIN #other", "@room-id=42 :tmi.twitch.tv ROOMSTATE #other"]);
+    assert_eq!(emote_jobs(&mut h).concat(), [job(Provider::SevenTv, Some("42"))]);
+    cfg.emotes_ffz = true;
+    h.app.upsert_network(Some(&name), cfg);
+    let mut got = emote_jobs(&mut h).concat();
+    got.sort_by_key(|j| format!("{j:?}"));
+    let mut want = vec![job(Provider::Ffz, None), job(Provider::Ffz, Some(room)), job(Provider::Ffz, Some("42"))];
+    want.sort_by_key(|j| format!("{j:?}"));
+    assert_eq!(got, want);
 }

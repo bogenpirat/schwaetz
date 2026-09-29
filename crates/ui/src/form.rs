@@ -6,6 +6,7 @@ use crate::gfx::{Painter, Rect, with_alpha};
 use crate::text::{self, Text};
 use crate::theme::Theme;
 use schwaetz_core::config::{NetworkKind, SaslMechanism};
+use schwaetz_core::emote_providers::Provider;
 use schwaetz_core::secrets::{self, SecretKind};
 use schwaetz_core::services::ScriptInfo;
 use schwaetz_core::{Config, NetworkConfig};
@@ -428,7 +429,13 @@ impl Form {
             check("twitch_colors", "Show Twitch name colors in the chat", c.twitch_colors),
             check("twitch_popout", "Open streams in the popout player", c.twitch_popout),
             check("twitch_live_first", "List live channels first", c.twitch_live_first),
+            check("emote_completion", "Suggest emotes when typing :", c.emote_completion).group("Emotes"),
         ];
+        let providers = Provider::ALL.map(|p| {
+            let (key, label) = p.setting();
+            check(key, label, c.emote_provider(p))
+        });
+        let fields = fields.into_iter().chain(providers).collect();
         let title = match cfg {
             Some(c) => format!("Edit network — {}", c.name),
             None => "Add network".into(),
@@ -614,7 +621,7 @@ impl Form {
         let base = base.cloned().unwrap_or_else(|| {
             if kind == NetworkKind::Twitch { NetworkConfig::twitch() } else { NetworkConfig::default() }
         });
-        let cfg = NetworkConfig {
+        let mut cfg = NetworkConfig {
             name,
             kind,
             servers,
@@ -640,12 +647,16 @@ impl Form {
             twitch_colors: self.check("twitch_colors"),
             twitch_popout: self.check("twitch_popout"),
             twitch_live_first: self.check("twitch_live_first"),
+            emote_completion: self.check("emote_completion"),
             unread_badges: Some(self.choice("unread_badges")).filter(|m| !m.is_empty()).map(str::to_owned),
             joins_parts: Some(self.choice("joins_parts"))
                 .filter(|m| *m != NetworkConfig::default_joins_parts(kind))
                 .map(str::to_owned),
             ..base
         };
+        for p in Provider::ALL {
+            cfg.set_emote_provider(p, self.check(p.setting().0));
+        }
         Ok((cfg, secrets))
     }
 

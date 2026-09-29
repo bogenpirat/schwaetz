@@ -8,6 +8,7 @@ pub mod buffer;
 pub mod commands;
 pub mod completion;
 pub mod config;
+pub mod emote_providers;
 pub mod emotes;
 pub mod filter;
 pub mod helix;

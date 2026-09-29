@@ -107,9 +107,9 @@ declare namespace schwaetz {
   /** Shows inline images over parts of a line (e.g. third-party emotes). */
   function decorate(line: LineEvent, emotes: Emote[]): void;
   /**
-   * Offers emotes for `:` completion in Twitch channels, replacing what this provider offered
-   * before for that channel (`"#channel"`) or globally (`null`). Known providers ("7tv", "ffz",
-   * "bttv") are ordered after the channel's Twitch emotes: channel sets first, then global ones.
+   * Adds emotes to Twitch channels: their words show as images in the chat and are offered for
+   * `:` completion. Replaces what this provider set before for that channel (`"#channel"`) or
+   * globally (`null`). Known providers ("7tv", "ffz", "bttv") are listed as such in completion.
    */
   function setEmotes(provider: string, channel: string | null, emotes: { name: string; url: string }[]): void;
   /** Desktop notification (respects focus and mute settings). */

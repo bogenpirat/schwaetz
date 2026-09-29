@@ -29,7 +29,7 @@ pub struct Config {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Scripts {
-    /// File names without extension (e.g. "7tv-emotes").
+    /// File names without extension (e.g. "highlights").
     pub disabled: Vec<String>,
 }
 
@@ -303,6 +303,14 @@ pub struct NetworkConfig {
     /// Twitch: list live channels before offline ones in the sidebar (each group keeping
     /// `channel_order`).
     pub twitch_live_first: bool,
+    /// Twitch: typing `:` and a letter lists matching emotes to insert.
+    pub emote_completion: bool,
+    /// Twitch: show (and complete) the channels' and global 7TV emotes.
+    pub emotes_7tv: bool,
+    /// Twitch: show (and complete) BetterTTV emotes.
+    pub emotes_bttv: bool,
+    /// Twitch: show (and complete) FrankerFaceZ emotes.
+    pub emotes_ffz: bool,
     /// Sidebar order of the channels, as arranged by dragging (empty: alphabetical). Channels not
     /// listed come after, alphabetically.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -350,6 +358,10 @@ impl Default for NetworkConfig {
             twitch_colors: true,
             twitch_popout: false,
             twitch_live_first: false,
+            emote_completion: true,
+            emotes_7tv: true,
+            emotes_bttv: true,
+            emotes_ffz: true,
             channel_order: Vec::new(),
             unread_badges: None,
             joins_parts: None,
@@ -358,6 +370,25 @@ impl Default for NetworkConfig {
 }
 
 impl NetworkConfig {
+    /// Whether emotes of a third-party provider are shown and completed (Twitch).
+    pub fn emote_provider(&self, p: crate::emote_providers::Provider) -> bool {
+        use crate::emote_providers::Provider;
+        match p {
+            Provider::SevenTv => self.emotes_7tv,
+            Provider::Bttv => self.emotes_bttv,
+            Provider::Ffz => self.emotes_ffz,
+        }
+    }
+
+    pub fn set_emote_provider(&mut self, p: crate::emote_providers::Provider, on: bool) {
+        use crate::emote_providers::Provider;
+        *match p {
+            Provider::SevenTv => &mut self.emotes_7tv,
+            Provider::Bttv => &mut self.emotes_bttv,
+            Provider::Ffz => &mut self.emotes_ffz,
+        } = on;
+    }
+
     pub fn twitch() -> NetworkConfig {
         NetworkConfig {
             name: "Twitch".into(),

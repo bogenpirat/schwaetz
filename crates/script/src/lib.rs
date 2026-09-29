@@ -12,7 +12,7 @@ pub use ts::{transpile, transpile_cached};
 
 use rquickjs::prelude::{Opt, Rest};
 use rquickjs::{Array, CatchResultExt, Coerced, Context, Ctx, Function, Object, Persistent, Runtime, Value};
-use schwaetz_core::buffer::{Emote, LineFlags, LineKind};
+use schwaetz_core::buffer::{Emote, LineFlags, LineKind, add_emote};
 use schwaetz_core::services::{ScriptHost, ScriptInfo};
 use schwaetz_core::{App, BufferId};
 use schwaetz_proto::Message;
@@ -166,7 +166,6 @@ struct FileStatus {
 
 /// Example scripts bundled into the executable (offered on the settings page).
 const EXAMPLES: &[(&str, &str)] = &[
-    ("7tv-emotes.ts", include_str!("../../../scripts/examples/7tv-emotes.ts")),
     ("classic.js", include_str!("../../../scripts/examples/classic.js")),
     ("highlights.ts", include_str!("../../../scripts/examples/highlights.ts")),
 ];
@@ -471,11 +470,8 @@ impl Host {
                             let extra = l.extra_mut();
                             for (s, e, url, name) in emotes {
                                 let (start, end) = (u16_to_byte(s), u16_to_byte(e));
-                                if start < end && !extra.emotes.iter().any(|x| x.start < end && start < x.end) {
-                                    extra.emotes.push(Emote { start, end, url, name });
-                                }
+                                add_emote(&mut extra.emotes, Emote { start, end, url, name });
                             }
-                            extra.emotes.sort_by_key(|e| e.start);
                             b.generation += 1;
                             app.dirty.lines = true;
                         }

@@ -66,7 +66,7 @@ const COMPLETION_ROW: f32 = 32.0;
 
 enum WorkerResult {
     Live(schwaetz_core::helix::LiveResult),
-    Emotes(schwaetz_core::helix::EmoteResult),
+    Emotes(schwaetz_core::emotes::EmoteResult),
     Auth(schwaetz_net::NetworkId, schwaetz_core::twitch_auth::AuthRequest, schwaetz_core::twitch_auth::AuthResponse),
 }
 /// `dwData` tag for WM_COPYDATA messages carrying input for the running instance.
@@ -535,6 +535,8 @@ impl Ui {
             preview_auto: cfg.previews.auto_load,
             allow_hosts: &cfg.previews.allow_hosts,
             replies: app.can_reply(app.active),
+            emotes: app.emote_lookup(app.active),
+            emote_gen: app.emote_gen,
         }
     }
 
@@ -987,8 +989,8 @@ impl Ui {
             Effect::TwitchLive(req) => {
                 self.run_worker("twitch-live", move || WorkerResult::Live(schwaetz_core::helix::check(req)))
             }
-            Effect::TwitchEmotes(req) => {
-                self.run_worker("twitch-emotes", move || WorkerResult::Emotes(schwaetz_core::helix::fetch_emotes(req)))
+            Effect::FetchEmotes(req) => {
+                self.run_worker("emotes", move || WorkerResult::Emotes(schwaetz_core::emotes::fetch(req)))
             }
             Effect::TwitchAuth { network, request } => self.run_worker("twitch-auth", move || {
                 let response = schwaetz_core::twitch_auth::execute(&request);

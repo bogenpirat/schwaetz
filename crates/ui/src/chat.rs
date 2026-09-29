@@ -3,7 +3,7 @@
 use crate::gfx::{Painter, Rect, with_alpha};
 use crate::text::{self, BgRun, Brushes, Text, U16Map};
 use crate::theme::Theme;
-use schwaetz_core::buffer::{Buffer, BufferId, Line, LineFlags, LineKind};
+use schwaetz_core::buffer::{Buffer, BufferId, Emote, Line, LineFlags, LineKind, add_emote};
 use schwaetz_core::time;
 use std::collections::HashMap;
 use windows::Win32::Graphics::Direct2D::ID2D1DeviceContext;
@@ -107,7 +107,7 @@ pub struct ChatView {
     anchor_y: f32,
     cache: HashMap<u64, Cached>,
     /// Chat width, nick column width, graphics and style generation the cache was built for.
-    cache_key: (u32, u32, u64, u64),
+    cache_key: (u32, u32, u64, u64, u64),
     frame: u64,
     drawn: Vec<Drawn>,
     pub selection: Option<(Pos, Pos)>,
@@ -172,6 +172,10 @@ pub struct Ctx<'a> {
     pub allow_hosts: &'a [String],
     /// Messages in this buffer can be replied to.
     pub replies: bool,
+    /// Words shown as emotes in this buffer (7TV/FFZ/BTTV, scripts' sets; Twitch in own lines).
+    pub emotes: schwaetz_core::emotes::Lookup<'a>,
+    /// Changes whenever the emotes do.
+    pub emote_gen: u64,
 }
 
 impl Default for ChatView {
@@ -183,7 +187,7 @@ impl Default for ChatView {
             anchor: None,
             anchor_y: 0.0,
             cache: HashMap::new(),
-            cache_key: (0, 0, 0, 0),
+            cache_key: (0, 0, 0, 0, 0),
             frame: 0,
             drawn: Vec::new(),
             selection: None,
@@ -382,10 +386,17 @@ impl ChatView {
         }
 
         let mut placed = Vec::new();
-        // Inline emotes (Twitch tags or script decorations): byte ranges of the stripped body.
-        if !deleted && let Some(emotes) = line.extra.as_ref().map(|e| &e.emotes).filter(|e| !e.is_empty()) {
+        // Inline emotes (Twitch tags, script decorations, then words from the emote sets): byte
+        // ranges of the stripped body.
+        let mut emotes: Vec<Emote> = line.extra.as_ref().map(|e| e.emotes.clone()).unwrap_or_default();
+        if is_msg && !deleted {
+            for (start, end, url) in c.emotes.find(&body, line.flags.has(LineFlags::OWN)) {
+                add_emote(&mut emotes, Emote { start, end, url: url.to_owned(), name: String::new() });
+            }
+        }
+        if !deleted && !emotes.is_empty() {
             let h = (f.line_height * 1.35).round();
-            for e in emotes {
+            for e in &emotes {
                 if e.end as usize > body.len() || e.start >= e.end || c.images.borrow().failed(&e.url) {
                     continue;
                 }
@@ -606,7 +617,8 @@ impl ChatView {
 
     fn check_cache_key(&mut self, c: &Ctx) {
         // Message text wraps at a width that depends on the chat and nick column widths.
-        let key = (self.rect.w.round() as u32, self.metrics(c).nick_w.round() as u32, c.gfx_gen, self.style_gen);
+        let key =
+            (self.rect.w.round() as u32, self.metrics(c).nick_w.round() as u32, c.gfx_gen, self.style_gen, c.emote_gen);
         if key != self.cache_key {
             self.cache.clear();
             self.cache_key = key;

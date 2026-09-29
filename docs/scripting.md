@@ -45,10 +45,10 @@ schwaetz.on("message", (line) => {
 ## Doing things
 
 `print`, `exec` (run input as if typed, including `/commands`), `say`, `notice`, `send` (raw
-line), `hide`, `decorate` (inline images, e.g. emotes), `setEmotes` (offer emotes for `:`
-completion in Twitch channels), `notify`, `networks`, `active`, `now`,
-`log` / `console.log`, `setTimeout` / `setInterval` / `clearTimer`, `storage.get` / `storage.set`
-(persisted per script in `<name>.storage.toml`).
+line), `hide`, `decorate` (inline images, e.g. emotes), `setEmotes` (emotes for Twitch
+channels: shown in the chat and offered for `:` completion), `notify`, `networks`, `active`,
+`now`, `log` / `console.log`, `setTimeout` / `setInterval` / `clearTimer`, `storage.get` /
+`storage.set` (persisted per script in `<name>.storage.toml`).
 
 Targets (`BufferRef`) can be an event object, `{ network, buffer }`, a buffer id, or a name.
 Without a network, a name refers to a client-side buffer (created on demand), e.g.
@@ -76,5 +76,4 @@ Settings → Scripts (and the Status window, when they load) shows which scripts
 ## Examples
 
 Settings → Scripts → *Add example scripts* copies them into your scripts folder (switched off),
-or see `scripts/examples` in the repository: a highlight collector, third-party emotes for
-Twitch (7TV/BTTV/FFZ), and classic `/slap`.
+or see `scripts/examples` in the repository: a highlight collector and classic `/slap`.

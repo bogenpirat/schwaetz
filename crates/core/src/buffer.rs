@@ -113,6 +113,17 @@ pub struct Emote {
     pub name: String,
 }
 
+/// Adds an emote to a list ordered by position, unless it is empty or overlaps one already there;
+/// returns whether it was added.
+pub fn add_emote(list: &mut Vec<Emote>, e: Emote) -> bool {
+    if e.start >= e.end || list.iter().any(|x| x.start < e.end && e.start < x.end) {
+        return false;
+    }
+    let i = list.partition_point(|x| x.start < e.start);
+    list.insert(i, e);
+    true
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LineExtra {
     pub msgid: Option<String>,
@@ -381,6 +392,17 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emotes_stay_ordered_without_overlaps() {
+        let e = |start, end| Emote { start, end, url: String::new(), name: String::new() };
+        let mut list = vec![e(10, 14)];
+        assert!(add_emote(&mut list, e(0, 4)));
+        assert!(!add_emote(&mut list, e(12, 20)), "overlaps");
+        assert!(!add_emote(&mut list, e(5, 5)), "empty");
+        assert!(add_emote(&mut list, e(5, 9)));
+        assert_eq!(list.iter().map(|e| e.start).collect::<Vec<_>>(), [0, 5, 10]);
+    }
 
     fn line(id: u64, time: i64) -> Line {
         Line {
