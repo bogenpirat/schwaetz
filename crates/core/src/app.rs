@@ -160,11 +160,16 @@ impl Network {
     }
 }
 
+/// How many visited buffers [`App::go_back`] can return to.
+const MAX_VISITED: usize = 100;
+
 pub struct App {
     pub config: Config,
     pub networks: BTreeMap<NetworkId, Network>,
     buffers: Vec<Buffer>,
     pub active: BufferId,
+    /// Buffers visited before the active one (most recent last), and the ones gone back from.
+    visited: (Vec<BufferId>, Vec<BufferId>),
     pub status_buffer: BufferId,
     next_line: u64,
     next_buffer: u32,
@@ -211,6 +216,7 @@ impl App {
             status_buffer: BufferId(0),
             next_line: 1,
             next_buffer: 0,
+            visited: Default::default(),
             next_network: 1,
             highlighter,
             ignores,
@@ -458,10 +464,42 @@ impl App {
         self.switch_to(sid);
     }
 
+    /// Shows a buffer, remembering the one left for [`App::go_back`].
     pub fn switch_to(&mut self, id: BufferId) {
         if self.buffer(id).is_none() {
             return;
         }
+        if id != self.active && self.buffer(self.active).is_some() {
+            let back = &mut self.visited.0;
+            back.push(self.active);
+            if back.len() > MAX_VISITED {
+                back.remove(0);
+            }
+            self.visited.1.clear();
+        }
+        self.show(id);
+    }
+
+    /// Goes back to the buffer visited before (`forward`: undoes that); false if there is none.
+    /// Buffers closed since are skipped.
+    pub fn go_back(&mut self, forward: bool) -> bool {
+        loop {
+            let (from, to) = if forward {
+                (&mut self.visited.1, &mut self.visited.0)
+            } else {
+                (&mut self.visited.0, &mut self.visited.1)
+            };
+            let Some(id) = from.pop() else { return false };
+            if id == self.active || !self.buffers.iter().any(|b| b.id == id) {
+                continue;
+            }
+            to.push(self.active);
+            self.show(id);
+            return true;
+        }
+    }
+
+    fn show(&mut self, id: BufferId) {
         let prev = self.active;
         if prev != id {
             self.sync_read_marker(prev);

@@ -1134,3 +1134,43 @@ fn at_mentions_complete_as_mentions_on_twitch_only() {
     assert_eq!(tw.app.complete(c, "@al", 3, false), Some(("@alice ".to_owned(), 7)));
     assert_eq!(tw.app.complete(c, "al", 2, false), Some(("alice: ".to_owned(), 7)), "without @ as before");
 }
+
+#[test]
+fn visited_buffers_can_be_gone_back_and_forward_through() {
+    let mut h = Harness::new(NetworkKind::Irc, &[]);
+    h.register();
+    h.lines(&[":me!u@h JOIN #a", ":me!u@h JOIN #b", ":me!u@h JOIN #c"]);
+    let (a, b, c) = (h.buffer("#a"), h.buffer("#b"), h.buffer("#c"));
+    let start = h.app.active;
+    for id in [a, b, c] {
+        h.app.switch_to(id);
+    }
+    h.app.switch_to(c);
+    assert!(h.app.go_back(false));
+    assert_eq!(h.app.active, b, "switching to the active buffer is no visit");
+    assert!(h.app.go_back(false));
+    assert_eq!(h.app.active, a);
+    assert!(h.app.go_back(true));
+    assert_eq!(h.app.active, b);
+    assert!(h.app.go_back(true));
+    assert_eq!(h.app.active, c);
+    assert!(!h.app.go_back(true), "nothing ahead");
+    assert_eq!(h.app.active, c);
+
+    // A new visit drops what was ahead.
+    h.app.go_back(false);
+    h.app.go_back(false);
+    h.app.switch_to(c);
+    assert!(!h.app.go_back(true));
+    assert!(h.app.go_back(false));
+    assert_eq!(h.app.active, a);
+
+    // Closed buffers are skipped.
+    h.app.switch_to(b);
+    h.app.switch_to(c);
+    h.app.close_buffer(b);
+    assert!(h.app.go_back(false));
+    assert_eq!(h.app.active, a);
+    while h.app.go_back(false) {}
+    assert_eq!(h.app.active, start, "back to where it started");
+}

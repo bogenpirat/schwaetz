@@ -1359,6 +1359,13 @@ impl Ui {
         self.after_update();
     }
 
+    /// Returns to the buffer visited before, or (`forward`) the one gone back from.
+    fn go_back(&mut self, forward: bool) {
+        if self.app.go_back(forward) {
+            self.after_update();
+        }
+    }
+
     fn next_activity(&mut self) {
         let order = self.app.sidebar_order();
         let best = order
@@ -1635,6 +1642,8 @@ impl Ui {
             }
             VK_UP if alt => self.switch_relative(-1),
             VK_DOWN if alt => self.switch_relative(1),
+            VK_LEFT if alt => self.go_back(false),
+            VK_RIGHT if alt => self.go_back(true),
             VK_UP | VK_DOWN => {
                 let down = v == VK_DOWN;
                 if ctrl {
@@ -3052,6 +3061,19 @@ impl Ui {
                 Some(LRESULT(0))
             }
             WM_SYSCHAR if win::key_down(VK_MENU.0) => Some(LRESULT(0)),
+            // The mouse's back/forward buttons (Windows turns them into these), and such keys.
+            WM_APPCOMMAND if self.form.is_none() && self.overlay.is_none() => {
+                const BROWSER_BACKWARD: usize = 1;
+                const BROWSER_FORWARD: usize = 2;
+                let forward = match (lp.0 as usize >> 16) & 0x0fff {
+                    BROWSER_BACKWARD => false,
+                    BROWSER_FORWARD => true,
+                    _ => return None,
+                };
+                self.go_back(forward);
+                self.invalidate();
+                Some(LRESULT(1))
+            }
             WM_LBUTTONDOWN => {
                 let (x, y) = self.pt(lp);
                 self.mouse_down(x, y, false);
