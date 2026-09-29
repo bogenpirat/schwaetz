@@ -151,8 +151,6 @@ impl Sidebar {
                     with_alpha(th.sidebar_dim, 0.7)
                 } else if active || b.activity >= Activity::Messages {
                     th.sidebar_header
-                } else if b.activity == Activity::Events {
-                    th.sidebar_fg
                 } else {
                     th.sidebar_dim
                 };

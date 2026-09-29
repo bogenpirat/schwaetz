@@ -1174,3 +1174,35 @@ fn visited_buffers_can_be_gone_back_and_forward_through() {
     while h.app.go_back(false) {}
     assert_eq!(h.app.active, start, "back to where it started");
 }
+
+#[test]
+fn only_messages_make_a_buffer_active() {
+    let mut tw = Harness::new(NetworkKind::Twitch, &[]);
+    tw.connect();
+    tw.lines(&[
+        ":tmi.twitch.tv 001 me :hi",
+        ":tmi.twitch.tv 376 me :>",
+        ":me!me@me.tmi.twitch.tv JOIN #xqc",
+        "@emote-only=0;followers-only=10;room-id=71092938;slow=0;subs-only=0 :tmi.twitch.tv ROOMSTATE #xqc",
+        "@msg-id=host_on :tmi.twitch.tv NOTICE #xqc :Now hosting someone.",
+    ]);
+    let c = tw.buffer("#xqc");
+    assert!(!tw.app.buffer(c).unwrap().lines.is_empty());
+    assert_eq!(tw.app.buffer(c).unwrap().activity, Activity::None, "joining leaves it idle");
+    tw.lines(&["@display-name=Alice :alice!alice@alice.tmi.twitch.tv PRIVMSG #xqc :hello"]);
+    assert_eq!(tw.app.buffer(c).unwrap().activity, Activity::Messages);
+
+    let mut irc = Harness::new(NetworkKind::Irc, &[]);
+    irc.register();
+    irc.lines(&[":me!u@h JOIN #c", ":me!u@h JOIN #d"]);
+    let c = irc.buffer("#c");
+    irc.lines(&[
+        ":alice!a@h JOIN #c",
+        ":alice!a@h PART #c :bye",
+        ":bob!b@h TOPIC #c :new topic",
+        ":bob!b@h MODE #c +m",
+    ]);
+    assert_eq!(irc.app.buffer(c).unwrap().activity, Activity::None, "events leave it idle");
+    irc.lines(&[":bob!b@h PRIVMSG #c :hi"]);
+    assert_eq!(irc.app.buffer(c).unwrap().activity, Activity::Messages);
+}

@@ -1372,7 +1372,7 @@ impl Ui {
             .iter()
             .filter(|id| **id != self.app.active)
             .filter_map(|id| self.app.buffer(*id).map(|b| (b.activity, *id)))
-            .filter(|(a, _)| *a > schwaetz_core::Activity::Events)
+            .filter(|(a, _)| *a > schwaetz_core::Activity::None)
             .max_by_key(|(a, _)| *a);
         if let Some((_, id)) = best {
             self.switch_to(id);

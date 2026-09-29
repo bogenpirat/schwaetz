@@ -363,7 +363,7 @@ impl App {
         let mut line = self.new_line(self.now, kind, nick, text);
         line.flags.set(flags, flags != 0);
         let id = line.id;
-        self.add_line(buffer, line, Activity::Events);
+        self.add_line(buffer, line, Activity::None);
         id
     }
 
@@ -619,7 +619,7 @@ impl App {
 
     pub(crate) fn status(&mut self, buffer: BufferId, kind: LineKind, text: impl Into<String>) {
         let line = self.new_line(self.now, kind, "", text.into());
-        let activity = if kind == LineKind::Error { Activity::Messages } else { Activity::Events };
+        let activity = if kind == LineKind::Error { Activity::Messages } else { Activity::None };
         self.add_line(buffer, line, activity);
     }
 
@@ -1092,7 +1092,7 @@ impl App {
                 };
                 let target = label_buffer.unwrap_or_else(|| self.contextual_buffer(net_id));
                 let line = self.new_line(time, LineKind::Ctcp, &from.nick, text);
-                self.add_line(target, line, Activity::Events);
+                self.add_line(target, line, Activity::None);
             }
             Event::Join { channel, user, account, own, .. } => {
                 self.on_join(net_id, &channel, &user, account, own, time, false)
@@ -1127,7 +1127,7 @@ impl App {
                 };
                 let mut line = self.new_line(time, LineKind::Kick, &nick, text);
                 line.flags.set(LineFlags::HIGHLIGHT, own);
-                self.add_line(bid, line, if own { Activity::Highlight } else { Activity::Events });
+                self.add_line(bid, line, if own { Activity::Highlight } else { Activity::None });
                 if own {
                     if let Some(b) = self.buffer_mut(bid) {
                         b.joined = false;
@@ -1202,7 +1202,7 @@ impl App {
                     _ => format!("Topic: {topic}"),
                 };
                 let line = self.new_line(time, LineKind::Topic, by.as_deref().unwrap_or(""), text);
-                self.add_line(bid, line, Activity::Events);
+                self.add_line(bid, line, Activity::None);
                 self.dirty.topic = true;
             }
             Event::ChannelMode { channel, by, changes } => {
@@ -1227,7 +1227,7 @@ impl App {
                 };
                 let nick = by.as_ref().map(|b| b.nick.clone()).unwrap_or_default();
                 let line = self.new_line(time, LineKind::Mode, &nick, text);
-                self.add_line(bid, line, Activity::Events);
+                self.add_line(bid, line, Activity::None);
                 self.dirty.topic = true;
                 self.dirty.nicklist = true;
             }
@@ -1261,7 +1261,7 @@ impl App {
                 };
                 let target = self.contextual_buffer(net_id);
                 let line = self.new_line(time, LineKind::Invite, &by.nick, text.clone());
-                self.add_line(target, line, if me { Activity::Highlight } else { Activity::Events });
+                self.add_line(target, line, if me { Activity::Highlight } else { Activity::None });
                 if me {
                     self.notify(target, "Invitation".into(), text);
                 }
@@ -1311,7 +1311,7 @@ impl App {
                 }
                 for l in lines {
                     let line = self.new_line(time, LineKind::Server, &w.nick, l);
-                    self.add_line(target, line, Activity::Events);
+                    self.add_line(target, line, Activity::None);
                 }
             }
             Event::ListEntry { channel, users, topic } => {
@@ -1514,7 +1514,7 @@ impl App {
             })
             .unwrap_or(sb);
         let line = self.new_line(time, kind, "", text);
-        let activity = if kind == LineKind::Error { Activity::Messages } else { Activity::Events };
+        let activity = if kind == LineKind::Error { Activity::Messages } else { Activity::None };
         self.add_line(target, line, activity);
     }
 
@@ -1681,8 +1681,9 @@ impl App {
             Activity::None
         } else if highlight || (is_query && !own && kind != ChatKind::Notice) {
             Activity::Highlight
-        } else if matches!(target, Target::Server) {
-            Activity::Events
+        } else if matches!(target, Target::Server) || from.is_server() {
+            // The server's own notices (Twitch: "now hosting", room modes …) are no messages.
+            Activity::None
         } else {
             Activity::Messages
         };
@@ -1773,7 +1774,7 @@ impl App {
         );
         let sb = self.networks[&net_id].server_buffer;
         let line = self.new_line(time, LineKind::Ctcp, &from.nick, text);
-        self.add_line(sb, line, Activity::Events);
+        self.add_line(sb, line, Activity::None);
         if !self.config.general.ctcp_replies {
             return;
         }
@@ -1895,7 +1896,7 @@ impl App {
         line.flags.set(LineFlags::FILTERED, filtered);
         line.flags.set(LineFlags::OWN, own);
         line.flags.set(LineFlags::HISTORY, history);
-        self.add_line(bid, line, Activity::Events);
+        self.add_line(bid, line, Activity::None);
     }
 
     /// Appends a nick to a recent netsplit summary line instead of adding a new line.
@@ -1975,7 +1976,7 @@ impl App {
                     (None, _) => "Chat was cleared by a moderator".into(),
                 };
                 let line = self.new_line(time, LineKind::System, "", text);
-                self.add_line(bid, line, Activity::Events);
+                self.add_line(bid, line, Activity::None);
             }
             TwitchEvent::ClearMsg { channel, target_msgid, .. } => {
                 if let Some(bid) = self.find_buffer(net_id, &channel)

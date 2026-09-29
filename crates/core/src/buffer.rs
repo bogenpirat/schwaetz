@@ -17,11 +17,11 @@ pub enum BufferKind {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+/// What a buffer has had since it was last looked at. Only messages count (and errors): joins,
+/// parts, topics and other events are shown but leave a buffer idle.
 pub enum Activity {
     #[default]
     None,
-    /// Joins, parts and other events.
-    Events,
     Messages,
     Highlight,
 }
