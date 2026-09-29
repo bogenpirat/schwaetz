@@ -59,6 +59,12 @@ pub fn pass(user: &str, network: Option<&str>, password: &str) -> String {
     }
 }
 
+/// Whether a message is the notes module saying there is nothing to show (sent on every login
+/// with `ShowNotesOnLogin`); it is kept in the buffer but doesn't count as unread.
+pub fn is_empty_notes(nick: &str, text: &str) -> bool {
+    nick.eq_ignore_ascii_case("*notes") && text.trim() == "You have no entries."
+}
+
 /// Parses a ZNC buffer-playback timestamp prefix (`[HH:MM:SS] text`), used when the bouncer can't
 /// send server-time. Returns seconds since midnight and the remaining text.
 pub fn strip_playback_timestamp(text: &str) -> Option<(u32, &str)> {
@@ -97,5 +103,12 @@ mod tests {
         assert_eq!(strip_playback_timestamp("[12:34:56] hello"), Some((45296, "hello")));
         assert_eq!(strip_playback_timestamp("hello"), None);
         assert_eq!(pass("u", Some("libera"), "pw"), "u/libera:pw");
+    }
+
+    #[test]
+    fn empty_notes() {
+        assert!(is_empty_notes("*notes", "You have no entries."));
+        assert!(!is_empty_notes("*notes", "remember the milk"));
+        assert!(!is_empty_notes("alice", "You have no entries."));
     }
 }

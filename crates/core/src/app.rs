@@ -1635,7 +1635,9 @@ impl App {
         }
 
         let is_query = matches!(target, Target::Query { .. });
-        let activity = if highlight || (is_query && !own && kind != ChatKind::Notice) {
+        let activity = if znc::is_empty_notes(&from.nick, &stripped) {
+            Activity::None
+        } else if highlight || (is_query && !own && kind != ChatKind::Notice) {
             Activity::Highlight
         } else if matches!(target, Target::Server) {
             Activity::Events
@@ -1660,6 +1662,7 @@ impl App {
         let notify_cfg = &self.config.notifications;
         let should_notify = !own
             && !is_playback
+            && activity != Activity::None
             && ((highlight && notify_cfg.on_highlight)
                 || (is_query && kind != ChatKind::Notice && notify_cfg.on_private)
                 || buffer_all);
