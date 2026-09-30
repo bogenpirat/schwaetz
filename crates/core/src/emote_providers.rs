@@ -195,9 +195,50 @@ fn ffz(set: FfzSet) -> NamedUrls {
         .collect()
 }
 
+/// The URL of the largest size an emote's CDN offers (Twitch 3.0, 7TV 4x, BTTV 3x, FFZ 4), for
+/// the hover preview. Other URLs are returned unchanged. The size may not exist (FFZ emotes
+/// without a 4x image), so callers keep the original as a fallback.
+pub fn largest_emote_url(url: &str) -> String {
+    const SIZES: [(&str, &[&str], &str); 4] = [
+        ("https://static-cdn.jtvnw.net/emoticons/v2/", &["/1.0", "/2.0"], "/3.0"),
+        ("https://cdn.7tv.app/emote/", &["/1x.webp", "/2x.webp", "/3x.webp"], "/4x.webp"),
+        ("https://cdn.betterttv.net/emote/", &["/1x", "/2x"], "/3x"),
+        ("https://cdn.frankerfacez.com/emote/", &["/1", "/2"], "/4"),
+    ];
+    for (prefix, smaller, largest) in SIZES {
+        if url.starts_with(prefix)
+            && let Some(base) = smaller.iter().find_map(|s| url.strip_suffix(s))
+        {
+            return format!("{base}{largest}");
+        }
+    }
+    url.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn largest_emote_urls() {
+        for (small, large) in [
+            (
+                "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0",
+                "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/3.0",
+            ),
+            ("https://cdn.7tv.app/emote/1/2x.webp", "https://cdn.7tv.app/emote/1/4x.webp"),
+            (
+                "https://cdn.betterttv.net/emote/54fa8f1401e468494b85b537/2x",
+                "https://cdn.betterttv.net/emote/54fa8f1401e468494b85b537/3x",
+            ),
+            ("https://cdn.frankerfacez.com/emote/1/2", "https://cdn.frankerfacez.com/emote/1/4"),
+            ("https://cdn.frankerfacez.com/emote/1/1", "https://cdn.frankerfacez.com/emote/1/4"),
+            ("https://static-cdn.jtvnw.net/badges/v1/5d9f2208/3", "https://static-cdn.jtvnw.net/badges/v1/5d9f2208/3"),
+            ("https://example.com/emote/2x", "https://example.com/emote/2x"),
+        ] {
+            assert_eq!(largest_emote_url(small), large);
+        }
+    }
 
     #[test]
     fn requests_each_providers_endpoints() {

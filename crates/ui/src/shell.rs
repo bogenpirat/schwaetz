@@ -8,6 +8,7 @@ use crate::overlay::{ConfirmAction, Overlay, OverlayClick, draw_field};
 use crate::text::{self, Brushes, Text};
 use crate::theme::Theme;
 use crate::win::{self, MenuItem, Tray};
+use schwaetz_core::emote_providers::largest_emote_url;
 use schwaetz_core::services::{HistoryStore, ScriptHost};
 use schwaetz_core::{
     App, BufferId, BufferKind, Config, ConnState, Effect, LineKind, NetworkConfig, NetworkKind, NotifyLevel, Paths,
@@ -796,7 +797,10 @@ impl Ui {
         let f = &self.text.fonts;
         let l = self.text.layout(code, &f.ui_semibold, 400.0, 20.0);
         let tw = text::metrics(&l).width;
-        let img = self.images.borrow().bitmap(url);
+        let img = {
+            let images = self.images.borrow();
+            images.bitmap(&largest_emote_url(url)).or_else(|| images.bitmap(url))
+        };
         let (iw, ih) = match &img {
             Some(b) => {
                 let s = unsafe { b.GetSize() };
@@ -2184,7 +2188,13 @@ impl Ui {
                         self.images.borrow_mut().size(&tip.1, false);
                         Some(tip)
                     };
-                    self.chat.emote_at(x, y).or_else(badge)
+                    let emote = || {
+                        let tip = self.chat.emote_at(x, y)?;
+                        // The largest size, loaded on first hover; the inline image stands in.
+                        self.images.borrow_mut().size(&largest_emote_url(&tip.1), false);
+                        Some(tip)
+                    };
+                    emote().or_else(badge)
                 } else if self.chat.rect.contains(x, y) {
                     None
                 } else {
