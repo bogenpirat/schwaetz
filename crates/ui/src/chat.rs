@@ -1084,10 +1084,11 @@ impl ChatView {
                     };
                 }
             }
-            let (pos, inside) = text::hit_point(&e.msg, x - d.msg_x, y - d.msg_y);
-            if inside && let Some(l) = e.links.iter().find(|l| pos >= l.start && pos < l.start + l.len) {
+            let (at, inside) = text::hit_char(&e.msg, x - d.msg_x, y - d.msg_y);
+            if inside && let Some(l) = e.links.iter().find(|l| at >= l.start && at < l.start + l.len) {
                 return Hit::Link(l.target.clone());
             }
+            let (pos, _) = text::hit_point(&e.msg, x - d.msg_x, y - d.msg_y);
             let pos = if x < d.msg_x { 0 } else { pos };
             return Hit::Text(Pos { line: d.id, u16: pos });
         }
@@ -1119,7 +1120,7 @@ impl ChatView {
     pub fn emote_at(&self, x: f32, y: f32) -> Option<(String, String, Rect)> {
         let d = self.drawn.iter().find(|d| y >= d.y && y < d.y + d.h)?;
         let e = self.cache.get(&d.id).filter(|e| !e.emotes.is_empty())?;
-        let (pos, inside) = text::hit_point(&e.msg, x - d.msg_x, y - d.msg_y);
+        let (pos, inside) = text::hit_char(&e.msg, x - d.msg_x, y - d.msg_y);
         if !inside {
             return None;
         }

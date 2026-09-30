@@ -326,15 +326,28 @@ pub fn range_rects(layout: &IDWriteTextLayout, start: u32, len: u32) -> Vec<(f32
     buf.iter().map(|m| (m.left, m.top, m.width, m.height)).collect()
 }
 
-/// UTF-16 position under a point, and whether the point is actually inside the text.
+/// UTF-16 caret position nearest a point (after a character when on its right half), and whether
+/// the point is actually inside the text.
 pub fn hit_point(layout: &IDWriteTextLayout, x: f32, y: f32) -> (u32, bool) {
+    let (m, trailing, inside) = hit_test(layout, x, y);
+    (m.textPosition + if trailing { m.length } else { 0 }, inside)
+}
+
+/// UTF-16 start of the character (or inline object) under a point, and whether the point is
+/// actually inside the text.
+pub fn hit_char(layout: &IDWriteTextLayout, x: f32, y: f32) -> (u32, bool) {
+    let (m, _, inside) = hit_test(layout, x, y);
+    (m.textPosition, inside)
+}
+
+fn hit_test(layout: &IDWriteTextLayout, x: f32, y: f32) -> (DWRITE_HIT_TEST_METRICS, bool, bool) {
     let mut trailing = windows::core::BOOL(0);
     let mut inside = windows::core::BOOL(0);
     let mut m = DWRITE_HIT_TEST_METRICS::default();
     unsafe {
         let _ = layout.HitTestPoint(x, y, &mut trailing, &mut inside, &mut m);
     }
-    (m.textPosition + if trailing.as_bool() { m.length } else { 0 }, inside.as_bool())
+    (m, trailing.as_bool(), inside.as_bool())
 }
 
 /// Caret position (x, y, height) for a UTF-16 index.
