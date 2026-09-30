@@ -133,6 +133,8 @@ pub struct LineExtra {
     pub color: Option<u32>,
     /// Badge ids such as `moderator/1`, `subscriber/12`.
     pub badges: Vec<String>,
+    /// Months subscribed (Twitch `badge-info`), for the subscriber or founder badge.
+    pub sub_months: Option<u32>,
     pub emotes: Vec<Emote>,
     /// `+draft/reply`: (msgid, nick, excerpt) of the parent message.
     pub reply_to: Option<(String, String, String)>,

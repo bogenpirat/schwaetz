@@ -40,6 +40,8 @@ struct Cached {
     bgs: Vec<BgRun>,
     /// Placed inline emotes: (utf16 start, utf16 len, code, image url).
     emotes: Vec<(u32, u32, String, String)>,
+    /// Badge images in `nick`.
+    badges: Vec<NickBadge>,
     /// Plain text actually laid out in `msg` (for copying).
     plain: String,
     map: U16Map,
@@ -107,7 +109,7 @@ pub struct ChatView {
     anchor_y: f32,
     cache: HashMap<u64, Cached>,
     /// Chat width, nick column width, graphics and style generation the cache was built for.
-    cache_key: (u32, u32, u64, u64, u64),
+    cache_key: (u32, u32, u64, u64, u64, u64),
     frame: u64,
     drawn: Vec<Drawn>,
     pub selection: Option<(Pos, Pos)>,
@@ -138,8 +140,8 @@ pub struct ChatView {
 /// Width of the widest nick column text in a buffer, kept up to date as lines arrive.
 #[derive(Default)]
 struct NickFit {
-    /// Buffer, graphics generation, style generation and filter setting it was measured for.
-    key: (Option<BufferId>, u64, u64),
+    /// Buffer, graphics, style and badge generation it was measured for.
+    key: (Option<BufferId>, u64, u64, u64),
     /// Buffer generation last scanned.
     seen: Option<u64>,
     /// Lines up to this id were measured.
@@ -176,6 +178,12 @@ pub struct Ctx<'a> {
     pub emotes: schwaetz_core::emotes::Lookup<'a>,
     /// Changes whenever the emotes do.
     pub emote_gen: u64,
+    /// Twitch badge images for this buffer (None: badges show as symbols).
+    pub badges: Option<schwaetz_core::badges::Lookup<'a>>,
+    /// Changes whenever badge lists arrive.
+    pub badge_gen: u64,
+    /// Device pixels per DIP (picks the badge image size).
+    pub scale: f32,
 }
 
 impl Default for ChatView {
@@ -187,7 +195,7 @@ impl Default for ChatView {
             anchor: None,
             anchor_y: 0.0,
             cache: HashMap::new(),
-            cache_key: (0, 0, 0, 0, 0),
+            cache_key: (0, 0, 0, 0, 0, 0),
             frame: 0,
             drawn: Vec::new(),
             selection: None,
@@ -420,9 +428,18 @@ impl ChatView {
         }
 
         // Nick column.
+        let mut nick_badges = Vec::new();
         let nick = if c.nick_column {
-            let (full, pre16) = nick_column_text(line);
+            let NickText { text: full, pre16, badges } = nick_column_text(line, c);
             let l = c.text.layout(&full, &f.nick, m.nick_w, 100.0);
+            let (size, gap) = badge_size(c);
+            for b in &badges {
+                let obj = crate::images::InlineImage::square(&b.url, size, gap, badge_baseline(c), c.images, c.dc);
+                unsafe {
+                    let _ = l.SetInlineObject(&obj, text::range(b.at, 1));
+                }
+            }
+            nick_badges = badges;
             let color = match line.kind {
                 LineKind::Message | LineKind::Action => nick_color,
                 LineKind::Notice => th.notice,
@@ -487,6 +504,7 @@ impl ChatView {
             links,
             bgs,
             emotes: placed,
+            badges: nick_badges,
             plain,
             map,
             height,
@@ -617,8 +635,14 @@ impl ChatView {
 
     fn check_cache_key(&mut self, c: &Ctx) {
         // Message text wraps at a width that depends on the chat and nick column widths.
-        let key =
-            (self.rect.w.round() as u32, self.metrics(c).nick_w.round() as u32, c.gfx_gen, self.style_gen, c.emote_gen);
+        let key = (
+            self.rect.w.round() as u32,
+            self.metrics(c).nick_w.round() as u32,
+            c.gfx_gen,
+            self.style_gen,
+            c.emote_gen,
+            c.badge_gen,
+        );
         if key != self.cache_key {
             self.cache.clear();
             self.cache_key = key;
@@ -687,7 +711,7 @@ impl ChatView {
         if !c.nick_column || !c.nick_column_auto {
             return;
         }
-        let key = (self.buffer, c.gfx_gen, self.style_gen);
+        let key = (self.buffer, c.gfx_gen, self.style_gen, c.badge_gen);
         if key != self.nick_fit.key || b.lines.is_empty() {
             self.nick_fit = NickFit { key, ..Default::default() };
         }
@@ -704,12 +728,14 @@ impl ChatView {
             if !visible(line) {
                 continue;
             }
-            let (full, _) = nick_column_text(line);
+            let NickText { text: full, badges, .. } = nick_column_text(line, c);
             let w = match self.nick_widths.get(&full) {
                 Some(w) => *w,
                 None => {
-                    let l = c.text.layout(&full, &c.text.fonts.nick, 10_000.0, 100.0);
-                    let w = text::metrics(&l).widthIncludingTrailingWhitespace;
+                    // Badge images take their placeholders' places.
+                    let l = c.text.layout(&full.replace(BADGE, ""), &c.text.fonts.nick, 10_000.0, 100.0);
+                    let (size, gap) = badge_size(c);
+                    let w = text::metrics(&l).widthIncludingTrailingWhitespace + badges.len() as f32 * (size + gap);
                     self.nick_widths.insert(full, w);
                     w
                 }
@@ -1076,6 +1102,19 @@ impl ChatView {
         Hit::Nothing
     }
 
+    /// The badge image under a point in the nick column: its hover text, a large image url and
+    /// bounds.
+    pub fn badge_at(&self, x: f32, y: f32) -> Option<(String, String, Rect)> {
+        let d = self.drawn.iter().find(|d| d.nick_rect.contains(x, y))?;
+        let e = self.cache.get(&d.id).filter(|e| !e.badges.is_empty())?;
+        let l = e.nick.as_ref()?;
+        e.badges.iter().find_map(|b| {
+            let (rx, ry, rw, rh) = text::range_rects(l, b.at, 1).into_iter().next()?;
+            let r = Rect::new(d.nick_rect.x + rx, d.nick_rect.y + ry, rw, rh);
+            r.contains(x, y).then(|| (b.label.clone(), b.large_url.clone(), r))
+        })
+    }
+
     /// The inline emote under a point: its code, image url and bounds.
     pub fn emote_at(&self, x: f32, y: f32) -> Option<(String, String, Rect)> {
         let d = self.drawn.iter().find(|d| y >= d.y && y < d.y + d.h)?;
@@ -1190,10 +1229,68 @@ impl ChatView {
 /// The color of a nick in the chat. Your own nick keeps its color. A Twitch user's chosen color
 /// (made readable on the background) is used when the network shows Twitch colors
 /// (`twitch_colors`); otherwise "Colored nicks" (`palette`) picks a theme color, or the text color.
-/// What the nick column shows for a line: Twitch badges and the status prefix (messages only),
-/// then the name or a symbol for the line kind. Also returns the length (UTF-16) of the part
-/// before the name, which is drawn dimmed.
-fn nick_column_text(line: &Line) -> (String, u32) {
+/// Stands in for a badge image in the nick column text.
+const BADGE: char = '\u{FFFC}';
+
+/// What the nick column shows for a line.
+struct NickText {
+    text: String,
+    /// Length (UTF-16) of the part before the name (badges and status prefix), drawn dimmed.
+    pre16: u32,
+    badges: Vec<NickBadge>,
+}
+
+/// A badge image in the nick column.
+struct NickBadge {
+    /// Where its placeholder is (UTF-16).
+    at: u32,
+    /// The image at the size shown.
+    url: String,
+    /// The largest image (for the hover tooltip).
+    large_url: String,
+    /// Hover text: the badge's title, with the months for subscriber badges.
+    label: String,
+}
+
+/// Size and following gap of badge images in the nick column (DIPs).
+fn badge_size(c: &Ctx) -> (f32, f32) {
+    let size = (c.text.fonts.line_height * 0.85).round();
+    (size, (size * 0.2).round())
+}
+
+/// The inline-object baseline that centers badge images on the nick text line.
+fn badge_baseline(c: &Ctx) -> f32 {
+    let lh = c.text.fonts.line_height;
+    lh * 0.78 - (lh - badge_size(c).0) / 2.0
+}
+
+/// A badge's image (Twitch has 18, 36 and 72 pixels) and the URL at the size needed on screen,
+/// unless there is none or it failed to load.
+fn badge_image<'a>(c: &Ctx<'a>, badge: &str) -> Option<(&'a schwaetz_core::helix::BadgeImage, String)> {
+    let image = c.badges?.get(badge)?;
+    let px = badge_size(c).0 * c.scale;
+    let scale = match px {
+        ..=18.0 => 0,
+        ..=36.0 => 1,
+        _ => 2,
+    };
+    let url = &image.urls[scale];
+    (!c.images.borrow().failed(url)).then(|| (image, url.clone()))
+}
+
+/// Hover text of a badge: "Subscriber · 14 months".
+fn badge_label(title: &str, badge: &str, months: Option<u32>) -> String {
+    let set = badge.split('/').next().unwrap_or_default();
+    match months.filter(|_| matches!(set, "subscriber" | "founder")) {
+        Some(1) => format!("{title} · 1 month"),
+        Some(n) => format!("{title} · {n} months"),
+        None => title.to_owned(),
+    }
+}
+
+/// What the nick column shows for a line: Twitch badges (images, else symbols) and the status
+/// prefix (messages only), then the name or a symbol for the line kind.
+fn nick_column_text(line: &Line, c: &Ctx) -> NickText {
     let nick = line.display_nick();
     let name = match line.kind {
         LineKind::Message => nick.to_owned(),
@@ -1209,9 +1306,19 @@ fn nick_column_text(line: &Line) -> (String, u32) {
         _ => "·".into(),
     };
     let mut full = String::new();
+    let mut badges = Vec::new();
     if line.kind == LineKind::Message {
-        if let Some(e) = line.extra.as_ref() {
-            full.extend(e.badges.iter().map(|b| schwaetz_core::twitch::badge_label(b)));
+        let months = line.extra.as_ref().and_then(|e| e.sub_months);
+        for b in line.extra.as_ref().map(|e| e.badges.as_slice()).unwrap_or_default() {
+            match badge_image(c, b) {
+                Some((image, url)) => {
+                    let at = full.encode_utf16().count() as u32;
+                    let (large_url, label) = (image.urls[2].clone(), badge_label(&image.title, b, months));
+                    badges.push(NickBadge { at, url, large_url, label });
+                    full.push(BADGE);
+                }
+                None => full.push_str(schwaetz_core::twitch::badge_label(b)),
+            }
         }
         if let Some(p) = line.prefix {
             full.push(p);
@@ -1219,7 +1326,7 @@ fn nick_column_text(line: &Line) -> (String, u32) {
     }
     let pre16 = full.encode_utf16().count() as u32;
     full.push_str(&name);
-    (full, pre16)
+    NickText { text: full, pre16, badges }
 }
 
 pub fn pick_nick_color(

@@ -1232,3 +1232,66 @@ fn only_messages_make_a_buffer_active() {
     irc.lines(&[":bob!b@h PRIVMSG #c :hi"]);
     assert_eq!(irc.app.buffer(c).unwrap().activity, Activity::Messages);
 }
+
+/// The badge lists requested since the last call, as (room id, refresh).
+fn badge_requests(h: &mut Harness) -> Vec<(Option<String>, bool)> {
+    h.app
+        .take_effects()
+        .into_iter()
+        .filter_map(|e| match e {
+            Effect::FetchBadges(r) => Some((r.room_id, r.refresh)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn badge_result(room: Option<&str>, badges: &[&str]) -> schwaetz_core::badges::BadgeResult {
+    let image = |id: &str| schwaetz_core::helix::BadgeImage {
+        title: id.into(),
+        urls: [1, 2, 3].map(|s| format!("https://static-cdn.jtvnw.net/badges/v1/{id}/{s}")),
+    };
+    schwaetz_core::badges::BadgeResult {
+        room_id: room.map(str::to_owned),
+        badges: Some(badges.iter().map(|id| (id.to_string(), image(id))).collect()),
+    }
+}
+
+#[test]
+fn badge_lists_are_loaded_once_and_refreshed_for_unknown_badges() {
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.app.set_twitch_api_token(h.net, Some("tok".into()));
+    h.connect();
+    h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>"]);
+    assert_eq!(badge_requests(&mut h), [(None, false)], "the global list on connecting");
+    h.lines(&[":me!me@me.tmi.twitch.tv JOIN #xqc", "@room-id=71092938 :tmi.twitch.tv ROOMSTATE #xqc"]);
+    assert_eq!(badge_requests(&mut h), [(Some("71092938".into()), false)], "the channel's once its id is known");
+    h.lines(&["@room-id=71092938 :tmi.twitch.tv ROOMSTATE #xqc"]);
+    assert!(badge_requests(&mut h).is_empty(), "once");
+
+    h.app.on_badge_result(badge_result(None, &["moderator/1", "subscriber/0"]));
+    h.app.on_badge_result(badge_result(Some("71092938"), &["subscriber/0", "subscriber/12"]));
+    let c = h.buffer("#xqc");
+    let l = h.app.badge_lookup(c).unwrap();
+    assert!(l.get("subscriber/0").unwrap().urls[0].contains("subscriber/0"));
+    assert_eq!(l.get("moderator/1").unwrap().title, "moderator/1", "global ones too");
+    assert!(l.get("vip/1").is_none());
+
+    // Known badges need nothing; a new subscriber tier fetches the channel's list again, a new
+    // global badge the global one, each once.
+    let msg = |badges: &str| format!("@badges={badges};room-id=71092938 :u!u@u.tmi.twitch.tv PRIVMSG #xqc :hi");
+    h.lines(&[&msg("moderator/1,subscriber/12")]);
+    assert!(badge_requests(&mut h).is_empty());
+    h.lines(&[&msg("subscriber/24")]);
+    assert_eq!(badge_requests(&mut h), [(Some("71092938".into()), true)]);
+    h.lines(&[&msg("subscriber/36,newevent/1")]);
+    assert_eq!(badge_requests(&mut h), [(None, true)]);
+    h.lines(&[&msg("newevent/2")]);
+    assert!(badge_requests(&mut h).is_empty());
+
+    // Switched off: symbols instead, nothing fetched.
+    let mut cfg = h.app.networks[&h.net].cfg.clone();
+    let name = cfg.name.clone();
+    cfg.badge_images = false;
+    h.app.upsert_network(Some(&name), cfg);
+    assert!(h.app.badge_lookup(c).is_none());
+}

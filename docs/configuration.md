@@ -36,6 +36,7 @@ auto_connect = true
 | `flood_burst`, `flood_interval_ms` | Flood control: burst size, then one line per interval |
 | `live_check_secs` | Twitch: seconds between live checks (default 120, at least 30) |
 | `twitch_colors` | Twitch: show the name colors users picked in the chat, exactly as Twitch sends them (your own included; default on), whatever `colored_nicks` says |
+| `badge_images` | Twitch: show chat badges as the images Twitch shows, the channel's own subscriber and bits badges included (default on; needs the Twitch sign-in or an API token, else symbols). Badge lists are cached for 30 days in `badges` in the cache folder |
 | `twitch_popout` | Twitch: "Open stream" (topic bar button, channel menu) opens the popout player instead of the channel page |
 | `twitch_live_first` | Twitch: list live channels before offline ones in the sidebar, each group in your arranged order |
 | `unread_badges` | Unread badges for this network: `all`, `highlights` or `none` (unset: as in `[appearance]`) |

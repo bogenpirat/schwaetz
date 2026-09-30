@@ -60,6 +60,12 @@ pub fn apply_tags(extra: &mut LineExtra, tags: &Tags, text: &str, nick: &str) {
     if let Some(b) = tags.value("badges") {
         extra.badges = b.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect();
     }
+    if let Some(info) = tags.value("badge-info") {
+        extra.sub_months = info.split(',').find_map(|b| match b.split_once('/')? {
+            ("subscriber" | "founder", n) => n.parse().ok(),
+            _ => None,
+        });
+    }
     if let Some(e) = tags.value("emotes") {
         extra.emotes = parse_emotes(e, text);
     }
@@ -126,5 +132,17 @@ mod tests {
         assert_eq!(parse_color(""), None);
         let s = vec![("slow".to_string(), "30".to_string()), ("followers-only".into(), "-1".into())];
         assert_eq!(room_state_summary(&s), vec!["slow 30s"]);
+    }
+
+    #[test]
+    fn badges_and_months() {
+        let tags = Tags::parse("badge-info=subscriber/14;badges=subscriber/12,premium/1");
+        let mut extra = LineExtra::default();
+        apply_tags(&mut extra, &tags, "hi", "u");
+        assert_eq!(extra.badges, ["subscriber/12", "premium/1"]);
+        assert_eq!(extra.sub_months, Some(14));
+        let mut extra = LineExtra::default();
+        apply_tags(&mut extra, &Tags::parse("badge-info=;badges=vip/1"), "hi", "u");
+        assert_eq!(extra.sub_months, None);
     }
 }
