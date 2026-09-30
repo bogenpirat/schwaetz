@@ -67,6 +67,7 @@ const COMPLETION_ROW: f32 = 32.0;
 enum WorkerResult {
     Live(schwaetz_core::helix::LiveResult),
     Emotes(schwaetz_core::emotes::EmoteResult),
+    Badges(schwaetz_core::badges::BadgeResult),
     Auth(schwaetz_net::NetworkId, schwaetz_core::twitch_auth::AuthRequest, schwaetz_core::twitch_auth::AuthResponse),
 }
 /// `dwData` tag for WM_COPYDATA messages carrying input for the running instance.
@@ -515,6 +516,7 @@ impl Ui {
         app: &'a App,
         images: &'a std::rc::Rc<std::cell::RefCell<crate::images::ImageStore>>,
         anims: &'a crate::anim::Anims,
+        scale: f32,
     ) -> Ctx<'a> {
         let cfg = &app.config;
         let a = &cfg.appearance;
@@ -540,6 +542,9 @@ impl Ui {
             replies: app.can_reply(app.active),
             emotes: app.emote_lookup(app.active),
             emote_gen: app.emote_gen,
+            badges: app.badge_lookup(app.active),
+            badge_gen: app.badge_gen,
+            scale,
         }
     }
 
@@ -676,8 +681,8 @@ impl Ui {
         // Chat.
         let id = self.app.active;
         {
-            let Ui { ref mut chat, ref text, ref mut brushes, ref app, ref images, ref anims, .. } = *self;
-            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, app, images, anims);
+            let Ui { ref mut chat, ref text, ref mut brushes, ref app, ref images, ref anims, scale, .. } = *self;
+            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, app, images, anims, scale);
             if let Some(b) = app.buffer(id) {
                 chat.render(&p, &mut ctx, b);
             }
@@ -786,7 +791,7 @@ impl Ui {
         let _ = with_alpha;
     }
 
-    /// Tooltip above a hovered emote: an enlarged image and its code.
+    /// Tooltip above a hovered emote or badge: an enlarged image and its code or title.
     fn draw_emote_tip(&self, p: &Painter, th: &Theme, code: &str, url: &str, anchor: Rect) {
         let f = &self.text.fonts;
         let l = self.text.layout(code, &f.ui_semibold, 400.0, 20.0);
@@ -996,6 +1001,13 @@ impl Ui {
             }
             Effect::FetchEmotes(req) => {
                 self.run_worker("emotes", move || WorkerResult::Emotes(schwaetz_core::emotes::fetch(req)))
+            }
+            Effect::FetchBadges(req) => {
+                let dir = self.paths.cache_dir.join("badges");
+                self.run_worker("badges", move || {
+                    let now = schwaetz_core::time::now_ms();
+                    WorkerResult::Badges(schwaetz_core::badges::fetch(req, Some(&dir), now))
+                })
             }
             Effect::TwitchAuth { network, request } => self.run_worker("twitch-auth", move || {
                 let response = schwaetz_core::twitch_auth::execute(&request);
@@ -1425,9 +1437,11 @@ impl Ui {
         let (pw, ph) = self.client_size();
         let _ = gfx.frame(pw, ph, |dc| {
             let id = self.app.active;
-            let Ui { ref mut chat, ref text, ref mut brushes, ref app, ref theme, ref images, ref anims, .. } = *self;
+            let Ui {
+                ref mut chat, ref text, ref mut brushes, ref app, ref theme, ref images, ref anims, scale, ..
+            } = *self;
             let th = theme.clone();
-            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, app, images, anims);
+            let mut ctx = Ui::chat_ctx(text, &th, brushes, dc, dgen, app, images, anims, scale);
             if let Some(b) = app.buffer(id) {
                 f(chat, &mut ctx, b);
             }
@@ -2164,7 +2178,13 @@ impl Ui {
                     self.invalidate();
                 }
                 let tip = if in_chat {
-                    self.chat.emote_at(x, y)
+                    let badge = || {
+                        let tip = self.chat.badge_at(x, y)?;
+                        // The large image, loaded on first hover.
+                        self.images.borrow_mut().size(&tip.1, false);
+                        Some(tip)
+                    };
+                    self.chat.emote_at(x, y).or_else(badge)
                 } else if self.chat.rect.contains(x, y) {
                     None
                 } else {
@@ -2992,6 +3012,7 @@ impl Ui {
                             self.refresh_completion();
                         }
                         WorkerResult::Auth(net, req, resp) => self.app.on_auth_result(net, req, resp),
+                        WorkerResult::Badges(r) => self.app.on_badge_result(r),
                     }
                 }
                 self.after_update();

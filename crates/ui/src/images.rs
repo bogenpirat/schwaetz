@@ -176,7 +176,10 @@ impl ImageStore {
 #[implement(IDWriteInlineObject)]
 pub struct InlineImage {
     url: String,
+    /// Advance width.
     width: f32,
+    /// Width the image is drawn at (from the left).
+    draw_w: f32,
     height: f32,
     baseline: f32,
     store: Rc<RefCell<ImageStore>>,
@@ -193,7 +196,31 @@ impl InlineImage {
     ) -> IDWriteInlineObject {
         let (w, h) = store.borrow_mut().size(url, false).unwrap_or((1, 1));
         let width = (height * w as f32 / h.max(1) as f32).clamp(height * 0.5, height * 4.0);
-        InlineImage { url: url.to_owned(), width, height, baseline, store: store.clone(), dc: dc.clone() }.into()
+        InlineImage {
+            url: url.to_owned(),
+            width,
+            draw_w: width,
+            height,
+            baseline,
+            store: store.clone(),
+            dc: dc.clone(),
+        }
+        .into()
+    }
+
+    /// A square image of `size` followed by `gap` (chat badges): its width is known before the
+    /// image has loaded.
+    pub fn square(
+        url: &str,
+        size: f32,
+        gap: f32,
+        baseline: f32,
+        store: &Rc<RefCell<ImageStore>>,
+        dc: &ID2D1DeviceContext,
+    ) -> IDWriteInlineObject {
+        store.borrow_mut().size(url, false);
+        let (url, store, dc) = (url.to_owned(), store.clone(), dc.clone());
+        InlineImage { url, width: size + gap, draw_w: size, height: size, baseline, store, dc }.into()
     }
 }
 
@@ -210,7 +237,7 @@ impl IDWriteInlineObject_Impl for InlineImage_Impl {
     ) -> windows_core::Result<()> {
         let bmp = self.store.try_borrow().ok().and_then(|s| s.bitmap(&self.url));
         if let Some(bmp) = bmp {
-            let r = D2D_RECT_F { left: x, top: y, right: x + self.width, bottom: y + self.height };
+            let r = D2D_RECT_F { left: x, top: y, right: x + self.draw_w, bottom: y + self.height };
             unsafe { self.dc.DrawBitmap(&bmp, Some(&r), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None) };
         }
         Ok(())

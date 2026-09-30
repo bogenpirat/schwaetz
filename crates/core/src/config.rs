@@ -300,7 +300,7 @@ pub struct NetworkConfig {
     /// Flood control: lines allowed in a burst, then one per `flood_interval_ms`.
     pub flood_burst: u32,
     pub flood_interval_ms: u64,
-    /// Twitch: Client-ID for badge images / OAuth device flow (optional).
+    /// Twitch: Client-ID for the OAuth device flow (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub twitch_client_id: Option<String>,
     /// Twitch: how often (seconds) joined channels are checked for being live when a Helix API
@@ -309,6 +309,8 @@ pub struct NetworkConfig {
     /// Twitch: show the name colors users picked (the `color` tag) in the chat, independently of
     /// `appearance.colored_nicks`.
     pub twitch_colors: bool,
+    /// Twitch: show chat badges as the images Twitch shows (needs an API token), else as symbols.
+    pub badge_images: bool,
     /// Twitch: "Open stream" opens the popout player instead of the channel page.
     pub twitch_popout: bool,
     /// Twitch: list live channels before offline ones in the sidebar (each group keeping
@@ -368,6 +370,7 @@ impl Default for NetworkConfig {
             twitch_client_id: None,
             live_check_secs: 120,
             twitch_colors: true,
+            badge_images: true,
             twitch_popout: false,
             twitch_live_first: false,
             emote_completion: true,

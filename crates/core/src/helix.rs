@@ -1,4 +1,5 @@
-//! A minimal Twitch Helix API client: whether channels are live, with their title and game.
+//! A minimal Twitch Helix API client: whether channels are live, with their title and game;
+//! emotes; chat badges.
 //!
 //! The app model decides *when* to check ([`crate::app::Effect::TwitchLive`]); the UI runs
 //! [`check`] on a worker thread (it blocks on HTTPS) and hands the [`LiveResult`] back to
@@ -392,9 +393,108 @@ pub fn parse_emotes(body: &[u8]) -> Result<(Vec<TwitchEmote>, Option<String>), S
     Ok((list, r.pagination.cursor.filter(|c| !c.is_empty())))
 }
 
+// ----- chat badges -------------------------------------------------------------------------------
+
+/// One chat badge image from the Helix API.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, Deserialize)]
+pub struct BadgeImage {
+    /// Hover text ("Subscriber", "VIP" …).
+    pub title: String,
+    /// The image at 18, 36 and 72 pixels.
+    pub urls: [String; 3],
+}
+
+/// Fetches (blocking) Twitch's global chat badges (`broadcaster_id` = None) or a channel's own
+/// (subscriber and bits badges), as (`set/version`, image) pairs. `client_id` is the one the
+/// token belongs to, if known (else the token is validated first).
+pub fn chat_badges(
+    token: &str,
+    client_id: Option<&str>,
+    broadcaster_id: Option<&str>,
+) -> Result<Vec<(String, BadgeImage)>, String> {
+    let token = normalize_token(token);
+    if token.is_empty() {
+        return Err("no API token".into());
+    }
+    let cid = match client_id {
+        Some(c) => c.to_owned(),
+        None => {
+            let auth = format!("OAuth {token}");
+            let r = schwaetz_net::http::get_with(
+                "https://id.twitch.tv/oauth2/validate",
+                &[("Authorization", &auth)],
+                MAX_BODY,
+                false,
+            )?;
+            match r.status {
+                200 => parse_validate(&r.body)?,
+                401 => return Err(UNAUTHORIZED.into()),
+                s => return Err(format!("token validation failed (HTTP {s})")),
+            }
+        }
+    };
+    let url = match broadcaster_id {
+        Some(id) => format!("{HELIX}/chat/badges?broadcaster_id={}", encode(id)),
+        None => format!("{HELIX}/chat/badges/global"),
+    };
+    let bearer = format!("Bearer {token}");
+    let r = schwaetz_net::http::get_with(&url, &[("Authorization", &bearer), ("Client-Id", &cid)], 8 << 20, false)?;
+    match r.status {
+        200 => parse_badges(&r.body),
+        401 => Err(UNAUTHORIZED.into()),
+        429 => Err("rate limited by Twitch".into()),
+        s => Err(format!("badge request failed (HTTP {s})")),
+    }
+}
+
+/// Parses a Helix badge list into (`set/version`, image) pairs.
+pub fn parse_badges(body: &[u8]) -> Result<Vec<(String, BadgeImage)>, String> {
+    #[derive(Deserialize)]
+    struct Version {
+        id: String,
+        #[serde(default)]
+        title: String,
+        image_url_1x: String,
+        image_url_2x: String,
+        image_url_4x: String,
+    }
+    #[derive(Deserialize)]
+    struct Set {
+        set_id: String,
+        versions: Vec<Version>,
+    }
+    Ok(json::<Data<Set>>(body)?
+        .data
+        .into_iter()
+        .flat_map(|s| {
+            s.versions.into_iter().map(move |v| {
+                let image = BadgeImage { title: v.title, urls: [v.image_url_1x, v.image_url_2x, v.image_url_4x] };
+                (format!("{}/{}", s.set_id, v.id), image)
+            })
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_badge_lists() {
+        let body = br#"{"data":[{"set_id":"subscriber","versions":[
+            {"id":"0","image_url_1x":"https://static-cdn.jtvnw.net/badges/v1/5d9f2208-5dd8-11e7-8513-2ff4adfae661/1",
+             "image_url_2x":"https://static-cdn.jtvnw.net/badges/v1/5d9f2208-5dd8-11e7-8513-2ff4adfae661/2",
+             "image_url_4x":"https://static-cdn.jtvnw.net/badges/v1/5d9f2208-5dd8-11e7-8513-2ff4adfae661/3",
+             "title":"Subscriber","description":"Subscriber","click_action":"subscribe_to_channel","click_url":null},
+            {"id":"12","image_url_1x":"a/1","image_url_2x":"a/2","image_url_4x":"a/3","title":"1-Year Subscriber"}]},
+            {"set_id":"vip","versions":[{"id":"1","image_url_1x":"v/1","image_url_2x":"v/2","image_url_4x":"v/3","title":"VIP"}]}]}"#;
+        let list = parse_badges(body).unwrap();
+        let ids: Vec<_> = list.iter().map(|(id, b)| (id.as_str(), b.title.as_str())).collect();
+        assert_eq!(ids, [("subscriber/0", "Subscriber"), ("subscriber/12", "1-Year Subscriber"), ("vip/1", "VIP")]);
+        assert!(list[0].1.urls[1].ends_with("/2"));
+        assert!(parse_badges(br#"{"data":[]}"#).unwrap().is_empty());
+        assert!(parse_badges(b"<html>").is_err());
+    }
 
     #[test]
     fn parses_helix_responses() {

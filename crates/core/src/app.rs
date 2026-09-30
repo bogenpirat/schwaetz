@@ -1,6 +1,7 @@
 //! The application model. Owned by the UI thread; UI-agnostic and deterministic given its inputs
 //! (config, network events, user input and the current time), which keeps it testable.
 
+use crate::badges::BadgeRequest;
 use crate::buffer::{
     Activity, Buffer, BufferId, BufferKind, Line, LineExtra, LineFlags, LineKind, NotifyLevel, Typing,
 };
@@ -65,6 +66,9 @@ pub enum Effect {
     /// Fetch emotes on a worker thread (`emotes::fetch`) and pass the result to
     /// `App::on_emote_result`.
     FetchEmotes(EmoteRequest),
+    /// Load a badge list on a worker thread (`badges::fetch`) and pass the result to
+    /// `App::on_badge_result`.
+    FetchBadges(crate::badges::BadgeRequest),
     /// Talk to Twitch's OAuth server on a worker thread (`twitch_auth::execute`) and pass the
     /// response to `App::on_auth_result`.
     TwitchAuth {
@@ -199,6 +203,10 @@ pub struct App {
     emote_scope_hint: std::collections::HashSet<NetworkId>,
     /// Bumped whenever emote lists change, so an open (or not yet opened) completion updates.
     pub emote_gen: u64,
+    /// Twitch chat badge images (shared by all Twitch networks).
+    pub badges: crate::badges::Badges,
+    /// Bumped whenever badge lists arrive.
+    pub badge_gen: u64,
     /// Commands registered by scripts (completion and /help).
     pub extra_commands: Vec<(String, String)>,
     /// Persistent history (logging, scroll-back, search).
@@ -235,6 +243,8 @@ impl App {
             script_emotes: Default::default(),
             emote_scope_hint: Default::default(),
             emote_gen: 0,
+            badges: Default::default(),
+            badge_gen: 0,
             extra_commands: Vec::new(),
             history: None,
             config,
@@ -1481,6 +1491,7 @@ impl App {
         self.flush(net_id);
         self.live_on_ready(net_id);
         self.request_emotes(sb);
+        self.request_badges(net_id);
     }
 
     fn server_text(&mut self, net_id: NetworkId, msg: &Message, time: i64, label_buffer: Option<BufferId>) {
@@ -1653,6 +1664,7 @@ impl App {
         extra.account = tags.value("account").map(str::to_owned);
         if twitch {
             twitch::apply_tags(&mut extra, &tags, &stripped, &from.nick);
+            self.badges_seen(net_id, bid, &extra.badges);
             line.flags.set(LineFlags::FIRST_MESSAGE, tags.get("first-msg") == Some("1"));
             if own && let Some(st) = self.networks[&net_id].twitch_self.clone() {
                 twitch::apply_tags(&mut extra, &st, &stripped, &from.nick);
@@ -2021,8 +2033,9 @@ impl App {
                         b.room_id = Some(id.to_owned());
                     }
                     self.dirty.topic = true;
-                    // The channel's emotes can be fetched now.
+                    // The channel's emotes and badges can be fetched now.
                     self.request_emotes(bid);
+                    self.request_badges(net_id);
                 }
             }
             TwitchEvent::UserState { tags, .. } => {
@@ -2744,6 +2757,8 @@ impl App {
                         n.emotes.reset();
                     }
                     self.request_emotes(self.active);
+                    self.badges.retry_missing();
+                    self.request_badges(net);
                     let who = if login.is_empty() { String::new() } else { format!(" as {login}") };
                     self.status(sb, LineKind::Status, format!("Signed in to Twitch{who}."));
                 }
@@ -2897,6 +2912,61 @@ impl App {
         }
     }
 
+    /// Loads the badge lists a Twitch network needs that are not loaded or loading yet: the
+    /// global one and those of its channels whose id is known (from ROOMSTATE).
+    fn request_badges(&mut self, net: NetworkId) {
+        let Some(n) = self.networks.get(&net).filter(|n| n.is_twitch() && n.cfg.badge_images) else { return };
+        let rooms: Vec<String> = self
+            .buffers
+            .iter()
+            .filter(|b| b.network == Some(net) && b.kind == BufferKind::Channel)
+            .filter_map(|b| b.room_id.clone())
+            .collect();
+        let client_id = n.live.client_id.clone();
+        let (token, token_client) = self.api_token(net).unzip();
+        let client_id = token_client.flatten().or(client_id);
+        for room_id in std::iter::once(None).chain(rooms.into_iter().map(Some)) {
+            if self.badges.start(room_id.as_deref()) {
+                let req = BadgeRequest { room_id, token: token.clone(), client_id: client_id.clone(), refresh: false };
+                self.effects.push(Effect::FetchBadges(req));
+            }
+        }
+    }
+
+    /// A message came with these badges: fetches a list again if one of them is in neither the
+    /// channel's nor the global list (a new subscriber tier, a new global badge).
+    fn badges_seen(&mut self, net: NetworkId, buffer: BufferId, badges: &[String]) {
+        if badges.is_empty() || !self.networks.get(&net).is_some_and(|n| n.cfg.badge_images) {
+            return;
+        }
+        let room = self.buffer(buffer).and_then(|b| b.room_id.clone());
+        for badge in badges {
+            let Some(room_id) = self.badges.refresh_for(room.as_deref(), badge) else { continue };
+            let Some((token, client_id)) = self.api_token(net) else { return };
+            let client_id = client_id.or_else(|| self.networks.get(&net).and_then(|n| n.live.client_id.clone()));
+            tracing::info!("badge {badge} unknown: fetching the {} list again", room_id.as_deref().unwrap_or("global"));
+            let req = BadgeRequest { room_id, token: Some(token), client_id, refresh: true };
+            self.effects.push(Effect::FetchBadges(req));
+        }
+    }
+
+    /// An [`Effect::FetchBadges`] load finished.
+    pub fn on_badge_result(&mut self, r: crate::badges::BadgeResult) {
+        let loaded = r.badges.is_some();
+        self.badges.insert(r);
+        if loaded {
+            self.badge_gen += 1;
+            self.dirty.lines = true;
+        }
+    }
+
+    /// Badge images for the lines of a buffer, if its network shows them.
+    pub fn badge_lookup(&self, buffer: BufferId) -> Option<crate::badges::Lookup<'_>> {
+        let b = self.buffer(buffer)?;
+        b.network.and_then(|n| self.networks.get(&n)).filter(|n| n.is_twitch() && n.cfg.badge_images)?;
+        Some(crate::badges::Lookup { badges: &self.badges, room_id: b.room_id.as_deref() })
+    }
+
     /// An [`Effect::FetchEmotes`] fetch finished.
     pub fn on_emote_result(&mut self, r: EmoteResult) {
         let Some(n) = self.networks.get_mut(&r.network).filter(|n| n.emotes.connection == r.connection) else {
@@ -2923,6 +2993,7 @@ impl App {
     fn emotes_on_config(&mut self, net: NetworkId) {
         self.emote_gen += 1;
         self.dirty.lines = true;
+        self.request_badges(net);
         let server = self.networks.get(&net).map(|n| n.server_buffer);
         let channels: Vec<BufferId> = self
             .buffers

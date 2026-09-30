@@ -4,6 +4,7 @@
 //! buffers and drains [`Effect`]s (notifications, persistence) and network commands.
 
 pub mod app;
+pub mod badges;
 pub mod buffer;
 pub mod commands;
 pub mod completion;
