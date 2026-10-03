@@ -458,6 +458,10 @@ impl Ui {
         }
         self.app.dark_theme = self.theme.dark;
         win::set_dark_titlebar(self.hwnd, self.theme.dark);
+        // The title bar is a raised strip in the theme's own colors, focused or not.
+        let th = &self.theme;
+        let border = with_alpha(crate::anim::mix(th.panel_bg, th.border, th.border.a), 1.0);
+        win::set_titlebar_colors(self.hwnd, th.panel_bg, th.sidebar_header, border);
         win::allow_dark_menus(self.theme.dark);
         self.mica = win::enable_mica(self.hwnd, a.mica);
         self.chat.style_gen += 1;

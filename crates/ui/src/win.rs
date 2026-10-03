@@ -1,5 +1,6 @@
 //! Small Win32 helpers: clipboard, tray icon, context menus, window chrome, shell.
 
+use crate::gfx::Color;
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
 use windows::Win32::System::DataExchange::{
@@ -88,6 +89,22 @@ pub fn set_dark_titlebar(hwnd: HWND, dark: bool) {
     let v = BOOL::from(dark);
     unsafe {
         let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(20), &v as *const _ as _, 4);
+    }
+}
+
+/// Gives the title bar fixed colors instead of the Windows accent color it otherwise takes while
+/// the window is focused (Windows 11; older versions ignore this). Alpha is ignored.
+pub fn set_titlebar_colors(hwnd: HWND, caption: Color, text: Color, border: Color) {
+    let colorref = |c: Color| {
+        let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+        ch(c.r) | ch(c.g) << 8 | ch(c.b) << 16
+    };
+    // DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_BORDER_COLOR
+    for (attr, c) in [(35, caption), (36, text), (34, border)] {
+        let v = colorref(c);
+        unsafe {
+            let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(attr), &v as *const _ as _, 4);
+        }
     }
 }
 
