@@ -135,7 +135,15 @@ impl Sidebar {
                 p.circle(r.x + 16.0, r.y + r.h / 2.0, 4.0, dot);
                 let l = text.layout(&name, &f.ui_semibold, (right - r.x - 30.0).max(10.0), 30.0);
                 let lh = text::metrics(&l).height;
-                p.text(&l, r.x + 28.0, r.y + (r.h - lh) / 2.0, th.sidebar_header);
+                // Like channels: grey unless selected or something happened in the server buffer itself.
+                let color = if b.notify == NotifyLevel::Mute {
+                    with_alpha(th.sidebar_dim, 0.7)
+                } else if active || b.activity >= Activity::Messages {
+                    th.sidebar_header
+                } else {
+                    th.sidebar_dim
+                };
+                p.text(&l, r.x + 28.0, r.y + (r.h - lh) / 2.0, color);
             } else {
                 let live = b.stream.as_ref().is_some_and(|s| s.live);
                 let (glyph, dim) = match b.kind {
