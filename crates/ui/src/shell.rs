@@ -62,6 +62,16 @@ struct EmoteCompletion {
     rect: Rect,
 }
 
+/// Search mode (Ctrl+F): the input box holds a pattern and the chat shows only matching lines.
+struct Search {
+    /// The message being written when the search started; back in the input box afterwards.
+    draft: Editor,
+    /// The input text the chat's filter was last built from.
+    pattern: String,
+    /// Why the pattern is not a valid regular expression.
+    error: Option<String>,
+}
+
 /// Longest pause between the two Shift presses that open the quick switcher.
 const DOUBLE_TAP_MS: i64 = 400;
 
@@ -193,6 +203,7 @@ pub struct Ui {
     upload_seq: u64,
     /// The input currently draws upload placeholders.
     upload_chips: bool,
+    search: Option<Search>,
     /// When Shift was last pressed on its own (0: not, or another key came after it).
     shift_tap: i64,
 }
@@ -345,6 +356,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         uploads: Vec::new(),
         upload_seq: 0,
         upload_chips: false,
+        search: None,
         shift_tap: 0,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
@@ -431,7 +443,7 @@ impl Ui {
              the GNU GPL v3 with ABSOLUTELY NO WARRANTY, see LICENSE and NOTICE."
                 .to_owned(),
             "Connect with /connect irc.libera.chat (or a configured network name), then /join #channel.".to_owned(),
-            "Ctrl+J or double Shift quick switcher · Alt+1…9 switch buffers · Alt+A next activity · Ctrl+W close · /help lists commands.".to_owned(),
+            "Ctrl+J or double Shift quick switcher · Ctrl+F search · Alt+1…9 switch buffers · Alt+A next activity · Ctrl+W close · /help lists commands.".to_owned(),
             format!("Settings live in {} — edit with /set section.key value.", self.paths.config_file().display()),
         ];
         if self.app.networks.is_empty() {
@@ -578,6 +590,7 @@ impl Ui {
     fn paint(&mut self) {
         self.layout();
         self.sync_active();
+        self.sync_search();
         self.sync_uploads();
         let (pw, ph) = self.client_size();
         let Some(mut gfx) = self.gfx.take() else { return };
@@ -612,6 +625,7 @@ impl Ui {
     fn sync_active(&mut self) {
         let id = self.app.active;
         if self.shown_buffer != Some(id) {
+            self.leave_search();
             // Save the draft of the buffer we're leaving and restore the new one's.
             if let Some(prev) = self.shown_buffer {
                 let draft = self.input.text().to_owned();
@@ -725,7 +739,15 @@ impl Ui {
             self.win_rect.h - self.chat.rect.bottom(),
         );
         p.fill(chat_bottom, th.chat_bg);
-        if !typing.is_empty() {
+        if let Some(s) = self.search.as_ref().filter(|s| !s.pattern.is_empty()) {
+            let (note, color) = match (&s.error, self.chat.shown) {
+                (Some(e), _) => (format!("Not a valid pattern: {e}"), th.error),
+                (None, 1) => ("1 matching line".to_owned(), th.text_dim),
+                (None, n) => (format!("{n} matching lines"), th.text_dim),
+            };
+            let l = self.text.layout(&note, &f.ui_small, self.typing_rect.w, 20.0);
+            p.text(&l, self.typing_rect.x, self.typing_rect.y + 2.0, color);
+        } else if !typing.is_empty() {
             let verb = if typing.contains(',') { "are" } else { "is" };
             let l = self.text.layout(&format!("{typing} {verb} typing…"), &f.ui_small, self.typing_rect.w, 20.0);
             p.text(&l, self.typing_rect.x, self.typing_rect.y + 2.0, th.text_dim);
@@ -756,7 +778,12 @@ impl Ui {
         // Input box.
         let ir = self.input_rect;
         p.fill_round(ir, 10.0, th.input_bg);
-        p.stroke_round(ir, 10.0, th.border, 1.0);
+        let edge = match &self.search {
+            Some(s) if s.error.is_some() => th.error,
+            Some(_) => th.accent,
+            None => th.border,
+        };
+        p.stroke_round(ir, 10.0, edge, 1.0);
         let inner = ir.inset(14.0, 11.0);
         // Images being uploaded for this buffer show as placeholders in the text.
         let chip_colors = (th.badge_bg, with_alpha(th.accent, 0.4), th.text);
@@ -776,6 +803,7 @@ impl Ui {
             let b = self.app.active_buffer();
             let reply_nick = replying.map(|r| r.nick.clone());
             let ph = match b.kind {
+                _ if self.search.is_some() => format!("Search {} (regular expression, Esc closes)", b.name),
                 _ if let Some(n) = reply_nick => format!("Reply to {n}"),
                 BufferKind::Channel | BufferKind::Query => format!("Message {}", b.name),
                 _ => "Type a command, e.g. /connect irc.libera.chat".to_owned(),
@@ -1124,6 +1152,50 @@ impl Ui {
 
     // ----- input ---------------------------------------------------------------------------------
 
+    /// Ctrl+F: turns the input box into a search box for the active buffer.
+    fn start_search(&mut self) {
+        if self.search.is_some() {
+            self.input.select_all();
+            return;
+        }
+        self.sync_active();
+        let id = self.app.active;
+        if self.uploads.iter().any(|u| u.buffer == id) {
+            // A link is still on its way into the message being written.
+            return;
+        }
+        let draft = std::mem::take(&mut self.input);
+        self.completion = None;
+        self.search = Some(Search { draft, pattern: String::new(), error: None });
+    }
+
+    /// Shows all lines again and puts the message being written back into the input box.
+    fn leave_search(&mut self) {
+        let Some(s) = self.search.take() else { return };
+        self.input = s.draft;
+        self.chat.set_filter(None);
+    }
+
+    /// Filters the chat by the pattern in the search box. A pattern that is not valid (yet)
+    /// leaves the last filter in place.
+    fn sync_search(&mut self) {
+        let Some(s) = self.search.as_mut() else { return };
+        let text = self.input.text();
+        if s.pattern == text {
+            return;
+        }
+        s.pattern = text.to_owned();
+        s.error = None;
+        if text.is_empty() {
+            self.chat.set_filter(None);
+            return;
+        }
+        match regex_lite::RegexBuilder::new(text).case_insensitive(true).build() {
+            Ok(re) => self.chat.set_filter(Some(re)),
+            Err(e) => s.error = Some(e.to_string()),
+        }
+    }
+
     /// A Shift press on its own; the second of two quick ones opens the quick switcher.
     fn shift_tapped(&mut self) -> bool {
         if win::key_down(VK_CONTROL.0) || win::key_down(VK_MENU.0) {
@@ -1387,6 +1459,7 @@ impl Ui {
 
     /// Arms a reply to a chat line of the active buffer (from its hover button).
     fn start_reply(&mut self, line: u64) {
+        self.leave_search();
         let id = self.app.active;
         let Some(l) = self.app.buffer(id).and_then(|b| b.lines.iter().find(|l| l.id == line)) else { return };
         let Some(msgid) = l.msgid() else { return };
@@ -1408,6 +1481,9 @@ impl Ui {
     }
 
     fn typed(&mut self) {
+        if self.search.is_some() {
+            return;
+        }
         let t = now();
         let text = self.input.text();
         if text.is_empty() || text.starts_with('/') {
@@ -1714,10 +1790,14 @@ impl Ui {
             return true;
         }
         let lh = self.text.fonts.line_height;
+        let searching = self.search.is_some();
         match v {
+            // The chat is filtered as the pattern is typed.
+            VK_RETURN if searching => {}
             VK_RETURN if shift => self.input.insert("\n"),
             VK_RETURN => self.submit(),
             VK_TAB if ctrl => self.switch_relative(if shift { -1 } else { 1 }),
+            VK_TAB if searching => {}
             VK_TAB => {
                 let id = self.app.active;
                 let (t, c) = (self.input.text().to_owned(), self.input.cursor);
@@ -1731,7 +1811,7 @@ impl Ui {
             VK_RIGHT if alt => self.go_back(true),
             VK_UP | VK_DOWN => {
                 let down = v == VK_DOWN;
-                if ctrl {
+                if ctrl || searching {
                     self.chat_scroll(if down { -lh } else { lh });
                 } else if !self.input.move_v(down, shift) && !shift {
                     let id = self.app.active;
@@ -1756,6 +1836,7 @@ impl Ui {
             VK_BACK => self.input.backspace(ctrl),
             VK_DELETE => self.input.delete(ctrl),
             VK_INSERT if shift => self.paste(),
+            VK_ESCAPE if searching => self.leave_search(),
             VK_ESCAPE => {
                 let id = self.app.active;
                 if self.cancel_uploads(|u| u.buffer == id) {
@@ -1788,6 +1869,8 @@ impl Ui {
                 b'Z' if shift => self.input.redo(),
                 b'Z' => self.input.undo(),
                 b'Y' => self.input.redo(),
+                b'F' => self.start_search(),
+                b'B' | b'I' | b'U' | b'K' | b'R' | b'O' if searching => {}
                 b'B' => self.input.toggle_format('\x02'),
                 b'I' => self.input.toggle_format('\x1d'),
                 b'U' => self.input.toggle_format('\x1f'),
@@ -2786,6 +2869,7 @@ impl Ui {
         };
         match choice {
             3 => {
+                self.leave_search();
                 let t = if self.input.is_empty() { format!("{nick}: ") } else { format!("{nick} ") };
                 self.input.insert(&t);
             }
@@ -2834,6 +2918,7 @@ impl Ui {
                 }
             }
             3 => {
+                self.leave_search();
                 self.input.insert(&format!("@{nick} "));
             }
             4 => {
@@ -3596,7 +3681,7 @@ impl Ui {
 
     /// Ctrl+V in the input box: an image is uploaded and its link inserted; text is inserted.
     fn paste(&mut self) {
-        if self.uploads_here() {
+        if self.search.is_none() && self.uploads_here() {
             let sources: Vec<UploadSource> = match win::clipboard_image(self.hwnd) {
                 Some(win::ImageSource::Files(files)) => files
                     .into_iter()
@@ -3648,6 +3733,7 @@ impl Ui {
     /// Puts a placeholder at the caret and uploads on a worker thread; the result arrives as
     /// [`WorkerResult::Upload`].
     fn start_upload(&mut self, source: UploadSource) {
+        self.leave_search();
         self.sync_active();
         let live: Vec<char> = self.uploads.iter().map(|u| u.marker).collect();
         let Some(marker) = (0..MARKER_COUNT)
@@ -3761,6 +3847,9 @@ impl Ui {
     /// Opens, updates or closes the emote list for the `:word` before the caret (Twitch
     /// channels only: a `:` at the start of a word followed by at least one letter or digit).
     fn refresh_completion(&mut self) {
+        if self.search.is_some() {
+            return;
+        }
         let text = self.input.text();
         let cursor = self.input.cursor.min(text.len());
         let before = &text[..cursor];

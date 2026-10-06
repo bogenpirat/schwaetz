@@ -3,6 +3,7 @@
 use crate::gfx::{Painter, Rect, with_alpha};
 use crate::text::{self, BgRun, Brushes, Text, U16Map};
 use crate::theme::Theme;
+use regex_lite::Regex;
 use schwaetz_core::buffer::{Buffer, BufferId, Emote, Line, LineFlags, LineKind, add_emote};
 use schwaetz_core::time;
 use std::collections::HashMap;
@@ -135,6 +136,12 @@ pub struct ChatView {
     pub bar_hot: bool,
     /// Lines that fit above the bottom one in the last frame (maps scrollbar positions to lines).
     per_view: usize,
+    /// Search pattern: only lines whose text or nick matches are shown.
+    filter: Option<Regex>,
+    /// Line id → whether it matches `filter`.
+    filter_memo: HashMap<u64, bool>,
+    /// Lines shown in the last frame, wherever scrolled to.
+    pub shown: usize,
 }
 
 /// Width of the widest nick column text in a buffer, kept up to date as lines arrive.
@@ -211,12 +218,20 @@ impl Default for ChatView {
             bar: None,
             bar_hot: false,
             per_view: 0,
+            filter: None,
+            filter_memo: HashMap::new(),
+            shown: 0,
         }
     }
 }
 
 fn visible(l: &Line) -> bool {
     !l.flags.has(LineFlags::FILTERED)
+}
+
+/// Whether a search pattern finds something in a line's text or its sender's name.
+fn matches(re: &Regex, l: &Line) -> bool {
+    re.is_match(&schwaetz_proto::format::strip(&l.text)) || re.is_match(l.display_nick())
 }
 
 impl ChatView {
@@ -230,6 +245,32 @@ impl ChatView {
             self.marker = marker;
             self.cache.clear();
         }
+    }
+
+    /// Shows only the lines matching a search pattern (`None`: all of them again).
+    pub fn set_filter(&mut self, filter: Option<Regex>) {
+        if filter.is_some() {
+            self.scroll_to_bottom();
+        }
+        self.filter = filter;
+        self.filter_memo.clear();
+    }
+
+    /// Indices of the lines to show: not hidden, and matching the search pattern if there is one.
+    fn visible_lines(&mut self, b: &Buffer) -> Vec<usize> {
+        let Some(re) = &self.filter else {
+            return (0..b.lines.len()).filter(|&i| visible(&b.lines[i])).collect();
+        };
+        let memo = &mut self.filter_memo;
+        if memo.len() > 50_000 {
+            memo.clear();
+        }
+        (0..b.lines.len())
+            .filter(|&i| {
+                let l = &b.lines[i];
+                visible(l) && *memo.entry(l.id).or_insert_with(|| matches(re, l))
+            })
+            .collect()
     }
 
     pub fn invalidate_styles(&mut self) {
@@ -653,7 +694,7 @@ impl ChatView {
     pub fn scroll(&mut self, c: &mut Ctx, b: &Buffer, dy: f32) {
         self.fit_nicks(c, b);
         self.check_cache_key(c);
-        let vis: Vec<usize> = (0..b.lines.len()).filter(|&i| visible(&b.lines[i])).collect();
+        let vis = self.visible_lines(b);
         if vis.is_empty() {
             return;
         }
@@ -758,7 +799,7 @@ impl ChatView {
 
     /// Scrolls to a scrollbar position: 0 shows the oldest lines, 1 the newest.
     pub fn scroll_to(&mut self, c: &mut Ctx, b: &Buffer, pos: f32) {
-        let vis: Vec<usize> = (0..b.lines.len()).filter(|&i| visible(&b.lines[i])).collect();
+        let vis = self.visible_lines(b);
         if vis.is_empty() {
             return;
         }
@@ -788,8 +829,9 @@ impl ChatView {
         if self.nicks.len() > 2000 {
             self.nicks.clear();
         }
-        let vis: Vec<usize> = (0..b.lines.len()).filter(|&i| visible(&b.lines[i])).collect();
+        let vis = self.visible_lines(b);
         self.bar = None;
+        self.shown = vis.len();
         if vis.is_empty() {
             return;
         }
@@ -811,7 +853,7 @@ impl ChatView {
         if vi < 0 && y > 0.0 && !self.pinned {
             self.wants_older = true;
         }
-        if vi < 0 && y > 0.0 && b.lines.len() >= 20 && self.pinned && !b.history_exhausted {
+        if vi < 0 && y > 0.0 && b.lines.len() >= 20 && self.pinned && !b.history_exhausted && self.filter.is_none() {
             // The whole buffer fits: nothing older in memory, try history.
             self.wants_older = true;
         }
@@ -940,6 +982,16 @@ impl ChatView {
         for bg in &e.bgs {
             for (rx, ry, rw, rh) in text::range_rects(&e.msg, bg.start, bg.len) {
                 p.fill(Rect::new(msg_x + rx, my + ry, rw, rh), bg.color);
+            }
+        }
+        // Search matches.
+        if let Some(re) = &self.filter {
+            for found in re.find_iter(&e.plain).filter(|f| !f.is_empty()) {
+                let from = e.map.to_u16(found.start() as u32);
+                let len = e.map.to_u16(found.end() as u32) - from;
+                for (rx, ry, rw, rh) in text::range_rects(&e.msg, from, len) {
+                    p.fill(Rect::new(msg_x + rx, my + ry, rw, rh), with_alpha(th.accent, 0.35));
+                }
             }
         }
         // Selection.
@@ -1150,7 +1202,7 @@ impl ChatView {
         let mut out = String::new();
         for i in ai..=zi {
             let line = &b.lines[i];
-            if !visible(line) {
+            if !visible(line) || self.filter.as_ref().is_some_and(|re| !matches(re, line)) {
                 continue;
             }
             let plain = match self.cache.get(&line.id) {

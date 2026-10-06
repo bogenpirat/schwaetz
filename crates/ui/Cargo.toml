@@ -14,6 +14,7 @@ schwaetz-core.workspace = true
 serde.workspace = true
 toml.workspace = true
 linkify.workspace = true
+regex-lite.workspace = true
 tracing.workspace = true
 windows-numerics = "0.3"
 windows-core = "0.62"

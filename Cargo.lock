@@ -1630,6 +1630,7 @@ name = "schwaetz-ui"
 version = "1.0.0"
 dependencies = [
  "linkify",
+ "regex-lite",
  "schwaetz-client",
  "schwaetz-core",
  "schwaetz-media",
