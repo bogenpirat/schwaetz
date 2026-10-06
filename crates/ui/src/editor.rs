@@ -1,7 +1,7 @@
 //! Multi-line text editor used for the input box and dialog text fields.
 
 use crate::text::{self, Text, U16Map};
-use windows::Win32::Graphics::DirectWrite::{IDWriteTextFormat, IDWriteTextLayout};
+use windows::Win32::Graphics::DirectWrite::{IDWriteInlineObject, IDWriteTextFormat, IDWriteTextLayout};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EditKind {
@@ -23,6 +23,8 @@ pub struct Editor {
     pub single_line: bool,
     /// Render as bullets (password fields).
     pub masked: bool,
+    /// Characters drawn as inline objects instead of glyphs (pending uploads).
+    objects: Vec<(char, IDWriteInlineObject)>,
 }
 
 /// mIRC control codes are shown as visible control pictures (one UTF-16 unit each, so offsets
@@ -60,6 +62,7 @@ impl Default for Editor {
             version: 0,
             single_line: false,
             masked: false,
+            objects: Vec::new(),
         }
     }
 }
@@ -143,6 +146,47 @@ impl Editor {
         self.text.insert_str(self.cursor, &s);
         self.cursor += s.len();
         self.anchor = self.cursor;
+        self.changed();
+    }
+
+    /// Sets the characters that are drawn as inline objects.
+    pub fn set_objects(&mut self, objects: Vec<(char, IDWriteInlineObject)>) {
+        self.objects = objects;
+        self.version += 1;
+    }
+
+    /// Replaces the first `c` with `s` as one undo step. Returns false if there is none.
+    pub fn replace_char(&mut self, c: char, s: &str) -> bool {
+        let Some(at) = self.text.find(c) else { return false };
+        self.snapshot(EditKind::None);
+        self.splice_char(at, c, s);
+        true
+    }
+
+    /// Removes every `c` without an undo step, as if it had never been there (a space that only
+    /// set it apart from the next word goes too).
+    pub fn remove_char(&mut self, c: char) -> bool {
+        let mut found = false;
+        while let Some(at) = self.text.find(c) {
+            let end = at + c.len_utf8();
+            let apart = self.text[end..].starts_with(' ') && !self.text[..at].ends_with(|p: char| !p.is_whitespace());
+            self.splice(at, end + apart as usize, "");
+            found = true;
+        }
+        found
+    }
+
+    fn splice_char(&mut self, at: usize, c: char, s: &str) {
+        self.splice(at, at + c.len_utf8(), s);
+    }
+
+    fn splice(&mut self, at: usize, end: usize, s: &str) {
+        self.text.replace_range(at..end, s);
+        for p in [&mut self.cursor, &mut self.anchor] {
+            if *p >= end {
+                *p = *p - (end - at) + s.len();
+            }
+        }
         self.changed();
     }
 
@@ -296,6 +340,17 @@ impl Editor {
             if self.single_line {
                 unsafe {
                     let _ = l.SetWordWrapping(windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_NO_WRAP);
+                }
+            }
+            if !self.masked && !self.objects.is_empty() {
+                let mut u = 0u32;
+                for c in self.text.chars() {
+                    if let Some((_, obj)) = self.objects.iter().find(|(o, _)| *o == c) {
+                        unsafe {
+                            let _ = l.SetInlineObject(obj, text::range(u, c.len_utf16() as u32));
+                        }
+                    }
+                    u += c.len_utf16() as u32;
                 }
             }
             let map = if self.masked { U16Map::new(&display) } else { U16Map::new(&self.text) };
@@ -495,6 +550,29 @@ mod tests {
         e.redo();
         e.redo();
         assert_eq!(e.text(), "hello world");
+    }
+
+    #[test]
+    fn placeholder_characters() {
+        let mut e = Editor::default();
+        e.set_text("a \u{e000} b", Some(1));
+        e.anchor = 6;
+        assert!(e.replace_char('\u{e000}', "https://x/y"));
+        assert_eq!(e.text(), "a https://x/y b");
+        assert_eq!((e.cursor, e.anchor), (1, 14), "positions after it move along");
+        assert!(!e.replace_char('\u{e000}', "again"));
+        e.undo();
+        assert_eq!(e.text(), "a \u{e000} b");
+        assert!(e.remove_char('\u{e000}'));
+        assert_eq!(e.text(), "a b", "the space that set it apart goes too");
+        e.undo();
+        assert_ne!(e.text(), "a b", "removal is not an undo step of its own");
+        e.set_text("\u{e000} ", None);
+        e.remove_char('\u{e000}');
+        assert_eq!((e.text(), e.cursor), ("", 0));
+        e.set_text("a\u{e000} b", None);
+        e.remove_char('\u{e000}');
+        assert_eq!(e.text(), "a b");
     }
 
     #[test]

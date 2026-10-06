@@ -32,6 +32,15 @@ application, set the variable in your environment (`$env:SCHWAETZ_TWITCH_CLIENT_
 which takes precedence; an empty value builds without Twitch sign-in. The OAuth endpoints can be
 checked with `cargo test -p schwaetz-core --test twitch_live -- --ignored --nocapture`.
 
+## Imgur uploads
+
+Image uploads use the Imgur application whose Client-ID is compiled in from
+`SCHWAETZ_IMGUR_CLIENT_ID` (`.cargo\config.toml`, or the environment, which takes precedence).
+It is empty by default; then the ID is read at the first upload from the script of imgur.com
+(see `crates/core/src/imgur.rs`). Check against the real service with
+`cargo test -p schwaetz-core --test imgur_live -- --ignored --nocapture`; the upload test publishes
+a small image for a moment and only runs with `$env:SCHWAETZ_IMGUR_UPLOAD_TEST = "1"`.
+
 ## Releases
 
 The **Release** workflow (Actions → Release → Run workflow) builds, tests and publishes x86_64 and

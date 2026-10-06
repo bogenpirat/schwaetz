@@ -4,3 +4,6 @@
 # are public identifiers, not secrets. Set SCHWAETZ_TWITCH_CLIENT_ID in the environment to build
 # with a different application; an empty value builds without Twitch sign-in.
 SCHWAETZ_TWITCH_CLIENT_ID = "el58vrvctcaubqzassbyaf6k0cjvp1"
+# Imgur application used for image uploads. Empty: the Client-ID of Imgur's own website is looked
+# up at the first upload. Users can set their own with `[uploads] imgur_client_id`.
+SCHWAETZ_IMGUR_CLIENT_ID = ""

@@ -15,6 +15,7 @@ pub struct Config {
     pub notifications: Notifications,
     pub highlight: Highlight,
     pub previews: Previews,
+    pub uploads: Uploads,
     #[serde(default, skip_serializing_if = "Scripts::is_default")]
     pub scripts: Scripts,
     #[serde(rename = "ignore", skip_serializing_if = "Vec::is_empty")]
@@ -206,6 +207,22 @@ pub struct Previews {
 impl Default for Previews {
     fn default() -> Self {
         Previews { enabled: false, auto_load: false, allow_hosts: Vec::new(), max_bytes: 10 << 20, max_dimension: 4096 }
+    }
+}
+
+/// `[uploads]`: images pasted or dropped into the input box.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Uploads {
+    /// Upload pasted and dropped images to Imgur and insert their link.
+    pub imgur: bool,
+    /// Imgur application to upload with; empty uses the built-in one (see [`crate::imgur`]).
+    pub imgur_client_id: String,
+}
+
+impl Default for Uploads {
+    fn default() -> Self {
+        Uploads { imgur: true, imgur_client_id: String::new() }
     }
 }
 

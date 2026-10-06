@@ -161,6 +161,21 @@ Only HTTPS is fetched.
 `[scripts]`: `disabled` (script file names without extension that are switched off; see
 [scripting](scripting.md)).
 
+## Image uploads (`[uploads]`)
+
+Pasting an image (**Ctrl+V**) or dropping image files into a channel or query uploads them to
+[Imgur](https://imgur.com) and puts the direct link into your message. Until the link is there, a
+placeholder shows the progress; deleting it or pressing **Esc** cancels the upload, and **Enter**
+waits for it. Uploaded images are public to anyone who has the link.
+
+- `imgur` (on by default): set to `false` to paste and drop as plain text only.
+- `imgur_client_id`: the Client-ID of your own Imgur application. When empty, the one built into
+  the release is used, and failing that the one Imgur's website itself uploads with. That last one
+  is not an official offer by Imgur and may stop working; set your own if uploads fail.
+
+PNG, JPEG, GIF, WebP and BMP files up to 20 MB are accepted. A clipboard that holds text as well
+as an image (copied spreadsheet cells, for example) pastes its text.
+
 ## Files
 
 | Path | Contents |

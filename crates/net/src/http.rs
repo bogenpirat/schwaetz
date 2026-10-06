@@ -79,3 +79,56 @@ pub fn post_form(url: &str, fields: &[(&str, &str)], max_bytes: u64) -> Result<R
     }
     Ok(Response { status, content_type, body, url: final_url })
 }
+
+fn finish(resp: ureq::http::Response<ureq::Body>, max_bytes: u64) -> Result<Response, String> {
+    let status = resp.status().as_u16();
+    let content_type =
+        resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
+    let final_url = resp.get_uri().to_string();
+    let mut body = Vec::new();
+    resp.into_body().into_reader().take(max_bytes + 1).read_to_end(&mut body).map_err(|e| e.to_string())?;
+    if body.len() as u64 > max_bytes {
+        return Err(format!("response larger than {max_bytes} bytes"));
+    }
+    Ok(Response { status, content_type, body, url: final_url })
+}
+
+/// POSTs `len` bytes read from `body` to an `https://` URL (file uploads). The body is streamed,
+/// so a reader that starts failing aborts the request; `timeout` replaces the usual 15 seconds.
+pub fn post_body(
+    url: &str,
+    headers: &[(&str, &str)],
+    content_type: &str,
+    body: &mut dyn Read,
+    len: u64,
+    max_bytes: u64,
+    timeout: Duration,
+) -> Result<Response, String> {
+    if !url.to_ascii_lowercase().starts_with("https://") {
+        return Err("only https URLs are used".into());
+    }
+    let mut req = agent()
+        .post(url)
+        .config()
+        .timeout_global(Some(timeout))
+        .build()
+        .content_type(content_type)
+        .header("Content-Length", len.to_string());
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = req.send(ureq::SendBody::from_reader(body)).map_err(|e| e.to_string())?;
+    finish(resp, max_bytes)
+}
+
+/// Sends a DELETE to an `https://` URL.
+pub fn delete_with(url: &str, headers: &[(&str, &str)], max_bytes: u64) -> Result<Response, String> {
+    if !url.to_ascii_lowercase().starts_with("https://") {
+        return Err("only https URLs are used".into());
+    }
+    let mut req = agent().delete(url);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    finish(req.call().map_err(|e| e.to_string())?, max_bytes)
+}

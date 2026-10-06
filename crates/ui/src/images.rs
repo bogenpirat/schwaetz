@@ -1,4 +1,5 @@
-//! Decoded images as Direct2D bitmaps, inline emote objects and link-preview state.
+//! Decoded images as Direct2D bitmaps, inline emote objects, link-preview state and the
+//! placeholder of an image being uploaded.
 
 use schwaetz_media::PageMeta;
 use std::cell::RefCell;
@@ -239,6 +240,139 @@ impl IDWriteInlineObject_Impl for InlineImage_Impl {
         if let Some(bmp) = bmp {
             let r = D2D_RECT_F { left: x, top: y, right: x + self.draw_w, bottom: y + self.height };
             unsafe { self.dc.DrawBitmap(&bmp, Some(&r), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None) };
+        }
+        Ok(())
+    }
+
+    fn GetMetrics(&self) -> windows_core::Result<DWRITE_INLINE_OBJECT_METRICS> {
+        Ok(DWRITE_INLINE_OBJECT_METRICS {
+            width: self.width,
+            height: self.height,
+            baseline: self.baseline,
+            supportsSideways: false.into(),
+        })
+    }
+
+    fn GetOverhangMetrics(&self) -> windows_core::Result<DWRITE_OVERHANG_METRICS> {
+        Ok(DWRITE_OVERHANG_METRICS::default())
+    }
+
+    // The signature is fixed by the COM interface; pointers are checked for null.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    fn GetBreakConditions(
+        &self,
+        before: *mut DWRITE_BREAK_CONDITION,
+        after: *mut DWRITE_BREAK_CONDITION,
+    ) -> windows_core::Result<()> {
+        if before.is_null() || after.is_null() {
+            return Err(E_FAIL.into());
+        }
+        unsafe {
+            *before = DWRITE_BREAK_CONDITION_NEUTRAL;
+            *after = DWRITE_BREAK_CONDITION_NEUTRAL;
+        }
+        Ok(())
+    }
+}
+
+/// State of one upload, shared with its worker thread.
+#[derive(Default)]
+pub struct UploadProgress {
+    /// Bytes of the request sent so far.
+    pub sent: std::sync::atomic::AtomicU64,
+    /// Size of the request (0 until it has been prepared).
+    pub total: std::sync::atomic::AtomicU64,
+    /// Set by the UI to abort.
+    pub cancel: std::sync::atomic::AtomicBool,
+}
+
+impl UploadProgress {
+    fn label(&self) -> (String, f32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (sent, total) = (self.sent.load(Relaxed), self.total.load(Relaxed));
+        match (sent, total) {
+            (_, 0) => (UPLOAD_PREPARING.to_owned(), 0.0),
+            (s, t) if s >= t => ("Finishing…".to_owned(), 1.0),
+            (s, t) => (format!("Uploading… {} %", s * 100 / t), s as f32 / t as f32),
+        }
+    }
+}
+
+/// The widest label; the placeholder is sized for it.
+const UPLOAD_PREPARING: &str = "Preparing image…";
+
+/// The placeholder shown in the input box where the link of an image being uploaded will go:
+/// a pill with the state of the upload, filling up from the left.
+#[implement(IDWriteInlineObject)]
+pub struct UploadChip {
+    progress: std::sync::Arc<UploadProgress>,
+    dwrite: IDWriteFactory,
+    format: IDWriteTextFormat,
+    width: f32,
+    height: f32,
+    baseline: f32,
+    colors: (D2D1_COLOR_F, D2D1_COLOR_F, D2D1_COLOR_F),
+    dc: ID2D1DeviceContext,
+}
+
+impl UploadChip {
+    /// `colors` are the pill, its filled part and the text.
+    pub fn create(
+        progress: std::sync::Arc<UploadProgress>,
+        text: &crate::text::Text,
+        colors: (D2D1_COLOR_F, D2D1_COLOR_F, D2D1_COLOR_F),
+        dc: &ID2D1DeviceContext,
+    ) -> IDWriteInlineObject {
+        let f = &text.fonts;
+        // As tall as a line of the text around it, so the input box keeps its height.
+        let mut line = [DWRITE_LINE_METRICS::default()];
+        let mut lines = 0u32;
+        unsafe {
+            let _ = text.layout("X", &f.chat, 100.0, 100.0).GetLineMetrics(Some(&mut line), &mut lines);
+        }
+        let (height, baseline) =
+            if lines > 0 { (line[0].height, line[0].baseline) } else { (f.line_height, f.line_height * 0.8) };
+        let label = text.layout(UPLOAD_PREPARING, &f.ui_small, 400.0, 40.0);
+        UploadChip {
+            progress,
+            dwrite: text.dwrite.clone(),
+            format: f.ui_small.clone(),
+            width: crate::text::metrics(&label).width + 24.0,
+            height,
+            baseline,
+            colors,
+            dc: dc.clone(),
+        }
+        .into()
+    }
+}
+
+impl IDWriteInlineObject_Impl for UploadChip_Impl {
+    fn Draw(
+        &self,
+        _ctx: *const core::ffi::c_void,
+        _renderer: Ref<IDWriteTextRenderer>,
+        x: f32,
+        y: f32,
+        _sideways: BOOL,
+        _rtl: BOOL,
+        _effect: Ref<IUnknown>,
+    ) -> windows_core::Result<()> {
+        use crate::gfx::{Painter, Rect};
+        let (label, done) = self.progress.label();
+        let (bg, fill, fg) = self.colors;
+        let pill = Rect::new(x + 2.0, y + 1.0, self.width - 4.0, self.height - 2.0);
+        let p = Painter::new(&self.dc);
+        p.fill_round(pill, 6.0, bg);
+        if done > 0.0 {
+            p.clip(Rect::new(pill.x, pill.y, pill.w * done.min(1.0), pill.h));
+            p.fill_round(pill, 6.0, fill);
+            p.unclip();
+        }
+        let wide: Vec<u16> = label.encode_utf16().collect();
+        if let Ok(l) = unsafe { self.dwrite.CreateTextLayout(&wide, &self.format, pill.w, pill.h) } {
+            let m = crate::text::metrics(&l);
+            p.text(&l, pill.x + (pill.w - m.width) / 2.0, pill.y + (pill.h - m.height) / 2.0, fg);
         }
         Ok(())
     }

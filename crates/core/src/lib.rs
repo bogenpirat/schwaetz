@@ -13,6 +13,7 @@ pub mod emote_providers;
 pub mod emotes;
 pub mod filter;
 pub mod helix;
+pub mod imgur;
 pub mod paths;
 pub mod secrets;
 pub mod services;

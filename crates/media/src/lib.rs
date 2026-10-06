@@ -236,3 +236,9 @@ pub fn decode_frames(bytes: &[u8], max_dim: u32) -> Result<(u32, u32, Vec<Frame>
     wic::init_thread();
     wic::decode_frames(bytes, max_dim)
 }
+
+/// Re-encodes an image file as PNG (clipboard bitmaps before they are uploaded).
+pub fn to_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    wic::init_thread();
+    wic::to_png(bytes)
+}

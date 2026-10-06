@@ -130,3 +130,27 @@ fn animated_gif_frames_are_composited() {
     assert_eq!(px(&frames[1], 0, 0), vec![0, 0, 255, 255], "untouched area keeps frame 1 (red)");
     assert_eq!(px(&frames[1], 3, 3), vec![255, 0, 0, 255], "patched area is blue");
 }
+
+#[test]
+fn bitmap_becomes_an_opaque_png() {
+    // 2×1, 32 bits, BI_RGB: the fourth byte is undefined (zero here) and must not become alpha.
+    let pixels = [0u8, 0, 255, 0, 255, 0, 0, 0];
+    let mut bmp = b"BM".to_vec();
+    bmp.extend_from_slice(&(54 + pixels.len() as u32).to_le_bytes());
+    bmp.extend_from_slice(&[0; 4]);
+    bmp.extend_from_slice(&54u32.to_le_bytes());
+    bmp.extend_from_slice(&40u32.to_le_bytes());
+    bmp.extend_from_slice(&2i32.to_le_bytes());
+    bmp.extend_from_slice(&1i32.to_le_bytes());
+    bmp.extend_from_slice(&1u16.to_le_bytes());
+    bmp.extend_from_slice(&32u16.to_le_bytes());
+    bmp.extend_from_slice(&[0; 24]);
+    bmp.extend_from_slice(&pixels);
+
+    let png = schwaetz_media::to_png(&bmp).unwrap();
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    let (w, h, bgra) = schwaetz_media::decode(&png, 64).unwrap();
+    assert_eq!((w, h), (2, 1));
+    assert_eq!(bgra, vec![0, 0, 255, 255, 255, 0, 0, 255]);
+    assert!(schwaetz_media::to_png(b"not an image").is_err());
+}

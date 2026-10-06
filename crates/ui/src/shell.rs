@@ -70,7 +70,11 @@ enum WorkerResult {
     Emotes(schwaetz_core::emotes::EmoteResult),
     Badges(schwaetz_core::badges::BadgeResult),
     Auth(schwaetz_net::NetworkId, schwaetz_core::twitch_auth::AuthRequest, schwaetz_core::twitch_auth::AuthResponse),
+    /// An image upload finished (its id).
+    Upload(u64, UploadResult),
 }
+
+type UploadResult = Result<schwaetz_core::imgur::Uploaded, schwaetz_core::imgur::UploadError>;
 /// `dwData` tag for WM_COPYDATA messages carrying input for the running instance.
 pub const COPYDATA_MAGIC: usize = 0x5357_4158;
 const TIMER_TICK: usize = 1;
@@ -79,6 +83,8 @@ const TIMER_PAINT: usize = 3;
 const TIMER_ANIM: usize = 4;
 /// Next frame of a hover/press/switch transition.
 const TIMER_UI_ANIM: usize = 5;
+/// Repaints the progress of image uploads.
+const TIMER_UPLOAD: usize = 6;
 const SIDEBAR_MIN: f32 = 160.0;
 const TOPIC_H: f32 = 56.0;
 const NICKLIST_W: f32 = 210.0;
@@ -179,6 +185,11 @@ pub struct Ui {
     /// What the completion was last computed for: (`:` offset, query, emote data generation).
     /// Emote lists arrive asynchronously; a newer generation recomputes even with no key press.
     completion_for: Option<(usize, String, u64)>,
+    /// Images being uploaded; each has a placeholder in its buffer's input.
+    uploads: Vec<Upload>,
+    upload_seq: u64,
+    /// The input currently draws upload placeholders.
+    upload_chips: bool,
 }
 
 thread_local! {
@@ -225,6 +236,8 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
     let dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
     let scale = dpi / 96.0;
     unsafe {
+        // Image files dropped on the window are uploaded.
+        windows::Win32::UI::Shell::DragAcceptFiles(hwnd, true);
         let _ =
             SetWindowPos(hwnd, None, 0, 0, (1180.0 * scale) as i32, (760.0 * scale) as i32, SWP_NOMOVE | SWP_NOZORDER);
     }
@@ -324,6 +337,9 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         completion: None,
         completion_dismissed: None,
         completion_for: None,
+        uploads: Vec::new(),
+        upload_seq: 0,
+        upload_chips: false,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -556,6 +572,7 @@ impl Ui {
     fn paint(&mut self) {
         self.layout();
         self.sync_active();
+        self.sync_uploads();
         let (pw, ph) = self.client_size();
         let Some(mut gfx) = self.gfx.take() else { return };
         let dgen = gfx.generation;
@@ -735,6 +752,15 @@ impl Ui {
         p.fill_round(ir, 10.0, th.input_bg);
         p.stroke_round(ir, 10.0, th.border, 1.0);
         let inner = ir.inset(14.0, 11.0);
+        // Images being uploaded for this buffer show as placeholders in the text.
+        let chip_colors = (th.badge_bg, with_alpha(th.accent, 0.4), th.text);
+        let chips: Vec<_> = (self.uploads.iter().filter(|u| u.buffer == id))
+            .map(|u| (u.marker, crate::images::UploadChip::create(u.progress.clone(), &self.text, chip_colors, dc)))
+            .collect();
+        if !chips.is_empty() || self.upload_chips {
+            self.upload_chips = !chips.is_empty();
+            self.input.set_objects(chips);
+        }
         let layout = self.input.layout(&self.text, &f.chat, inner.w).clone();
         let content_h = text::metrics(&layout).height;
         let (cx, cy, ch) = self.input.caret();
@@ -1079,6 +1105,7 @@ impl Ui {
             return;
         }
         self.quitting = true;
+        self.cancel_uploads(|_| true);
         self.save_session();
         self.app.quit_all(None);
         for cmd in self.app.take_net_commands() {
@@ -1092,11 +1119,16 @@ impl Ui {
     // ----- input ---------------------------------------------------------------------------------
 
     fn submit(&mut self) {
+        self.sync_uploads();
         let text = self.input.text().to_owned();
         if text.trim().is_empty() {
             return;
         }
         let id = self.app.active;
+        if self.uploads.iter().any(|u| u.buffer == id) {
+            // A link is still on its way into this message.
+            return;
+        }
         self.input.clear();
         if let Some(b) = self.app.buffer_mut(id) {
             b.input.draft.clear();
@@ -1697,8 +1729,12 @@ impl Ui {
             VK_END => self.input.end(shift, ctrl),
             VK_BACK => self.input.backspace(ctrl),
             VK_DELETE => self.input.delete(ctrl),
+            VK_INSERT if shift => self.paste(),
             VK_ESCAPE => {
-                if self.reply.take_if(|r| r.buffer == self.app.active).is_some() {
+                let id = self.app.active;
+                if self.cancel_uploads(|u| u.buffer == id) {
+                    // Cancelled the image uploads.
+                } else if self.reply.take_if(|r| r.buffer == self.app.active).is_some() {
                     // Cancelled the reply.
                 } else if self.chat.selection.take().is_none() {
                     self.chat.scroll_to_bottom();
@@ -1722,11 +1758,7 @@ impl Ui {
                         self.input.backspace(false);
                     }
                 }
-                b'V' => {
-                    if let Some(t) = win::get_clipboard(self.hwnd) {
-                        self.input.insert(&t);
-                    }
-                }
+                b'V' => self.paste(),
                 b'Z' if shift => self.input.redo(),
                 b'Z' => self.input.undo(),
                 b'Y' => self.input.redo(),
@@ -2487,7 +2519,7 @@ impl Ui {
             && let Some(f) = self.form.as_mut()
         {
             if let Some(ed) = f.editor_at(self.win_rect, x, y) {
-                edit_menu(self.hwnd, ed);
+                edit_menu(self.hwnd, ed, false);
             }
             self.caret_on = true;
             self.invalidate();
@@ -2497,7 +2529,9 @@ impl Ui {
             return;
         }
         if self.input_rect.contains(x, y) {
-            edit_menu(self.hwnd, &mut self.input);
+            if edit_menu(self.hwnd, &mut self.input, true) {
+                self.paste();
+            }
             self.caret_on = true;
             self.invalidate();
             return;
@@ -2851,7 +2885,8 @@ impl Ui {
     }
 
     /// Scripted UI actions for automated checks (`scripts/send.ps1 "!click 500 640"`), in DIPs:
-    /// `!move x y`, `!click x y`, `!drag x0 y0 x1 y1`, `!key <vk>`, `!submit <text>` (types and presses Enter).
+    /// `!move x y`, `!click x y`, `!drag x0 y0 x1 y1`, `!key <vk>`, `!submit <text>` (types and presses Enter),
+    /// `!paste` (Ctrl+V), `!drop <file>` (drops a file on the chat).
     fn automation(&mut self, cmd: &str) -> bool {
         let (verb, arg) = cmd.split_once(' ').unwrap_or((cmd, ""));
         let xy = || -> Option<(f32, f32)> {
@@ -2889,6 +2924,8 @@ impl Ui {
                 self.input.set_text(arg, None);
                 self.submit();
             }
+            "paste" => self.paste(),
+            "drop" => self.drop_files(vec![arg.trim().into()], None),
             "stream" => {
                 // Test data for the Twitch live display without API access:
                 // `!stream <login> live|offline <viewers> <game> | <title>`.
@@ -3027,6 +3064,7 @@ impl Ui {
                         }
                         WorkerResult::Auth(net, req, resp) => self.app.on_auth_result(net, req, resp),
                         WorkerResult::Badges(r) => self.app.on_badge_result(r),
+                        WorkerResult::Upload(id, r) => self.on_upload_result(id, r),
                     }
                 }
                 self.after_update();
@@ -3066,6 +3104,14 @@ impl Ui {
                     TIMER_ANIM => {
                         unsafe {
                             let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
+                        }
+                        self.invalidate();
+                    }
+                    TIMER_UPLOAD => {
+                        if self.uploads.is_empty() {
+                            unsafe {
+                                let _ = KillTimer(Some(self.hwnd), TIMER_UPLOAD);
+                            }
                         }
                         self.invalidate();
                     }
@@ -3214,6 +3260,11 @@ impl Ui {
             }
             win::WM_APP_TRAY => {
                 self.tray_message(lp);
+                Some(LRESULT(0))
+            }
+            WM_DROPFILES => {
+                let (files, pt) = win::dropped_files(wp);
+                self.drop_files(files, Some((pt.x as f32 / self.scale, pt.y as f32 / self.scale)));
                 Some(LRESULT(0))
             }
             WM_COPYDATA => {
@@ -3428,8 +3479,8 @@ fn twitch_account_button(app: &App, net: Option<schwaetz_net::NetworkId>) -> (&'
 }
 
 /// Undo / Cut / Copy / Paste / Select all for a text box. Password boxes never put their text on
-/// the clipboard.
-fn edit_menu(hwnd: HWND, ed: &mut Editor) {
+/// the clipboard. With `own_paste`, "Paste" is left to the caller: it returns `true` instead.
+fn edit_menu(hwnd: HWND, ed: &mut Editor, own_paste: bool) -> bool {
     let copyable = ed.has_selection() && !ed.masked;
     let mut items = vec![MenuItem::Item(1, "Undo"), MenuItem::Separator];
     if copyable {
@@ -3446,6 +3497,7 @@ fn edit_menu(hwnd: HWND, ed: &mut Editor) {
             ed.backspace(false);
         }
         3 => win::set_clipboard(hwnd, ed.selected_text()),
+        4 if own_paste => return true,
         4 => {
             if let Some(t) = win::get_clipboard(hwnd) {
                 ed.insert(&t);
@@ -3453,6 +3505,211 @@ fn edit_menu(hwnd: HWND, ed: &mut Editor) {
         }
         5 => ed.select_all(),
         _ => {}
+    }
+    false
+}
+
+/// An image on its way to Imgur. Its link replaces `marker` in the input of `buffer`.
+struct Upload {
+    id: u64,
+    buffer: BufferId,
+    /// The character standing in for the link; drawn as a [`crate::images::UploadChip`].
+    marker: char,
+    progress: Arc<crate::images::UploadProgress>,
+}
+
+/// What to upload.
+enum UploadSource {
+    File(std::path::PathBuf),
+    Png(Vec<u8>),
+    /// A clipboard bitmap; converted to PNG first.
+    Bmp(Vec<u8>),
+}
+
+/// Upload markers are taken from this range of private-use characters.
+const MARKER_FIRST: u32 = 0x10_F800;
+const MARKER_COUNT: u32 = 0x700;
+
+fn is_marker(c: char) -> bool {
+    (MARKER_FIRST..MARKER_FIRST + MARKER_COUNT).contains(&(c as u32))
+}
+
+fn upload_job(source: UploadSource, client_id: &str, progress: &crate::images::UploadProgress) -> UploadResult {
+    use schwaetz_core::imgur::{self, UploadError};
+    let (bytes, name) = match source {
+        UploadSource::File(path) => {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() > imgur::MAX_IMAGE_BYTES) {
+                return Err(UploadError::Failed(format!("{name} is larger than Imgur's 20 MB limit")));
+            }
+            let bytes = std::fs::read(&path).map_err(|e| UploadError::Failed(format!("{name}: {e}")))?;
+            (bytes, name)
+        }
+        UploadSource::Png(bytes) => (bytes, "image.png".to_owned()),
+        UploadSource::Bmp(bytes) => {
+            (schwaetz_media::to_png(&bytes).map_err(UploadError::Failed)?, "image.png".to_owned())
+        }
+    };
+    imgur::upload(client_id, &bytes, &name, &progress.cancel, &progress.sent, &progress.total)
+}
+
+impl Ui {
+    /// Whether an image pasted or dropped now is uploaded: only where a link can be sent.
+    fn uploads_here(&self) -> bool {
+        self.app.config.uploads.imgur
+            && matches!(self.app.active_buffer().kind, BufferKind::Channel | BufferKind::Query)
+    }
+
+    /// Ctrl+V in the input box: an image is uploaded and its link inserted; text is inserted.
+    fn paste(&mut self) {
+        if self.uploads_here() {
+            let sources: Vec<UploadSource> = match win::clipboard_image(self.hwnd) {
+                Some(win::ImageSource::Files(files)) => files
+                    .into_iter()
+                    .filter(|f| schwaetz_core::imgur::is_image_name(&f.to_string_lossy()))
+                    .map(UploadSource::File)
+                    .collect(),
+                Some(win::ImageSource::Png(bytes)) => vec![UploadSource::Png(bytes)],
+                Some(win::ImageSource::Bmp(bytes)) => vec![UploadSource::Bmp(bytes)],
+                None => Vec::new(),
+            };
+            if !sources.is_empty() {
+                sources.into_iter().for_each(|s| self.start_upload(s));
+                return;
+            }
+        }
+        if let Some(t) = win::get_clipboard(self.hwnd) {
+            self.input.insert(&t);
+        }
+    }
+
+    /// Files dropped on the window at `at` (DIPs): images are uploaded for the active buffer.
+    fn drop_files(&mut self, files: Vec<std::path::PathBuf>, at: Option<(f32, f32)>) {
+        let on_chat = |(x, y): (f32, f32)| {
+            x >= self.chat.rect.x && x < self.chat.rect.right() && y >= self.chat.rect.y && y < self.win_rect.bottom()
+        };
+        if self.form.is_some() || self.overlay.is_some() || !at.is_none_or(on_chat) || !self.app.config.uploads.imgur {
+            return;
+        }
+        let id = self.app.active;
+        if !self.uploads_here() {
+            self.app.print(id, LineKind::Error, "", "Images can only be dropped into a channel or a query.");
+        } else {
+            let (images, others): (Vec<_>, Vec<_>) =
+                files.into_iter().partition(|f| schwaetz_core::imgur::is_image_name(&f.to_string_lossy()));
+            if !others.is_empty() {
+                let names: Vec<String> =
+                    others.iter().filter_map(|f| f.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
+                self.app.print(id, LineKind::Error, "", &format!("Not an image, not uploaded: {}", names.join(", ")));
+            }
+            images.into_iter().for_each(|f| self.start_upload(UploadSource::File(f)));
+            unsafe {
+                let _ = SetForegroundWindow(self.hwnd);
+            }
+        }
+        self.after_update();
+        self.invalidate();
+    }
+
+    /// Puts a placeholder at the caret and uploads on a worker thread; the result arrives as
+    /// [`WorkerResult::Upload`].
+    fn start_upload(&mut self, source: UploadSource) {
+        self.sync_active();
+        let live: Vec<char> = self.uploads.iter().map(|u| u.marker).collect();
+        let Some(marker) = (0..MARKER_COUNT)
+            .filter_map(|i| char::from_u32(MARKER_FIRST + (self.upload_seq as u32 + i) % MARKER_COUNT))
+            .find(|c| !live.contains(c) && !self.input.text().contains(*c))
+        else {
+            return;
+        };
+        self.upload_seq += 1;
+        let id = self.upload_seq;
+        let progress = Arc::new(crate::images::UploadProgress::default());
+        self.uploads.push(Upload { id, buffer: self.app.active, marker, progress: progress.clone() });
+
+        // Keep the link apart from the words around it.
+        let (start, end) = self.input.selection();
+        let text = self.input.text();
+        let lead = text[..start].chars().next_back().is_some_and(|c| !c.is_whitespace());
+        let trail = !text[end..].starts_with(char::is_whitespace);
+        self.input.insert(&format!("{}{marker}{}", if lead { " " } else { "" }, if trail { " " } else { "" }));
+
+        let client_id = self.app.config.uploads.imgur_client_id.clone();
+        self.run_worker("upload", move || WorkerResult::Upload(id, upload_job(source, &client_id, &progress)));
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_UPLOAD, 100, None);
+        }
+        self.caret_on = true;
+        self.invalidate();
+    }
+
+    /// Replaces an upload's placeholder with `link`, or removes it.
+    fn resolve_marker(&mut self, buffer: BufferId, marker: char, link: Option<&str>) {
+        if self.shown_buffer == Some(buffer) {
+            match link {
+                Some(l) => {
+                    self.input.replace_char(marker, l);
+                }
+                None => {
+                    self.input.remove_char(marker);
+                }
+            }
+        } else if let Some(b) = self.app.buffer_mut(buffer) {
+            // Not on screen: the placeholder waits in the buffer's draft.
+            b.input.draft = b.input.draft.replacen(marker, link.unwrap_or(""), 1);
+            if b.input.draft.trim().is_empty() {
+                b.input.draft.clear();
+            }
+        }
+    }
+
+    fn cancel_uploads(&mut self, which: impl Fn(&Upload) -> bool) -> bool {
+        let (cancelled, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.uploads).into_iter().partition(which);
+        self.uploads = kept;
+        for u in &cancelled {
+            u.progress.cancel.store(true, Ordering::Relaxed);
+            self.resolve_marker(u.buffer, u.marker, None);
+        }
+        !cancelled.is_empty()
+    }
+
+    /// Deleting a placeholder cancels its upload; a placeholder without an upload (brought back
+    /// by undo, say) goes away.
+    fn sync_uploads(&mut self) {
+        let Some(id) = self.shown_buffer else { return };
+        let text = self.input.text().to_owned();
+        if self.uploads.is_empty() && !text.contains(is_marker) {
+            return;
+        }
+        self.cancel_uploads(|u| u.buffer == id && !text.contains(u.marker));
+        for c in text.chars().filter(|c| is_marker(*c)) {
+            if !self.uploads.iter().any(|u| u.buffer == id && u.marker == c) {
+                self.input.remove_char(c);
+            }
+        }
+    }
+
+    fn on_upload_result(&mut self, id: u64, result: UploadResult) {
+        use schwaetz_core::imgur::UploadError;
+        let Some(at) = self.uploads.iter().position(|u| u.id == id) else {
+            // Cancelled, but the image got through: take it down again.
+            if let Ok(up) = result {
+                let _ = std::thread::Builder::new().name("upload-undo".into()).spawn(move || {
+                    let _ = schwaetz_core::imgur::delete(&up);
+                });
+            }
+            return;
+        };
+        let u = self.uploads.remove(at);
+        match result {
+            Ok(up) => self.resolve_marker(u.buffer, u.marker, Some(&up.link)),
+            Err(e) => {
+                self.resolve_marker(u.buffer, u.marker, None);
+                if let UploadError::Failed(e) = e {
+                    self.app.print(u.buffer, LineKind::Error, "", &format!("Image upload failed: {e}"));
+                }
+            }
+        }
     }
 }
 

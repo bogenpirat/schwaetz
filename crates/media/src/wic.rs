@@ -216,3 +216,48 @@ pub fn decode(bytes: &[u8], max_dim: u32) -> Result<(u32, u32, Vec<u8>), String>
     let (w, h, mut frames) = decode_frames(bytes, max_dim)?;
     Ok((w, h, frames.swap_remove(0).bgra))
 }
+
+/// Re-encodes an image file (first frame) as PNG. Sources without an alpha channel, such as
+/// 32-bit bitmaps whose fourth byte is undefined, come out opaque.
+pub fn to_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use windows::Win32::System::Com::{STREAM_SEEK_END, STREAM_SEEK_SET};
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).map_err(err)?;
+        let input = factory.CreateStream().map_err(err)?;
+        input.InitializeFromMemory(bytes).map_err(err)?;
+        let decoder = factory
+            .CreateDecoderFromStream(&input, std::ptr::null::<GUID>(), WICDecodeMetadataCacheOnDemand)
+            .map_err(err)?;
+        let source = decoder.GetFrame(0).map_err(err)?;
+        let (mut w, mut h) = (0u32, 0u32);
+        source.GetSize(&mut w, &mut h).map_err(err)?;
+        if w == 0 || h == 0 || w > 16_384 || h > 16_384 {
+            return Err(format!("unsupported image size {w}x{h}"));
+        }
+
+        let out = windows::Win32::UI::Shell::SHCreateMemStream(None).ok_or("no memory stream")?;
+        let encoder = factory.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null()).map_err(err)?;
+        encoder.Initialize(&out, WICBitmapEncoderNoCache).map_err(err)?;
+        let mut frame = None;
+        encoder.CreateNewFrame(&mut frame, std::ptr::null_mut()).map_err(err)?;
+        let frame = frame.ok_or("no frame encoder")?;
+        frame.Initialize(None).map_err(err)?;
+        frame.SetSize(w, h).map_err(err)?;
+        // The encoder picks the closest format it supports and converts.
+        let mut format = source.GetPixelFormat().map_err(err)?;
+        frame.SetPixelFormat(&mut format).map_err(err)?;
+        frame.WriteSource(&source, std::ptr::null()).map_err(err)?;
+        frame.Commit().map_err(err)?;
+        encoder.Commit().map_err(err)?;
+
+        let mut len = 0u64;
+        out.Seek(0, STREAM_SEEK_END, Some(&mut len)).map_err(err)?;
+        out.Seek(0, STREAM_SEEK_SET, None).map_err(err)?;
+        let mut png = vec![0u8; len as usize];
+        let mut read = 0u32;
+        out.Read(png.as_mut_ptr() as *mut _, png.len() as u32, Some(&mut read)).ok().map_err(err)?;
+        png.truncate(read as usize);
+        Ok(png)
+    }
+}

@@ -4,19 +4,23 @@ use crate::gfx::Color;
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIIF_RESPECT_QUIET_TIME, NIM_ADD, NIM_DELETE,
-    NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
+    DragFinish, DragQueryFileW, DragQueryPoint, HDROP, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP,
+    NIIF_INFO, NIIF_RESPECT_QUIET_TIME, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4,
+    NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, HSTRING, PCSTR, PCWSTR, w};
 
 const CF_UNICODETEXT: u32 = 13;
+const CF_DIB: u32 = 8;
+const CF_HDROP: u32 = 15;
 
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -59,6 +63,110 @@ pub fn set_clipboard(hwnd: HWND, text: &str) {
             }
         }
         let _ = CloseClipboard();
+    }
+}
+
+/// An image offered by the clipboard.
+pub enum ImageSource {
+    /// Files copied in Explorer (not necessarily images).
+    Files(Vec<std::path::PathBuf>),
+    /// The bytes of a PNG file.
+    Png(Vec<u8>),
+    /// The bytes of a BMP file.
+    Bmp(Vec<u8>),
+}
+
+/// Copies the clipboard's data in `format`. The clipboard must be open.
+unsafe fn clipboard_bytes(format: u32) -> Option<Vec<u8>> {
+    unsafe {
+        let g = HGLOBAL(GetClipboardData(format).ok()?.0);
+        let p = GlobalLock(g) as *const u8;
+        if p.is_null() {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(p, GlobalSize(g)).to_vec();
+        let _ = GlobalUnlock(g);
+        Some(bytes)
+    }
+}
+
+unsafe fn hdrop_files(h: HDROP) -> Vec<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    unsafe {
+        (0..DragQueryFileW(h, u32::MAX, None))
+            .map(|i| {
+                let mut buf = vec![0u16; DragQueryFileW(h, i, None) as usize + 1];
+                let n = DragQueryFileW(h, i, Some(&mut buf)) as usize;
+                std::ffi::OsString::from_wide(&buf[..n]).into()
+            })
+            .collect()
+    }
+}
+
+/// Puts a file header in front of a device-independent bitmap (`CF_DIB`), making it a BMP file.
+fn dib_to_bmp(dib: &[u8]) -> Option<Vec<u8>> {
+    let u32_at = |i: usize| dib.get(i..i + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let header = u32_at(0)?;
+    if header < 40 {
+        return None;
+    }
+    let bits = u16::from_le_bytes([*dib.get(14)?, *dib.get(15)?]);
+    let (compression, used) = (u32_at(16)?, u32_at(32)?);
+    // A plain BITMAPINFOHEADER is followed by its color masks; larger headers contain them.
+    let masks = match compression {
+        3 if header == 40 => 12,
+        6 if header == 40 => 16,
+        _ => 0,
+    };
+    let colors = if used == 0 && bits <= 8 { 1u32 << bits } else { used };
+    let pixels = 14u32.checked_add(header)?.checked_add(masks)?.checked_add(colors.checked_mul(4)?)?;
+    if pixels as usize > 14 + dib.len() {
+        return None;
+    }
+    let mut bmp = Vec::with_capacity(14 + dib.len());
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&(14 + dib.len() as u32).to_le_bytes());
+    bmp.extend_from_slice(&[0; 4]);
+    bmp.extend_from_slice(&pixels.to_le_bytes());
+    bmp.extend_from_slice(dib);
+    Some(bmp)
+}
+
+/// The image on the clipboard, if it holds one and no text (copied spreadsheet cells and the
+/// like offer both; those paste as text).
+pub fn clipboard_image(hwnd: HWND) -> Option<ImageSource> {
+    unsafe {
+        OpenClipboard(Some(hwnd)).ok()?;
+        let result = (|| {
+            if let Ok(h) = GetClipboardData(CF_HDROP) {
+                return Some(ImageSource::Files(hdrop_files(HDROP(h.0))));
+            }
+            if IsClipboardFormatAvailable(CF_UNICODETEXT).is_ok() {
+                return None;
+            }
+            let png = RegisterClipboardFormatW(w!("PNG"));
+            if png != 0
+                && IsClipboardFormatAvailable(png).is_ok()
+                && let Some(bytes) = clipboard_bytes(png)
+            {
+                return Some(ImageSource::Png(bytes));
+            }
+            clipboard_bytes(CF_DIB).and_then(|dib| dib_to_bmp(&dib)).map(ImageSource::Bmp)
+        })();
+        let _ = CloseClipboard();
+        result
+    }
+}
+
+/// The files of a `WM_DROPFILES` message and the client point (pixels) they were dropped at.
+pub fn dropped_files(wp: WPARAM) -> (Vec<std::path::PathBuf>, POINT) {
+    let h = HDROP(wp.0 as *mut _);
+    let mut pt = POINT::default();
+    unsafe {
+        let files = hdrop_files(h);
+        let _ = DragQueryPoint(h, &mut pt);
+        DragFinish(h);
+        (files, pt)
     }
 }
 
@@ -394,5 +502,37 @@ pub fn forward_to_running_instance(text: &str) -> bool {
         let _ = SendMessageW(hwnd, WM_COPYDATA, None, Some(LPARAM(&cds as *const _ as isize)));
         let _ = SetForegroundWindow(hwnd);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dib_to_bmp;
+
+    fn dib(header: u32, bits: u16, compression: u32, used: u32, rest: usize) -> Vec<u8> {
+        let mut d = vec![0u8; header as usize + rest];
+        d[0..4].copy_from_slice(&header.to_le_bytes());
+        d[14..16].copy_from_slice(&bits.to_le_bytes());
+        d[16..20].copy_from_slice(&compression.to_le_bytes());
+        d[32..36].copy_from_slice(&used.to_le_bytes());
+        d
+    }
+
+    #[test]
+    fn bitmap_file_header() {
+        let pixel_offset = |d: &[u8]| {
+            let bmp = dib_to_bmp(d).unwrap();
+            assert_eq!(&bmp[..2], b"BM");
+            assert_eq!(u32::from_le_bytes(bmp[2..6].try_into().unwrap()) as usize, bmp.len());
+            assert_eq!(&bmp[14..], d);
+            u32::from_le_bytes(bmp[10..14].try_into().unwrap())
+        };
+        assert_eq!(pixel_offset(&dib(40, 32, 0, 0, 16)), 54, "true color: pixels follow the header");
+        assert_eq!(pixel_offset(&dib(40, 32, 3, 0, 28)), 66, "BI_BITFIELDS adds three masks");
+        assert_eq!(pixel_offset(&dib(124, 32, 3, 0, 16)), 138, "a V5 header contains its masks");
+        assert_eq!(pixel_offset(&dib(40, 8, 0, 0, 1024 + 8)), 54 + 1024, "full palette");
+        assert_eq!(pixel_offset(&dib(40, 8, 0, 2, 8 + 8)), 54 + 8, "short palette");
+        assert!(dib_to_bmp(&dib(40, 8, 0, 0, 10)).is_none(), "palette runs past the end");
+        assert!(dib_to_bmp(&[12, 0, 0, 0]).is_none());
     }
 }
