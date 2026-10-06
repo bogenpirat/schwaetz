@@ -5,7 +5,6 @@
 param([switch]$Fix)
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
-. "$PSScriptRoot\dev-env.ps1"
 
 function Step($name, [scriptblock]$cmd) {
     Write-Host "==> $name" -ForegroundColor Cyan

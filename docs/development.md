@@ -9,9 +9,6 @@ cargo build --release
 .\target\release\schwaetz.exe
 ```
 
-If `cargo` reports `link.exe not found` although Build Tools are installed, load the MSVC
-environment first: `. .\scripts\dev-env.ps1`.
-
 ## Checks and tests
 
 `.\scripts\check.ps1` runs the same checks as CI (format, clippy, tests). End-to-end tests run
