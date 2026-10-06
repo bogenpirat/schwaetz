@@ -62,6 +62,9 @@ struct EmoteCompletion {
     rect: Rect,
 }
 
+/// Longest pause between the two Shift presses that open the quick switcher.
+const DOUBLE_TAP_MS: i64 = 400;
+
 /// Height of one emote row in the completion list.
 const COMPLETION_ROW: f32 = 32.0;
 
@@ -190,6 +193,8 @@ pub struct Ui {
     upload_seq: u64,
     /// The input currently draws upload placeholders.
     upload_chips: bool,
+    /// When Shift was last pressed on its own (0: not, or another key came after it).
+    shift_tap: i64,
 }
 
 thread_local! {
@@ -340,6 +345,7 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         uploads: Vec::new(),
         upload_seq: 0,
         upload_chips: false,
+        shift_tap: 0,
     });
     let session = crate::session::Session::load(&ui.paths.session_file());
     if let Some(w) = session.sidebar_width {
@@ -425,7 +431,7 @@ impl Ui {
              the GNU GPL v3 with ABSOLUTELY NO WARRANTY, see LICENSE and NOTICE."
                 .to_owned(),
             "Connect with /connect irc.libera.chat (or a configured network name), then /join #channel.".to_owned(),
-            "Ctrl+J quick switcher · Alt+1…9 switch buffers · Alt+A next activity · Ctrl+W close · /help lists commands.".to_owned(),
+            "Ctrl+J or double Shift quick switcher · Alt+1…9 switch buffers · Alt+A next activity · Ctrl+W close · /help lists commands.".to_owned(),
             format!("Settings live in {} — edit with /set section.key value.", self.paths.config_file().display()),
         ];
         if self.app.networks.is_empty() {
@@ -1117,6 +1123,26 @@ impl Ui {
     }
 
     // ----- input ---------------------------------------------------------------------------------
+
+    /// A Shift press on its own; the second of two quick ones opens the quick switcher.
+    fn shift_tapped(&mut self) -> bool {
+        if win::key_down(VK_CONTROL.0) || win::key_down(VK_MENU.0) {
+            self.shift_tap = 0;
+            return false;
+        }
+        let t = now();
+        if t - self.shift_tap > DOUBLE_TAP_MS {
+            self.shift_tap = t;
+            return false;
+        }
+        self.shift_tap = 0;
+        if self.form.is_some() || self.overlay.is_some() {
+            return false;
+        }
+        self.overlay = Some(Overlay::quick_switch(&self.app));
+        self.invalidate();
+        true
+    }
 
     fn submit(&mut self) {
         self.sync_uploads();
@@ -1939,6 +1965,7 @@ impl Ui {
     }
 
     fn mouse_down(&mut self, x: f32, y: f32, double: bool) {
+        self.shift_tap = 0;
         unsafe {
             SetCapture(self.hwnd);
         }
@@ -3140,7 +3167,14 @@ impl Ui {
                 None
             }
             WM_KEYDOWN | WM_SYSKEYDOWN => {
-                let handled = self.key_down(wp.0 as u16);
+                let vk = wp.0 as u16;
+                if vk != VK_SHIFT.0 {
+                    self.shift_tap = 0;
+                } else if lp.0 & (1 << 30) == 0 && self.shift_tapped() {
+                    // Not a repeat of a held key.
+                    return Some(LRESULT(0));
+                }
+                let handled = self.key_down(vk);
                 // Editing or moving the caret can open, narrow or close the emote list.
                 if self.form.is_none() && self.overlay.is_none() {
                     self.refresh_completion();

@@ -38,8 +38,8 @@ Modern IRCv3, bouncers and Twitch, in one small executable.</p>
 - **Bouncers.** ZNC and soju, including playback of missed messages.
 - **Twitch.** Badges, name colours, emotes with completion, live status, sign in with Twitch.
 - **Scriptable.** JavaScript or TypeScript, built in; see [scripting](docs/scripting.md).
-- **Comfortable.** Quick switcher (**Ctrl+J**), searchable history, highlights, notifications,
-  tray icon, logs. Paste or drop an image and its Imgur link lands in your message.
+- **Comfortable.** Quick switcher (**Ctrl+J** or double **Shift**), searchable history, highlights,
+  notifications, tray icon, logs. Paste or drop an image and its Imgur link lands in your message.
 
 ## Getting started
 
