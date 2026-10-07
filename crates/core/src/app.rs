@@ -123,8 +123,11 @@ pub struct Network {
     ctcp_window: (i64, u32),
     /// Channels we asked to join from this client (switch to them on join).
     pub(crate) pending_joins: Vec<String>,
-    /// Twitch: our own display tags from USERSTATE/GLOBALUSERSTATE.
+    /// Twitch: our own display tags from GLOBALUSERSTATE.
     pub twitch_self: Option<schwaetz_proto::Tags>,
+    /// Twitch: our own display tags per channel (lowercase name) from USERSTATE; badges differ
+    /// from channel to channel.
+    pub twitch_self_channels: BTreeMap<String, schwaetz_proto::Tags>,
     /// Newest message time seen on this network, for ZNC playback.
     pub last_seen: i64,
     pub user_quit: bool,
@@ -678,6 +681,7 @@ impl App {
                 ctcp_window: (0, 0),
                 pending_joins: Vec::new(),
                 twitch_self: None,
+                twitch_self_channels: BTreeMap::new(),
                 last_seen: 0,
                 user_quit: false,
                 live: LiveCheck::default(),
@@ -1666,7 +1670,12 @@ impl App {
             twitch::apply_tags(&mut extra, &tags, &stripped, &from.nick);
             self.badges_seen(net_id, bid, &extra.badges);
             line.flags.set(LineFlags::FIRST_MESSAGE, tags.get("first-msg") == Some("1"));
-            if own && let Some(st) = self.networks[&net_id].twitch_self.clone() {
+            let net = &self.networks[&net_id];
+            let state = channel
+                .as_ref()
+                .and_then(|c| net.twitch_self_channels.get(&c.to_ascii_lowercase()))
+                .or(net.twitch_self.as_ref());
+            if own && let Some(st) = state.cloned() {
                 twitch::apply_tags(&mut extra, &st, &stripped, &from.nick);
                 extra.emotes.clear();
             }
@@ -2038,9 +2047,12 @@ impl App {
                     self.request_badges(net_id);
                 }
             }
-            TwitchEvent::UserState { tags, .. } => {
+            TwitchEvent::UserState { channel, tags } => {
                 if let Some(n) = self.networks.get_mut(&net_id) {
-                    n.twitch_self = Some(tags);
+                    match channel {
+                        Some(c) => drop(n.twitch_self_channels.insert(c.to_ascii_lowercase(), tags)),
+                        None => n.twitch_self = Some(tags),
+                    }
                 }
             }
         }

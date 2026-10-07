@@ -420,6 +420,33 @@ fn joined_channels_are_remembered() {
 }
 
 #[test]
+fn twitch_own_lines_carry_the_badges_of_their_channel() {
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.connect();
+    h.lines(&[
+        ":tmi.twitch.tv CAP * ACK :twitch.tv/tags twitch.tv/commands",
+        ":tmi.twitch.tv 001 me :hi",
+        ":tmi.twitch.tv 376 me :>",
+        "@badges=premium/1;display-name=Me :tmi.twitch.tv GLOBALUSERSTATE",
+        ":me!me@me.tmi.twitch.tv JOIN #mine",
+        "@badges=broadcaster/1,premium/1;display-name=Me :tmi.twitch.tv USERSTATE #mine",
+        ":me!me@me.tmi.twitch.tv JOIN #other",
+        "@badges=subscriber/6;badge-info=subscriber/8;display-name=Me :tmi.twitch.tv USERSTATE #other",
+        ":me!me@me.tmi.twitch.tv JOIN #fresh",
+    ]);
+    let badges = |h: &mut Harness, chan: &str| {
+        let b = h.buffer(chan);
+        h.app.input(b, "hi");
+        h.app.buffer(b).unwrap().lines.back().unwrap().extra.clone().unwrap().badges
+    };
+    assert_eq!(badges(&mut h, "#mine"), ["broadcaster/1", "premium/1"]);
+    assert_eq!(badges(&mut h, "#other"), ["subscriber/6"]);
+    // Still the right ones after writing elsewhere, and the global ones before a USERSTATE.
+    assert_eq!(badges(&mut h, "#mine"), ["broadcaster/1", "premium/1"]);
+    assert_eq!(badges(&mut h, "#fresh"), ["premium/1"]);
+}
+
+#[test]
 fn replies_use_the_right_tag_and_show_context() {
     // Twitch: reply-parent-msg-id, local echo resolves the parent.
     let mut h = Harness::new(NetworkKind::Twitch, &[]);
