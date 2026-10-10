@@ -16,6 +16,8 @@ const PAD_BOTTOM: f32 = 8.0;
 const LINE_GAP: f32 = 3.0;
 const DAY_SEP_H: f32 = 30.0;
 const MARKER_H: f32 = 16.0;
+/// Space above and below a GIF in a message.
+const GIF_MARGIN: f32 = 2.0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkTarget {
@@ -39,7 +41,7 @@ struct Cached {
     reactions: Option<IDWriteTextLayout>,
     links: Vec<Link>,
     bgs: Vec<BgRun>,
-    /// Placed inline emotes: (utf16 start, utf16 len, code, image url).
+    /// Placed inline emotes and GIFs: (utf16 start, utf16 len, code, image url; none for GIFs).
     emotes: Vec<(u32, u32, String, String)>,
     /// Badge images in `nick`.
     badges: Vec<NickBadge>,
@@ -435,9 +437,13 @@ impl ChatView {
         }
 
         let mut placed = Vec::new();
-        // Inline emotes (Twitch tags, script decorations, then words from the emote sets): byte
-        // ranges of the stripped body.
-        let mut emotes: Vec<Emote> = line.extra.as_ref().map(|e| e.emotes.clone()).unwrap_or_default();
+        // Inline images: GIFs (Twitch tags), then emotes (Twitch tags, script decorations, then
+        // words from the emote sets): byte ranges of the stripped body.
+        let gifs = line.extra.as_ref().map(|e| e.gifs.as_slice()).unwrap_or_default();
+        let mut emotes = gifs.to_vec();
+        for e in line.extra.as_ref().map(|e| e.emotes.as_slice()).unwrap_or_default() {
+            add_emote(&mut emotes, e.clone());
+        }
         if is_msg && !deleted {
             for (start, end, url) in c.emotes.find(&body, line.flags.has(LineFlags::OWN)) {
                 add_emote(&mut emotes, Emote { start, end, url: url.to_owned(), name: String::new() });
@@ -455,7 +461,15 @@ impl ChatView {
                 if links.iter().any(|l| a < l.start + l.len && l.start < b) {
                     continue;
                 }
-                let obj = crate::images::InlineImage::create(&e.url, h, h * 0.78, c.images, c.dc);
+                let gif = gifs.contains(e);
+                let obj = if gif {
+                    let size = c.images.borrow_mut().gif_size(&e.url, c.scale, msg_w);
+                    let waiting = with_alpha(th.text_dim, 0.12);
+                    let ascent = f.line_height * 0.78;
+                    crate::images::InlineImage::gif(&e.url, size, GIF_MARGIN, ascent, waiting, c.images, c.dc)
+                } else {
+                    crate::images::InlineImage::create(&e.url, h, h * 0.78, c.images, c.dc)
+                };
                 unsafe {
                     let _ = msg.SetInlineObject(&obj, text::range(a, b - a));
                 }
@@ -464,7 +478,8 @@ impl ChatView {
                 } else {
                     e.name.clone()
                 };
-                placed.push((a, b - a, code, e.url.clone()));
+                // A GIF is large as it is: hovering it only tells what it shows.
+                placed.push((a, b - a, code, if gif { String::new() } else { e.url.clone() }));
             }
         }
 
@@ -575,7 +590,7 @@ impl ChatView {
             None => {
                 if store.requested.contains(&url) || (c.preview_auto && host_ok()) {
                     if !store.wants.iter().any(|(u, _)| *u == url) {
-                        store.wants.push((url.clone(), true));
+                        store.wants.push((url.clone(), crate::images::Load::Preview));
                     }
                     return None;
                 }
@@ -1264,7 +1279,7 @@ fn card_offset(e: &Cached) -> f32 {
 fn signature(l: &Line) -> u64 {
     let (emotes, reactions, reply) = l.extra.as_ref().map_or((0, 0, 0), |e| {
         (
-            e.emotes.len() as u64,
+            (e.emotes.len() + e.gifs.len()) as u64,
             e.reactions.iter().map(|(_, n)| n.len() as u64).sum::<u64>(),
             e.reply_to.is_some() as u64,
         )

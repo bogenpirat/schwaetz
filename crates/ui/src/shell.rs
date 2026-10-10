@@ -1389,15 +1389,18 @@ impl Ui {
     /// Sends image/preview requests collected while laying out lines.
     fn dispatch_media(&mut self) {
         let wants = std::mem::take(&mut self.images.borrow_mut().wants);
-        for (url, preview) in wants {
+        for (url, load) in wants {
             if self.media.is_pending(&url) {
                 continue;
             }
-            let kind = if preview {
-                self.preview_pending.insert(url.clone());
-                schwaetz_media::Kind::Preview { max_dim: (420.0 * self.scale) as u32 }
-            } else {
-                schwaetz_media::Kind::Image { max_dim: (420.0 * self.scale) as u32 }
+            use crate::images::{GIF_MAX, Load, gif_scale};
+            let kind = match load {
+                Load::Preview => {
+                    self.preview_pending.insert(url.clone());
+                    schwaetz_media::Kind::Preview { max_dim: (420.0 * self.scale) as u32 }
+                }
+                Load::Image => schwaetz_media::Kind::Image { max_dim: (420.0 * self.scale) as u32 },
+                Load::Gif => schwaetz_media::Kind::Image { max_dim: (GIF_MAX.0 * gif_scale(self.scale)) as u32 },
             };
             self.media.request(&url, kind);
         }
@@ -2337,7 +2340,9 @@ impl Ui {
                     let emote = || {
                         let tip = self.chat.emote_at(x, y)?;
                         // The largest size, loaded on first hover; the inline image stands in.
-                        self.images.borrow_mut().size(&largest_emote_url(&tip.1), false);
+                        if !tip.1.is_empty() {
+                            self.images.borrow_mut().size(&largest_emote_url(&tip.1), false);
+                        }
                         Some(tip)
                     };
                     emote().or_else(badge)

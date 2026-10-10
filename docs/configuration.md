@@ -67,6 +67,11 @@ show inline in Twitch channels like Twitch's own; each provider can be switched 
 network settings (`emotes_7tv`, `emotes_bttv`, `emotes_ffz`). With the Twitch sign-in, your own
 messages show your Twitch emotes too (Twitch doesn't mark them in what you send).
 
+**Twitch GIFs:** a GIF posted in a channel that allows them shows animated in the message in
+place of its description (`[… GIF by …]`), at its own size but at most 240 × 120, and never
+wider than the message. Hovering it shows the description; if it cannot be loaded the description
+stays.
+
 **Twitch emote completion** (`emote_completion`, on by default): in a Twitch channel, typing `:`
 followed by a letter or digit at the start of a word lists matching emotes above the input (↑/↓,
 PgUp/PgDn to move, Tab or Enter to insert, Esc to close; clicking an entry inserts it too). Order:

@@ -44,8 +44,8 @@ pub struct ImageStore {
     order: Vec<String>,
     bytes: usize,
     generation: u64,
-    /// URLs the renderer needs: (url, is_preview).
-    pub wants: Vec<(String, bool)>,
+    /// URLs the renderer needs.
+    pub wants: Vec<(String, Load)>,
     pub previews: HashMap<String, Preview>,
     /// Link previews the user asked for (click-to-load).
     pub requested: std::collections::HashSet<String>,
@@ -55,7 +55,27 @@ pub struct ImageStore {
     pub animating: std::cell::Cell<bool>,
 }
 
-const BUDGET: usize = 48 << 20;
+/// How a wanted URL is loaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Load {
+    Image,
+    /// An image or a web page with preview metadata.
+    Preview,
+    /// A GIF posted in a message: decoded no larger than it is shown ([`GIF_MAX`]).
+    Gif,
+}
+
+/// Animated GIFs take several megabytes each; a screenful of them has to fit.
+const BUDGET: usize = 96 << 20;
+
+/// Largest width and height (DIPs) a GIF posted in a message is shown at.
+pub const GIF_MAX: (f32, f32) = (240.0, 120.0);
+
+/// Pixels per DIP GIFs are decoded at: less than the screen's on dense displays, where all the
+/// frames of a long animation would not fit in memory.
+pub fn gif_scale(scale: f32) -> f32 {
+    scale.clamp(1.0, 1.5)
+}
 
 impl ImageStore {
     pub fn insert_frames(&mut self, url: String, w: u32, h: u32, frames: Vec<schwaetz_media::Frame>) {
@@ -96,16 +116,33 @@ impl ImageStore {
 
     /// Size of a loaded image, requesting it if unknown.
     pub fn size(&mut self, url: &str, preview: bool) -> Option<(u32, u32)> {
+        self.size_as(url, if preview { Load::Preview } else { Load::Image })
+    }
+
+    fn size_as(&mut self, url: &str, load: Load) -> Option<(u32, u32)> {
         match self.images.get(url) {
             Some(Img::Pixels { w, h, .. } | Img::Ready { w, h, .. }) => Some((*w, *h)),
             Some(Img::Failed) => None,
             None => {
                 if !self.wants.iter().any(|(u, _)| u == url) {
-                    self.wants.push((url.to_owned(), preview));
+                    self.wants.push((url.to_owned(), load));
                 }
                 None
             }
         }
+    }
+
+    /// The size (DIPs) a GIF posted in a message is shown at, requesting it if unknown: its own
+    /// size unless that is more than [`GIF_MAX`] or `max_w`, never enlarged. A GIF still loading
+    /// gets the room of a typical one.
+    pub fn gif_size(&mut self, url: &str, scale: f32, max_w: f32) -> (f32, f32) {
+        let (max_w, max_h) = (GIF_MAX.0.min(max_w), GIF_MAX.1);
+        let (w, h) = match self.size_as(url, Load::Gif) {
+            Some((w, h)) => (w as f32 / gif_scale(scale), h as f32 / gif_scale(scale)),
+            None => (max_h * 16.0 / 9.0, max_h),
+        };
+        let fit = (max_w / w).min(max_h / h).min(1.0);
+        ((w * fit).round().max(1.0), (h * fit).round().max(1.0))
     }
 
     pub fn failed(&self, url: &str) -> bool {
@@ -172,8 +209,8 @@ impl ImageStore {
     }
 }
 
-/// An inline image inside a text layout (emotes). Its advance width follows the image's
-/// aspect ratio once known.
+/// An inline image inside a text layout (emotes, badges, GIFs). Its advance width follows the
+/// image's aspect ratio once known.
 #[implement(IDWriteInlineObject)]
 pub struct InlineImage {
     url: String,
@@ -182,7 +219,12 @@ pub struct InlineImage {
     /// Width the image is drawn at (from the left).
     draw_w: f32,
     height: f32,
+    /// Where the image is drawn (from the top) and how tall.
+    top: f32,
+    draw_h: f32,
     baseline: f32,
+    /// Fills the image's place until it has loaded.
+    placeholder: Option<D2D1_COLOR_F>,
     store: Rc<RefCell<ImageStore>>,
     dc: ID2D1DeviceContext,
 }
@@ -202,7 +244,10 @@ impl InlineImage {
             width,
             draw_w: width,
             height,
+            top: 0.0,
+            draw_h: height,
             baseline,
+            placeholder: None,
             store: store.clone(),
             dc: dc.clone(),
         }
@@ -221,7 +266,46 @@ impl InlineImage {
     ) -> IDWriteInlineObject {
         store.borrow_mut().size(url, false);
         let (url, store, dc) = (url.to_owned(), store.clone(), dc.clone());
-        InlineImage { url, width: size + gap, draw_w: size, height: size, baseline, store, dc }.into()
+        InlineImage {
+            url,
+            width: size + gap,
+            draw_w: size,
+            height: size,
+            top: 0.0,
+            draw_h: size,
+            baseline,
+            placeholder: None,
+            store,
+            dc,
+        }
+        .into()
+    }
+
+    /// A GIF posted in a message, `size` large (see [`ImageStore::gif_size`]) with `margin`
+    /// above and below. `ascent` is the distance from the top of a text line to its baseline:
+    /// the picture hangs down from the line it is in, and text beside it stays at the top.
+    pub fn gif(
+        url: &str,
+        size: (f32, f32),
+        margin: f32,
+        ascent: f32,
+        placeholder: D2D1_COLOR_F,
+        store: &Rc<RefCell<ImageStore>>,
+        dc: &ID2D1DeviceContext,
+    ) -> IDWriteInlineObject {
+        InlineImage {
+            url: url.to_owned(),
+            width: size.0,
+            draw_w: size.0,
+            height: size.1 + 2.0 * margin,
+            top: margin,
+            draw_h: size.1,
+            baseline: ascent,
+            placeholder: Some(placeholder),
+            store: store.clone(),
+            dc: dc.clone(),
+        }
+        .into()
     }
 }
 
@@ -237,9 +321,13 @@ impl IDWriteInlineObject_Impl for InlineImage_Impl {
         _effect: Ref<IUnknown>,
     ) -> windows_core::Result<()> {
         let bmp = self.store.try_borrow().ok().and_then(|s| s.bitmap(&self.url));
+        let y = y + self.top;
         if let Some(bmp) = bmp {
-            let r = D2D_RECT_F { left: x, top: y, right: x + self.draw_w, bottom: y + self.height };
+            let r = D2D_RECT_F { left: x, top: y, right: x + self.draw_w, bottom: y + self.draw_h };
             unsafe { self.dc.DrawBitmap(&bmp, Some(&r), 1.0, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None) };
+        } else if let Some(color) = self.placeholder {
+            let r = crate::gfx::Rect::new(x, y, self.draw_w, self.draw_h);
+            crate::gfx::Painter::new(&self.dc).fill_round(r, 6.0, color);
         }
         Ok(())
     }
