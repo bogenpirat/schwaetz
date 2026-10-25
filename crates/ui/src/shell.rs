@@ -718,6 +718,15 @@ impl Ui {
         }
         let tl = self.text.layout(&title, &f.title, text_w, 30.0);
         p.text(&tl, tr.x + 18.0, tr.y + 9.0, th.text);
+        // Co-streaming channels, small and dim beside the title, on its baseline.
+        let title_w = text::metrics(&tl).widthIncludingTrailingWhitespace.min(text_w);
+        let room = text_w - title_w - 8.0;
+        if !parts.shared_with.is_empty() && room > 40.0 {
+            let with = format!("with {}", parts.shared_with.join(", "));
+            let wl = self.text.layout(&with, &f.ui_small, room, 20.0);
+            let y = tr.y + 9.0 + text::baseline(&tl) - text::baseline(&wl);
+            p.text(&wl, tr.x + 18.0 + title_w + 8.0, y, th.text_dim);
+        }
         self.draw_topic_line(&p, &th, &parts, tr.x + 18.0, tr.y + 32.0, text_w);
 
         // Chat.
@@ -3050,7 +3059,9 @@ impl Ui {
                 let (Some(login), Some(state), Some(viewers)) = (words.next(), words.next(), words.next()) else {
                     return true;
                 };
-                let (game, title) = words.next().unwrap_or("").split_once(" | ").unwrap_or(("", ""));
+                // An optional third part lists co-streamers: `… | <title> | <login>,<login>`.
+                let (game, rest) = words.next().unwrap_or("").split_once(" | ").unwrap_or(("", ""));
+                let (title, shared) = rest.split_once(" | ").unwrap_or((rest, ""));
                 let Some(network) = self.app.network_of(self.app.active).map(|n| n.id) else { return true };
                 let info = schwaetz_core::helix::StreamInfo {
                     live: state == "live",
@@ -3058,6 +3069,12 @@ impl Ui {
                     game: game.to_owned(),
                     viewers: viewers.parse().unwrap_or(0),
                     started_at: String::new(),
+                    shared_with: shared
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
                 };
                 self.app.on_live_result(schwaetz_core::helix::LiveResult {
                     network,

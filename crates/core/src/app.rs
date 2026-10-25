@@ -87,6 +87,8 @@ pub enum Effect {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TopicParts {
     pub title: String,
+    /// Twitch: the other channels sharing this one's chat, shown small beside the title.
+    pub shared_with: Vec<String>,
     pub lead: String,
     pub body: String,
     pub tail: String,
@@ -2153,9 +2155,9 @@ impl App {
             let chips = twitch::room_state_summary(&b.room_state);
             let chips = if chips.is_empty() { String::new() } else { format!("[{}] ", chips.join(", ")) };
             let (lead, body, tail) = s.parts();
-            return TopicParts { title, lead: chips + &lead, body, tail };
+            return TopicParts { title, shared_with: s.shared_with.clone(), lead: chips + &lead, body, tail };
         }
-        TopicParts { title, lead: String::new(), body: sub, tail: String::new() }
+        TopicParts { title, body: sub, ..Default::default() }
     }
 
     pub fn topic_for(&self, id: BufferId) -> (String, String) {
@@ -2642,7 +2644,14 @@ impl App {
             Some(o) if info.differs_from(o) => Some(format!("Stream changed to: {what}")),
             _ => None,
         };
-        if let Some(t) = text {
+        // Co-streaming: announced while live (going offline ends it anyway).
+        let before = old.as_ref().map_or(&[][..], |o| &o.shared_with[..]);
+        let shared = match &info.shared_with {
+            _ if !info.live || before == info.shared_with => None,
+            now if now.is_empty() => Some("The shared chat ended".to_owned()),
+            now => Some(format!("Sharing chat with {}", now.join(", "))),
+        };
+        for t in [text, shared].into_iter().flatten() {
             self.print(bid, LineKind::Topic, "", &t);
         }
         if bid == self.active {

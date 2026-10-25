@@ -164,6 +164,16 @@ pub fn metrics(l: &IDWriteTextLayout) -> DWRITE_TEXT_METRICS {
     m
 }
 
+/// Distance from the top of a layout to the baseline of its first line.
+pub fn baseline(l: &IDWriteTextLayout) -> f32 {
+    let mut line = [DWRITE_LINE_METRICS::default()];
+    let mut lines = 0;
+    unsafe {
+        let _ = l.GetLineMetrics(Some(&mut line), &mut lines);
+    }
+    line[0].baseline
+}
+
 /// Maps between UTF-8 byte offsets and UTF-16 code-unit offsets for one string.
 pub struct U16Map {
     /// (byte offset, utf16 offset) for every char boundary, plus the end.

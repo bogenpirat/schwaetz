@@ -19,6 +19,8 @@ pub struct StreamInfo {
     pub viewers: u64,
     /// RFC 3339 start time while live.
     pub started_at: String,
+    /// While live in a shared chat (co-streaming): the logins of the other channels in it.
+    pub shared_with: Vec<String>,
 }
 
 impl StreamInfo {
@@ -168,6 +170,39 @@ fn run(
             out.insert(login, info);
         }
     }
+    // Live channels may share their chat with others (one request per channel). A failure here
+    // only leaves the co-streamers out.
+    let mut sessions: Vec<(String, Vec<String>)> = Vec::new();
+    for login in out.keys() {
+        let Some(id) = ids.get(login) else { continue };
+        let others = get("shared_chat/session", "broadcaster_id", &[id])
+            .and_then(|body| parse_shared_chat(&body))
+            .unwrap_or_default();
+        let others: Vec<String> = others.into_iter().filter(|o| o != id).collect();
+        if !others.is_empty() {
+            sessions.push((login.clone(), others));
+        }
+    }
+    let unknown: Vec<String> = {
+        let known: std::collections::HashSet<&String> = ids.values().collect();
+        let mut u: Vec<String> =
+            sessions.iter().flat_map(|(_, o)| o).filter(|id| !known.contains(id)).cloned().collect();
+        u.sort();
+        u.dedup();
+        u
+    };
+    for chunk in unknown.iter().collect::<Vec<_>>().chunks(100) {
+        if let Ok(pairs) = get("users", "id", chunk).and_then(|body| parse_users(&body)) {
+            ids.extend(pairs);
+        }
+    }
+    let login_of: HashMap<&String, &String> = ids.iter().map(|(login, id)| (id, login)).collect();
+    for (login, others) in sessions {
+        let names = others.iter().filter_map(|id| login_of.get(id).map(|l| (*l).clone())).collect();
+        if let Some(info) = out.get_mut(&login) {
+            info.shared_with = names;
+        }
+    }
     // Offline channels: their current title and category.
     let offline: Vec<&String> = logins.iter().filter(|l| !out.contains_key(*l)).filter_map(|l| ids.get(l)).collect();
     for chunk in offline.chunks(100) {
@@ -243,10 +278,26 @@ pub fn parse_streams(body: &[u8]) -> Result<Vec<(String, StreamInfo)>, String> {
                 game: s.game_name,
                 viewers: s.viewer_count,
                 started_at: s.started_at,
+                shared_with: Vec::new(),
             };
             (s.user_login, info)
         })
         .collect())
+}
+
+/// Parses a shared chat session into the user ids of its participants, in the order Twitch lists
+/// them (none when the channel is not in a shared chat).
+pub fn parse_shared_chat(body: &[u8]) -> Result<Vec<String>, String> {
+    #[derive(Deserialize)]
+    struct P {
+        broadcaster_id: String,
+    }
+    #[derive(Deserialize)]
+    struct S {
+        #[serde(default)]
+        participants: Vec<P>,
+    }
+    Ok(json::<Data<S>>(body)?.data.into_iter().flat_map(|s| s.participants).map(|p| p.broadcaster_id).collect())
 }
 
 pub fn parse_channels(body: &[u8]) -> Result<Vec<(String, StreamInfo)>, String> {
@@ -513,6 +564,11 @@ mod tests {
         let (_, info) = parse_channels(c).unwrap().remove(0);
         assert_eq!(info.summary(), "Offline · mañana");
         assert!(parse_streams(b"<html>").is_err());
+        let sc = br#"{"data":[{"session_id":"2b4f1fbc","host_broadcaster_id":"198704263",
+            "participants":[{"broadcaster_id":"198704263"},{"broadcaster_id":"487263401"}],
+            "created_at":"2024-09-29T19:45:37.025Z","updated_at":"2024-09-29T19:45:37.025Z"}]}"#;
+        assert_eq!(parse_shared_chat(sc).unwrap(), ["198704263", "487263401"]);
+        assert!(parse_shared_chat(br#"{"data":[]}"#).unwrap().is_empty());
     }
 
     #[test]

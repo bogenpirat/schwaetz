@@ -928,6 +928,46 @@ fn twitch_topic_keeps_status_game_and_viewers_apart_from_the_title() {
     assert_eq!(joined, format!("{}{}{}", t.lead, t.body, t.tail));
 }
 
+#[test]
+fn twitch_shared_chat_shows_the_other_channels_and_announces_changes() {
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.connect();
+    h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>", ":me!me@me.tmi.twitch.tv JOIN #alpha"]);
+    let send = |h: &mut Harness, live: bool, shared: &[&str]| {
+        let info = schwaetz_core::helix::StreamInfo {
+            live,
+            shared_with: shared.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        h.app.on_live_result(schwaetz_core::helix::LiveResult {
+            network: h.net,
+            client_id: None,
+            ids: Default::default(),
+            result: Ok(vec![("alpha".into(), info)]),
+            unauthorized: false,
+        });
+    };
+    let alpha = h.buffer("#alpha");
+    let last = |h: &Harness| h.app.buffer(alpha).unwrap().lines.back().unwrap().text.to_string();
+
+    send(&mut h, true, &["beta", "gamma"]);
+    assert_eq!(h.app.topic_parts(alpha).shared_with, ["beta", "gamma"]);
+    assert_eq!(last(&h), "Sharing chat with beta, gamma");
+    let n = h.app.buffer(alpha).unwrap().lines.len();
+    send(&mut h, true, &["beta", "gamma"]);
+    assert_eq!(h.app.buffer(alpha).unwrap().lines.len(), n, "unchanged: nothing printed");
+    send(&mut h, true, &["beta"]);
+    assert_eq!(last(&h), "Sharing chat with beta");
+    send(&mut h, true, &[]);
+    assert_eq!(last(&h), "The shared chat ended");
+    assert!(h.app.topic_parts(alpha).shared_with.is_empty());
+
+    // Going offline ends a shared chat without a line of its own.
+    send(&mut h, true, &["beta"]);
+    send(&mut h, false, &[]);
+    assert_eq!(last(&h), "alpha went offline");
+}
+
 /// The emote fetches requested since the last call.
 fn emote_requests(h: &mut Harness) -> Vec<schwaetz_core::emotes::EmoteRequest> {
     h.app
