@@ -464,26 +464,7 @@ pub fn chat_badges(
     broadcaster_id: Option<&str>,
 ) -> Result<Vec<(String, BadgeImage)>, String> {
     let token = normalize_token(token);
-    if token.is_empty() {
-        return Err("no API token".into());
-    }
-    let cid = match client_id {
-        Some(c) => c.to_owned(),
-        None => {
-            let auth = format!("OAuth {token}");
-            let r = schwaetz_net::http::get_with(
-                "https://id.twitch.tv/oauth2/validate",
-                &[("Authorization", &auth)],
-                MAX_BODY,
-                false,
-            )?;
-            match r.status {
-                200 => parse_validate(&r.body)?,
-                401 => return Err(UNAUTHORIZED.into()),
-                s => return Err(format!("token validation failed (HTTP {s})")),
-            }
-        }
-    };
+    let cid = client_id_for(token, client_id)?;
     let url = match broadcaster_id {
         Some(id) => format!("{HELIX}/chat/badges?broadcaster_id={}", encode(id)),
         None => format!("{HELIX}/chat/badges/global"),
@@ -496,6 +477,65 @@ pub fn chat_badges(
         429 => Err("rate limited by Twitch".into()),
         s => Err(format!("badge request failed (HTTP {s})")),
     }
+}
+
+/// The client ID a token belongs to: `client_id` if known, else asked from Twitch.
+fn client_id_for(token: &str, client_id: Option<&str>) -> Result<String, String> {
+    if token.is_empty() {
+        return Err("no API token".into());
+    }
+    if let Some(c) = client_id {
+        return Ok(c.to_owned());
+    }
+    let auth = format!("OAuth {token}");
+    let r = schwaetz_net::http::get_with(
+        "https://id.twitch.tv/oauth2/validate",
+        &[("Authorization", &auth)],
+        MAX_BODY,
+        false,
+    )?;
+    match r.status {
+        200 => parse_validate(&r.body),
+        401 => Err(UNAUTHORIZED.into()),
+        s => Err(format!("token validation failed (HTTP {s})")),
+    }
+}
+
+/// Fetches (blocking) a channel's profile picture, as the badge that marks messages from it in a
+/// shared chat (titled with its display name). None if the channel does not exist.
+pub fn channel_icon(token: &str, client_id: Option<&str>, broadcaster_id: &str) -> Result<Option<BadgeImage>, String> {
+    let token = normalize_token(token);
+    let cid = client_id_for(token, client_id)?;
+    let url = format!("{HELIX}/users?id={}", encode(broadcaster_id));
+    let bearer = format!("Bearer {token}");
+    let r = schwaetz_net::http::get_with(&url, &[("Authorization", &bearer), ("Client-Id", &cid)], MAX_BODY, false)?;
+    match r.status {
+        200 => parse_channel_icon(&r.body),
+        401 => Err(UNAUTHORIZED.into()),
+        429 => Err("rate limited by Twitch".into()),
+        s => Err(format!("user request failed (HTTP {s})")),
+    }
+}
+
+/// Parses a Helix user into its profile picture at three sizes (Twitch keeps smaller copies next
+/// to the 300×300 one).
+pub fn parse_channel_icon(body: &[u8]) -> Result<Option<BadgeImage>, String> {
+    #[derive(Deserialize)]
+    struct U {
+        login: String,
+        #[serde(default)]
+        display_name: String,
+        #[serde(default)]
+        profile_image_url: String,
+    }
+    let Some(u) = json::<Data<U>>(body)?.data.into_iter().next() else { return Ok(None) };
+    if !u.profile_image_url.starts_with("https://") {
+        return Ok(None);
+    }
+    let url = u.profile_image_url;
+    let sized = |size: &str| url.replace("-300x300.", &format!("-{size}."));
+    let title = if u.display_name.is_empty() { u.login } else { u.display_name };
+    Ok(Some(BadgeImage { title, urls: [sized("50x50"), sized("70x70"), url.clone()] }))
 }
 
 /// Parses a Helix badge list into (`set/version`, image) pairs.
@@ -545,6 +585,20 @@ mod tests {
         assert!(list[0].1.urls[1].ends_with("/2"));
         assert!(parse_badges(br#"{"data":[]}"#).unwrap().is_empty());
         assert!(parse_badges(b"<html>").is_err());
+    }
+
+    #[test]
+    fn parses_channel_icons() {
+        let body = br#"{"data":[{"id":"141981764","login":"twitchdev","display_name":"TwitchDev",
+            "profile_image_url":"https://static-cdn.jtvnw.net/jtv_user_pictures/8a6381c7-profile_image-300x300.png"}]}"#;
+        let icon = parse_channel_icon(body).unwrap().unwrap();
+        assert_eq!(icon.title, "TwitchDev");
+        assert!(icon.urls[0].ends_with("profile_image-50x50.png"), "{:?}", icon.urls);
+        assert!(icon.urls[1].ends_with("profile_image-70x70.png"));
+        assert!(icon.urls[2].ends_with("profile_image-300x300.png"));
+        assert_eq!(parse_channel_icon(br#"{"data":[]}"#).unwrap(), None);
+        let none = br#"{"data":[{"id":"1","login":"x","profile_image_url":""}]}"#;
+        assert_eq!(parse_channel_icon(none).unwrap(), None);
     }
 
     #[test]

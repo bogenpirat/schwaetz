@@ -102,6 +102,7 @@ pub fn apply_tags(extra: &mut LineExtra, tags: &Tags, text: &str, nick: &str) {
             _ => None,
         });
     }
+    extra.source_room = tags.value("source-room-id").filter(|r| !r.is_empty()).map(str::to_owned);
     if let Some(e) = tags.value("emotes") {
         extra.emotes = parse_emotes(e, text);
     }
@@ -211,5 +212,8 @@ mod tests {
         let mut extra = LineExtra::default();
         apply_tags(&mut extra, &Tags::parse("badge-info=;badges=vip/1"), "hi", "u");
         assert_eq!(extra.sub_months, None);
+        assert_eq!(extra.source_room, None);
+        apply_tags(&mut extra, &Tags::parse("room-id=1;source-room-id=2;source-badges=vip/1"), "hi", "u");
+        assert_eq!(extra.source_room.as_deref(), Some("2"));
     }
 }

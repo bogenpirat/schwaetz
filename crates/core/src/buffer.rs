@@ -135,6 +135,8 @@ pub struct LineExtra {
     pub badges: Vec<String>,
     /// Months subscribed (Twitch `badge-info`), for the subscriber or founder badge.
     pub sub_months: Option<u32>,
+    /// Twitch shared chat: the channel (room id) the message was sent in (`source-room-id`).
+    pub source_room: Option<String>,
     pub emotes: Vec<Emote>,
     /// Animated pictures shown large in place of their placeholder text (Twitch `gifs`).
     pub gifs: Vec<Emote>,

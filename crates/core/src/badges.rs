@@ -2,6 +2,8 @@
 //! (`subscriber/12`); the images come from the Helix API: a global list (moderator, VIP …) and
 //! each channel's own subscriber and bits badges. Lists are kept on disk for [`MAX_AGE_MS`]; the
 //! images themselves never change (new artwork gets a new URL) and live in the media cache.
+//! A channel's list also holds its profile picture ([`CHANNEL_ICON`]), which marks messages
+//! from it in a shared chat.
 
 use crate::helix::BadgeImage;
 use std::collections::{HashMap, HashSet};
@@ -9,6 +11,9 @@ use std::path::{Path, PathBuf};
 
 /// How long a fetched badge list is used before it is fetched again.
 pub const MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// The key of a channel's profile picture in its badge list (not a badge Twitch names).
+pub const CHANNEL_ICON: &str = "schwaetz/channel-icon";
 
 /// Badge (`set/version`) → image.
 pub type BadgeMap = HashMap<String, BadgeImage>;
@@ -57,13 +62,21 @@ pub fn fetch(req: BadgeRequest, dir: Option<&Path>, now: i64) -> BadgeResult {
     let cached: Option<CacheFile> =
         file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok());
     let room_id = req.room_id.clone();
-    if let Some(c) = cached.as_ref().filter(|c| !req.refresh && now - c.fetched_at < MAX_AGE_MS) {
+    // Channel lists saved before they held the channel's picture are fetched again.
+    let complete = |c: &CacheFile| req.room_id.is_none() || c.badges.contains_key(CHANNEL_ICON);
+    if let Some(c) = cached.as_ref().filter(|c| !req.refresh && now - c.fetched_at < MAX_AGE_MS && complete(c)) {
         return BadgeResult { room_id, badges: Some(c.badges.clone()) };
     }
     if let Some(token) = &req.token {
         match crate::helix::chat_badges(token, req.client_id.as_deref(), req.room_id.as_deref()) {
             Ok(list) => {
-                let badges: BadgeMap = list.into_iter().collect();
+                let mut badges: BadgeMap = list.into_iter().collect();
+                if let Some(room) = &req.room_id {
+                    match crate::helix::channel_icon(token, req.client_id.as_deref(), room) {
+                        Ok(icon) => badges.extend(icon.map(|i| (CHANNEL_ICON.to_owned(), i))),
+                        Err(e) => tracing::warn!("channel icon ({room}): {e}"),
+                    }
+                }
                 if let (Some(f), Some(d)) = (&file, dir) {
                     let data = CacheFile { fetched_at: now, badges };
                     let _ = std::fs::create_dir_all(d);
@@ -157,6 +170,11 @@ impl<'a> Lookup<'a> {
     pub fn get(&self, badge: &str) -> Option<&'a BadgeImage> {
         self.badges.get(self.room_id, badge)
     }
+
+    /// The profile picture of a channel (by room id), once its list is loaded.
+    pub fn channel_icon(&self, room_id: &str) -> Option<&'a BadgeImage> {
+        self.badges.channels.get(room_id)?.get(CHANNEL_ICON)
+    }
 }
 
 #[cfg(test)]
@@ -216,7 +234,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("schwaetz-badges-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let data = CacheFile { fetched_at: 1_000, badges: map(&[("subscriber/0", "sub")]).unwrap() };
+        let data =
+            CacheFile { fetched_at: 1_000, badges: map(&[("subscriber/0", "sub"), (CHANNEL_ICON, "chan")]).unwrap() };
         std::fs::write(cache_file(&dir, Some("7")), serde_json::to_vec(&data).unwrap()).unwrap();
         let req = |refresh| BadgeRequest { room_id: Some("7".into()), token: None, client_id: None, refresh };
 
@@ -228,6 +247,11 @@ mod tests {
         let other = BadgeRequest { room_id: Some("8".into()), ..req(false) };
         assert!(fetch(other, Some(&dir), 1_000).badges.is_none());
         assert_eq!(cache_file(&dir, Some("../x")), dir.join("channel-x.json"));
+        // A list saved without the channel's picture is not complete, but does without a token.
+        let old = CacheFile { fetched_at: 1_000, badges: map(&[("subscriber/0", "old")]).unwrap() };
+        std::fs::write(cache_file(&dir, Some("9")), serde_json::to_vec(&old).unwrap()).unwrap();
+        let nine = BadgeRequest { room_id: Some("9".into()), ..req(false) };
+        assert_eq!(fetch(nine, Some(&dir), 1_000).badges.unwrap()["subscriber/0"].title, "old");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1671,6 +1671,9 @@ impl App {
         if twitch {
             twitch::apply_tags(&mut extra, &tags, &stripped, &from.nick);
             self.badges_seen(net_id, bid, &extra.badges);
+            if let Some(room) = extra.source_room.clone() {
+                self.request_badge_list(net_id, room);
+            }
             line.flags.set(LineFlags::FIRST_MESSAGE, tags.get("first-msg") == Some("1"));
             let net = &self.networks[&net_id];
             let state = channel
@@ -2952,6 +2955,24 @@ impl App {
                 self.effects.push(Effect::FetchBadges(req));
             }
         }
+    }
+
+    /// Loads a channel's badge list (with its picture) unless it is loaded or loading: for a
+    /// channel sharing its chat with one of ours.
+    fn request_badge_list(&mut self, net: NetworkId, room_id: String) {
+        let Some(n) = self.networks.get(&net).filter(|n| n.cfg.badge_images) else { return };
+        if !self.badges.start(Some(&room_id)) {
+            return;
+        }
+        let client_id = n.live.client_id.clone();
+        let (token, token_client) = self.api_token(net).unzip();
+        let client_id = token_client.flatten().or(client_id);
+        self.effects.push(Effect::FetchBadges(BadgeRequest {
+            room_id: Some(room_id),
+            token,
+            client_id,
+            refresh: false,
+        }));
     }
 
     /// A message came with these badges: fetches a list again if one of them is in neither the

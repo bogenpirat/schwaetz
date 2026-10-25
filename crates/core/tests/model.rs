@@ -1355,6 +1355,18 @@ fn badge_lists_are_loaded_once_and_refreshed_for_unknown_badges() {
     h.lines(&[&msg("newevent/2")]);
     assert!(badge_requests(&mut h).is_empty());
 
+    // Shared chat: a message sent in another channel loads that channel's list (with its
+    // picture), once.
+    let shared = "@badges=;room-id=71092938;source-room-id=12345 :u!u@u.tmi.twitch.tv PRIVMSG #xqc :hi";
+    h.lines(&[shared]);
+    assert_eq!(badge_requests(&mut h), [(Some("12345".into()), false)]);
+    h.lines(&[shared]);
+    assert!(badge_requests(&mut h).is_empty());
+    h.app.on_badge_result(badge_result(Some("12345"), &[schwaetz_core::badges::CHANNEL_ICON]));
+    let l = h.app.badge_lookup(c).unwrap();
+    assert_eq!(l.channel_icon("12345").unwrap().title, schwaetz_core::badges::CHANNEL_ICON);
+    assert!(l.channel_icon("71092938").is_none());
+
     // Switched off: symbols instead, nothing fetched.
     let mut cfg = h.app.networks[&h.net].cfg.clone();
     let name = cfg.name.clone();

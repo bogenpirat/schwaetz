@@ -1336,6 +1336,11 @@ fn badge_baseline(c: &Ctx) -> f32 {
 /// unless there is none or it failed to load.
 fn badge_image<'a>(c: &Ctx<'a>, badge: &str) -> Option<(&'a schwaetz_core::helix::BadgeImage, String)> {
     let image = c.badges?.get(badge)?;
+    sized_image(c, image).map(|url| (image, url))
+}
+
+/// The URL of a badge image at the size needed on screen, unless it failed to load.
+fn sized_image(c: &Ctx, image: &schwaetz_core::helix::BadgeImage) -> Option<String> {
     let px = badge_size(c).0 * c.scale;
     let scale = match px {
         ..=18.0 => 0,
@@ -1343,7 +1348,7 @@ fn badge_image<'a>(c: &Ctx<'a>, badge: &str) -> Option<(&'a schwaetz_core::helix
         _ => 2,
     };
     let url = &image.urls[scale];
-    (!c.images.borrow().failed(url)).then(|| (image, url.clone()))
+    (!c.images.borrow().failed(url)).then(|| url.clone())
 }
 
 /// Hover text of a badge: "Subscriber · 14 months".
@@ -1377,6 +1382,15 @@ fn nick_column_text(line: &Line, c: &Ctx) -> NickText {
     let mut badges = Vec::new();
     if line.kind == LineKind::Message {
         let months = line.extra.as_ref().and_then(|e| e.sub_months);
+        // Shared chat: the picture of the channel the message was sent in comes first.
+        let source = line.extra.as_ref().and_then(|e| e.source_room.as_deref());
+        if let Some(icon) = source.and_then(|r| c.badges?.channel_icon(r))
+            && let Some(url) = sized_image(c, icon)
+        {
+            let at = full.encode_utf16().count() as u32;
+            badges.push(NickBadge { at, url, large_url: icon.urls[2].clone(), label: icon.title.clone() });
+            full.push(BADGE);
+        }
         for b in line.extra.as_ref().map(|e| e.badges.as_slice()).unwrap_or_default() {
             match badge_image(c, b) {
                 Some((image, url)) => {
