@@ -93,6 +93,11 @@ network's `joins_parts = "smart"`), `ctcp_replies`, `log_to_files`, `history_day
 `copy_on_select` (on by default: text you select in the chat goes to the clipboard right away,
 no Ctrl+C needed).
 
+**Start with Windows** (settings dialog, History & window) is not a config setting: it adds or
+removes a `schwaetz` entry in the current user's `Run` registry key, which also appears in Task
+Manager's startup apps. The switch is on only if that entry starts the executable you opened the
+dialog from, with the same `--profile`; switching it on makes the entry point there.
+
 With `remember_channels` (on by default) each network's `autojoin` list ("Join on connect") follows
 what you do: channels you join are added, and channels you leave with `/part` or by closing their
 window are removed. Being kicked or `/cycle` keeps a channel on the list.

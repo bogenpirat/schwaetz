@@ -1380,7 +1380,8 @@ impl Ui {
         let dir = self.paths.scripts_dir().display().to_string();
         let infos = self.services.scripts.as_ref().map(|h| h.list(&self.app));
         let scripts = infos.as_deref().map(|i| (i, dir.as_str()));
-        self.form = Some(Box::new(crate::form::Form::settings(&self.app.config, scripts)));
+        let autostart = crate::autostart::enabled(&self.paths);
+        self.form = Some(Box::new(crate::form::Form::settings(&self.app.config, autostart, scripts)));
     }
 
     /// Runs blocking work (HTTPS) on its own thread; the result comes back through `WM_APP_LIVE`.
@@ -1626,6 +1627,14 @@ impl Ui {
                             self.app.apply_config();
                             if let Err(e) = self.app.config.save(&self.paths.config_file()) {
                                 form.error = Some(format!("Could not save: {e}"));
+                                return;
+                            }
+                            // Only a change: just saving must not take over another build's entry.
+                            let autostart = form.check("autostart");
+                            if autostart != crate::autostart::enabled(&self.paths)
+                                && let Err(e) = crate::autostart::set(&self.paths, autostart)
+                            {
+                                form.error = Some(format!("Could not change starting with Windows: {e}"));
                                 return;
                             }
                             // Scripts switched on or off start or stop now.

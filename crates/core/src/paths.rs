@@ -10,6 +10,8 @@ pub struct Paths {
     pub data_dir: PathBuf,
     pub cache_dir: PathBuf,
     pub portable: bool,
+    /// The directory given with `--profile`, if any.
+    pub profile: Option<PathBuf>,
 }
 
 impl Paths {
@@ -22,6 +24,7 @@ impl Paths {
                 data_dir: data.clone(),
                 cache_dir: data.join("cache"),
                 portable: true,
+                profile: None,
             };
         }
         let roaming = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
@@ -31,13 +34,20 @@ impl Paths {
             data_dir: local.join("schwaetz"),
             cache_dir: local.join("schwaetz").join("cache"),
             portable: false,
+            profile: None,
         }
     }
 
     /// Paths rooted in one directory (tests, `--profile <dir>`).
     pub fn in_dir(dir: impl Into<PathBuf>) -> Paths {
         let d = dir.into();
-        Paths { config_dir: d.clone(), data_dir: d.clone(), cache_dir: d.join("cache"), portable: true }
+        Paths {
+            config_dir: d.clone(),
+            data_dir: d.clone(),
+            cache_dir: d.join("cache"),
+            portable: true,
+            profile: Some(d),
+        }
     }
 
     pub fn config_file(&self) -> PathBuf {

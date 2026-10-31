@@ -445,7 +445,8 @@ impl Form {
         Form::new(title, FormKind::Network { original: cfg.map(|c| c.name.clone()) }, fields)
     }
 
-    pub fn settings(c: &Config, scripts: Option<(&[ScriptInfo], &str)>) -> Form {
+    /// `autostart`: whether the app starts with Windows (kept by Windows, not in the config).
+    pub fn settings(c: &Config, autostart: bool, scripts: Option<(&[ScriptInfo], &str)>) -> Form {
         let g = &c.general;
         let a = &c.appearance;
         let fields = vec![
@@ -500,6 +501,7 @@ impl Form {
             header("History & window"),
             check("log_to_files", "Write text log files", g.log_to_files),
             text("history_days", "Delete history after days", "0 = keep forever", &g.history_days.to_string()),
+            check("autostart", "Start with Windows", autostart),
             check("minimize_to_tray", "Minimize to tray", g.minimize_to_tray),
             check("close_to_tray", "Close to tray", g.close_to_tray),
         ];
@@ -1331,7 +1333,7 @@ mod tests {
     #[test]
     fn settings_form_applies() {
         let mut c = Config::default();
-        let mut f = Form::settings(&c, None);
+        let mut f = Form::settings(&c, false, None);
         set(&mut f, "font_size", "15,5");
         set(&mut f, "highlight_words", "rust, irc");
         f.apply_settings(&mut c).unwrap();
@@ -1354,7 +1356,7 @@ mod tests {
         };
         let mut c = Config::default();
         c.scripts.disabled = vec!["b".into()];
-        let mut f = Form::settings(&c, Some((&[info("a", true), info("b", false)], r"C:scripts")));
+        let mut f = Form::settings(&c, false, Some((&[info("a", true), info("b", false)], r"C:scripts")));
         assert_eq!(f.sections.last().unwrap().0, "Scripts");
         f.show_section(f.sections.len() - 1);
 
@@ -1377,7 +1379,9 @@ mod tests {
     #[test]
     fn settings_pages_errors_and_dropdown_keys() {
         let mut c = Config::default();
-        let mut f = Form::settings(&c, None);
+        let mut f = Form::settings(&c, false, None);
+        assert!(!f.check("autostart"));
+        assert!(Form::settings(&c, true, None).check("autostart"));
         let pages: Vec<_> = f.sections.iter().map(|(t, _)| *t).collect();
         assert_eq!(pages, ["Identity", "Appearance", "Chat", "Notifications", "Link previews", "History & window"]);
 
