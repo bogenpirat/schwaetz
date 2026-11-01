@@ -993,7 +993,160 @@ fn emote_result(
         .into_iter()
         .map(|(key, names)| (key, names.iter().map(|n| (n.to_string(), format!("https://e/{n}"))).collect()))
         .collect();
-    schwaetz_core::emotes::EmoteResult { network: h.net, connection, sets, twitch_limited: false }
+    schwaetz_core::emotes::EmoteResult {
+        network: h.net,
+        connection,
+        sets,
+        twitch_limited: false,
+        failed: Vec::new(),
+        unauthorized: false,
+    }
+}
+
+#[test]
+fn failed_emote_fetches_run_again_with_growing_waits_and_keep_what_came() {
+    use schwaetz_core::emote_providers::Provider;
+    use schwaetz_core::emotes::{Job, SetKey};
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.app.set_twitch_api_token(h.net, Some("tok".into()));
+    h.connect();
+    h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>"]);
+    let connection = emote_requests(&mut h)[0].connection;
+    h.lines(&[":me!me@me.tmi.twitch.tv JOIN #xqc", "@room-id=1 :tmi.twitch.tv ROOMSTATE #xqc"]);
+    let c = h.buffer("#xqc");
+    h.app.take_effects();
+    let start = h.now;
+
+    // The Twitch list broke off after some pages: what came is usable, the job is due again.
+    let twitch = SetKey::Twitch { owner: "0".into(), emote_type: "globals".into() };
+    let mut r = emote_result(&h, connection, vec![(twitch, &["FirstPage"])]);
+    r.failed = vec![Job::TwitchUser];
+    h.app.on_emote_result(r);
+    assert_eq!(h.app.emote_completions(c, "FirstPage", 5).len(), 1);
+    h.app.tick(start + 4_000);
+    assert!(emote_jobs(&mut h).is_empty(), "not yet");
+    h.app.tick(start + 5_000);
+    assert_eq!(emote_jobs(&mut h), [vec![Job::TwitchUser]]);
+    h.app.tick(start + 6_000);
+    assert!(emote_jobs(&mut h).is_empty(), "started once");
+
+    // Failing again waits longer.
+    let mut r = emote_result(&h, connection, vec![]);
+    r.failed = vec![Job::TwitchUser];
+    h.app.on_emote_result(r);
+    h.app.tick(start + 6_000 + 9_000);
+    assert!(emote_jobs(&mut h).is_empty(), "the wait doubled");
+    h.app.tick(start + 6_000 + 10_000);
+    assert_eq!(emote_jobs(&mut h), [vec![Job::TwitchUser]]);
+
+    // Jobs for a provider switched off meanwhile don't run; switching it on fetches them.
+    let job = Job::Provider { provider: Provider::Ffz, room_id: None };
+    let mut r = emote_result(&h, connection, vec![]);
+    r.failed = vec![job.clone()];
+    h.app.on_emote_result(r);
+    let mut cfg = h.app.networks[&h.net].cfg.clone();
+    let name = cfg.name.clone();
+    cfg.emotes_ffz = false;
+    h.app.upsert_network(Some(&name), cfg.clone());
+    h.app.take_effects();
+    h.app.tick(start + 60_000);
+    assert!(emote_jobs(&mut h).is_empty());
+    cfg.emotes_ffz = true;
+    h.app.upsert_network(Some(&name), cfg);
+    assert!(emote_jobs(&mut h).concat().contains(&job));
+
+    // A failure from a past connection is not retried.
+    let mut r = emote_result(&h, connection, vec![]);
+    h.app.on_net_event(NetEvent::Disconnected { id: h.net, reason: "gone".into(), retry_in: None }, h.now);
+    r.failed = vec![Job::TwitchUser];
+    h.app.on_emote_result(r);
+    h.connect();
+    h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>"]);
+    h.app.take_effects();
+    h.app.tick(start + 120_000);
+    assert!(emote_jobs(&mut h).is_empty());
+}
+
+#[test]
+fn emote_lists_are_fetched_again_every_hour() {
+    use schwaetz_core::emote_providers::Provider;
+    use schwaetz_core::emotes::{Job, SetKey};
+    const HOUR: i64 = 3_600_000;
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.app.set_twitch_api_token(h.net, Some("tok".into()));
+    h.connect();
+    h.lines(&[
+        ":tmi.twitch.tv 001 me :hi",
+        ":tmi.twitch.tv 376 me :>",
+        ":me!me@me.tmi.twitch.tv JOIN #xqc",
+        "@room-id=1 :tmi.twitch.tv ROOMSTATE #xqc",
+    ]);
+    let c = h.buffer("#xqc");
+    let reqs = emote_requests(&mut h);
+    let connection = reqs[0].connection;
+    let before: usize = reqs.iter().map(|r| r.jobs.len()).sum();
+    let start = h.now;
+
+    let key = SetKey::Provider { provider: Provider::SevenTv, room: Some("1".into()) };
+    h.app.on_emote_result(emote_result(&h, connection, vec![(key.clone(), &["Old"])]));
+
+    h.app.tick(start + HOUR - 1_000);
+    assert!(emote_jobs(&mut h).is_empty());
+    h.app.tick(start + HOUR);
+    let again = emote_jobs(&mut h).concat();
+    assert_eq!(again.len(), before);
+    assert!(again.contains(&Job::TwitchUser));
+    h.app.tick(start + HOUR + 1);
+    assert!(emote_jobs(&mut h).is_empty(), "not before the next hour");
+
+    // A provider's new list replaces the old one: emotes the channel removed go away.
+    h.app.on_emote_result(emote_result(&h, connection, vec![(key, &["New"])]));
+    assert!(h.app.emote_completions(c, "Old", 5).is_empty());
+    assert_eq!(h.app.emote_completions(c, "New", 5).len(), 1);
+}
+
+#[test]
+fn personal_emotes_need_the_user_id_and_show_in_our_own_lines_only() {
+    use schwaetz_core::emote_providers::Provider;
+    use schwaetz_core::emotes::{Job, SetKey};
+    let personal = |provider| Job::ProviderPersonal { provider, user_id: "15".into() };
+    let mut h = Harness::new(NetworkKind::Twitch, &[]);
+    h.connect();
+    h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>"]);
+    let reqs = emote_requests(&mut h);
+    let connection = reqs[0].connection;
+    assert!(reqs.iter().flat_map(|r| &r.jobs).all(|j| !matches!(j, Job::ProviderPersonal { .. })));
+
+    // Twitch tells who we are after connecting. BTTV can't be asked.
+    h.lines(&["@display-name=Me;user-id=15 :tmi.twitch.tv GLOBALUSERSTATE"]);
+    assert_eq!(emote_jobs(&mut h).concat(), [personal(Provider::SevenTv), personal(Provider::Ffz)]);
+    h.lines(&["@display-name=Me;user-id=15 :tmi.twitch.tv GLOBALUSERSTATE"]);
+    assert!(emote_jobs(&mut h).is_empty(), "once per connection");
+
+    h.lines(&[":me!me@me.tmi.twitch.tv JOIN #xqc", "@room-id=1 :tmi.twitch.tv ROOMSTATE #xqc"]);
+    let c = h.buffer("#xqc");
+    let key = SetKey::Personal { provider: Provider::SevenTv };
+    h.app.on_emote_result(emote_result(&h, connection, vec![(key, &["monkE"])]));
+    let entry = &h.app.emote_completions(c, "monkE", 5)[0];
+    assert_eq!(entry.label(), "7TV · personal");
+    let l = h.app.emote_lookup(c);
+    assert_eq!(l.get("monkE", true), Some("https://e/monkE"));
+    assert_eq!(l.get("monkE", false), None, "the word means nothing from others");
+
+    // Switching the provider off hides them too.
+    let mut cfg = h.app.networks[&h.net].cfg.clone();
+    let name = cfg.name.clone();
+    cfg.emotes_7tv = false;
+    h.app.upsert_network(Some(&name), cfg);
+    assert!(h.app.emote_completions(c, "monkE", 5).is_empty());
+
+    // Who we are is asked again after a reconnect.
+    h.app.take_effects();
+    h.app.on_net_event(NetEvent::Disconnected { id: h.net, reason: "gone".into(), retry_in: None }, h.now);
+    h.connect();
+    h.lines(&[":tmi.twitch.tv 001 me :hi", ":tmi.twitch.tv 376 me :>"]);
+    let jobs = emote_jobs(&mut h).concat();
+    assert!(jobs.iter().all(|j| !matches!(j, Job::ProviderPersonal { .. })), "{jobs:?}");
 }
 
 #[test]

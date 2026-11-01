@@ -2,9 +2,9 @@
 //! completion) and which words show as images.
 //!
 //! Sources: Twitch's API (the ones the signed-in user may use: follower, subscriber tiers,
-//! globals …), 7TV/FrankerFaceZ/BetterTTV (`emote_providers`), and scripts
-//! (`schwaetz.setEmotes`). Everything but the scripts' sets is fetched per connection, see
-//! [`Job`].
+//! globals …), 7TV/FrankerFaceZ/BetterTTV (`emote_providers`: their global and channel sets, and
+//! what the user has for themselves), and scripts (`schwaetz.setEmotes`). Everything but the
+//! scripts' sets is fetched per connection, see [`Job`].
 
 use crate::emote_providers::{NamedUrls, Provider};
 use schwaetz_net::NetworkId;
@@ -16,6 +16,8 @@ pub enum Source {
     /// Twitch, with Helix's `emote_type` ("subscriptions", "follower", "globals" …).
     Twitch(String),
     Provider(Provider),
+    /// What the user has for themselves with a provider, usable in any channel.
+    Personal(Provider),
     /// A script's set, named as the script called it.
     Script(String),
 }
@@ -30,7 +32,9 @@ impl Source {
     fn order(&self) -> u8 {
         match self {
             Source::Twitch(_) => 0,
-            Source::Provider(p) => 1 + Provider::ALL.iter().position(|x| x == p).unwrap_or(0) as u8,
+            Source::Provider(p) | Source::Personal(p) => {
+                1 + Provider::ALL.iter().position(|x| x == p).unwrap_or(0) as u8
+            }
             Source::Script(_) => 1 + Provider::ALL.len() as u8,
         }
     }
@@ -38,7 +42,7 @@ impl Source {
     fn name(&self) -> &str {
         match self {
             Source::Twitch(_) => "Twitch",
-            Source::Provider(p) => p.short_name(),
+            Source::Provider(p) | Source::Personal(p) => p.short_name(),
             Source::Script(name) => name,
         }
     }
@@ -74,17 +78,24 @@ pub struct EmoteEntry {
 
 impl EmoteEntry {
     /// Display order: the channel's Twitch emotes, then the channel's 7TV, FFZ and BTTV emotes,
-    /// then everything global (Twitch, 7TV, FFZ, BTTV).
+    /// then the user's personal ones, then everything global (Twitch, 7TV, FFZ, BTTV).
     pub fn group(&self) -> u8 {
-        self.source.order() + if self.channel { 0 } else { 10 }
+        let base = match (&self.source, self.channel) {
+            (Source::Personal(_), _) => 10,
+            (_, true) => 0,
+            (_, false) => 20,
+        };
+        base + self.source.order()
     }
 
     /// Short source label for the list: Twitch emotes by kind ("Twitch · sub", "Twitch ·
-    /// global" …), others by source, global ones marked as such ("7TV", "7TV · global").
+    /// global" …), others by source, personal and global ones marked as such ("7TV", "7TV ·
+    /// personal", "7TV · global").
     pub fn label(&self) -> String {
         let name = self.source.name();
         match &self.source {
             Source::Twitch(emote_type) => format!("{name} · {}", twitch_kind(emote_type)),
+            Source::Personal(_) => format!("{name} · personal"),
             _ if self.channel => name.to_owned(),
             _ => format!("{name} · global"),
         }
@@ -176,7 +187,8 @@ impl<'a> Lookup<'a> {
 
 // ----- fetching ----------------------------------------------------------------------------------
 
-/// One emote list to fetch for a Twitch network. Each is fetched once per connection.
+/// One emote list to fetch for a Twitch network, once per connection (and again when it failed or
+/// is due for a refresh).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Job {
     /// Every Twitch emote the signed-in user may use (in all channels).
@@ -185,6 +197,8 @@ pub enum Job {
     TwitchFollower { room_id: String },
     /// A provider's global set (`room_id` = None) or a channel's.
     Provider { provider: Provider, room_id: Option<String> },
+    /// What the user (by Twitch user id) has for themselves with a provider.
+    ProviderPersonal { provider: Provider, user_id: String },
 }
 
 /// Where a fetched set is kept. Channels are identified by their Twitch user id (`room-id`).
@@ -195,6 +209,8 @@ pub enum SetKey {
     Twitch { owner: String, emote_type: String },
     /// A provider's global set (`room` = None) or a channel's.
     Provider { provider: Provider, room: Option<String> },
+    /// What the user has for themselves with a provider.
+    Personal { provider: Provider },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -211,36 +227,50 @@ pub struct EmoteRequest {
 pub struct EmoteResult {
     pub network: NetworkId,
     pub connection: u64,
-    /// Emotes to add to the sets (failed jobs are logged and tried again on the next connection).
+    /// Emotes for the sets: a provider's replace its set, Twitch's are added to theirs.
     pub sets: Vec<(SetKey, NamedUrls)>,
     /// The token lacks the `user:read:emotes` permission: only Twitch's global emotes came.
     pub twitch_limited: bool,
+    /// Jobs that failed, to try again. What they got before failing is in `sets`.
+    pub failed: Vec<Job>,
+    /// Twitch rejected the token (HTTP 401): it needs refreshing.
+    pub unauthorized: bool,
 }
 
 /// Runs the jobs of a request (blocking).
 pub fn fetch(req: EmoteRequest) -> EmoteResult {
-    let mut out =
-        EmoteResult { network: req.network, connection: req.connection, sets: Vec::new(), twitch_limited: false };
-    for job in &req.jobs {
-        let sets = match job {
+    let mut out = EmoteResult {
+        network: req.network,
+        connection: req.connection,
+        sets: Vec::new(),
+        twitch_limited: false,
+        failed: Vec::new(),
+        unauthorized: false,
+    };
+    for job in req.jobs {
+        let result = match &job {
             Job::TwitchUser | Job::TwitchFollower { .. } => {
                 let Some(token) = &req.token else { continue };
-                let follower_of = match job {
+                let follower_of = match &job {
                     Job::TwitchFollower { room_id } => Some(room_id.as_str()),
                     _ => None,
                 };
-                crate::helix::user_emotes(token, follower_of).map(|(list, limited)| {
-                    out.twitch_limited |= limited;
-                    twitch_sets(list)
-                })
+                let mut list = Vec::new();
+                let result = crate::helix::user_emotes(token, follower_of, &mut list);
+                out.sets.extend(twitch_sets(list));
+                result.map(|limited| out.twitch_limited |= limited)
             }
-            Job::Provider { provider, room_id } => provider
-                .fetch(room_id.as_deref())
-                .map(|list| vec![(SetKey::Provider { provider: *provider, room: room_id.clone() }, list)]),
+            Job::Provider { provider, room_id } => provider.fetch(room_id.as_deref()).map(|list| {
+                out.sets.push((SetKey::Provider { provider: *provider, room: room_id.clone() }, list));
+            }),
+            Job::ProviderPersonal { provider, user_id } => provider.fetch_personal(user_id).map(|list| {
+                out.sets.push((SetKey::Personal { provider: *provider }, list));
+            }),
         };
-        match sets {
-            Ok(sets) => out.sets.extend(sets),
-            Err(e) => tracing::warn!("emotes ({job:?}): {e}"),
+        if let Err(e) = result {
+            tracing::warn!("emotes ({job:?}): {e}");
+            out.unauthorized |= e == crate::helix::UNAUTHORIZED;
+            out.failed.push(job);
         }
     }
     out
@@ -289,8 +319,20 @@ mod tests {
         assert_eq!(x, ["xqcL", "xqcLUL"]);
         assert_eq!(complete(all.iter(), "lulw", 50)[0].source, seven, "duplicates keep the better source");
         assert_eq!(e("A", seven, false).label(), "7TV · global");
+        assert_eq!(e("A", Source::Personal(Provider::SevenTv), false).label(), "7TV · personal");
         assert_eq!(Source::from_name("7TV"), Source::Provider(Provider::SevenTv));
         assert_eq!(e("A", Source::from_name("mine"), true).label(), "mine");
+    }
+
+    #[test]
+    fn personal_emotes_rank_between_the_channels_and_the_global_ones() {
+        let all = [
+            e("aGlobal", Source::Twitch("globals".into()), false),
+            e("aMine", Source::Personal(Provider::SevenTv), false),
+            e("aChannel", Source::Provider(Provider::Bttv), true),
+        ];
+        let names: Vec<String> = complete(all.iter(), "a", 50).into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["aChannel", "aMine", "aGlobal"]);
     }
 
     #[test]

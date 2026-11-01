@@ -99,7 +99,7 @@ pub struct LiveResult {
 
 const HELIX: &str = "https://api.twitch.tv/helix";
 const MAX_BODY: u64 = 1 << 20;
-const UNAUTHORIZED: &str = "the API token is invalid or expired";
+pub(crate) const UNAUTHORIZED: &str = "the API token is invalid or expired";
 
 /// Runs a live check (blocking).
 pub fn check(req: LiveRequest) -> LiveResult {
@@ -345,10 +345,10 @@ const MAX_EMOTE_PAGES: usize = 1000;
 
 /// Fetches (blocking) every emote the token's user may use, in all channels (subscriptions,
 /// globals, follower emotes of subscribed channels …), or with `follower_of` (a channel's Twitch
-/// user id) only that channel's follower emotes, if the user follows it. Also returns whether
-/// the token lacks the `user:read:emotes` permission, so that only Twitch's global emotes could
-/// be fetched (and no follower emotes).
-pub fn user_emotes(token: &str, follower_of: Option<&str>) -> Result<(Vec<TwitchEmote>, bool), String> {
+/// user id) only that channel's follower emotes, if the user follows it. They are added to `out`,
+/// so what came before an error is kept. Returns whether the token lacks the `user:read:emotes`
+/// permission, so that only Twitch's global emotes could be fetched (and no follower emotes).
+pub fn user_emotes(token: &str, follower_of: Option<&str>, out: &mut Vec<TwitchEmote>) -> Result<bool, String> {
     let token = normalize_token(token);
     // Who the token belongs to, for which app, and what it may do.
     let auth = format!("OAuth {token}");
@@ -358,8 +358,10 @@ pub fn user_emotes(token: &str, follower_of: Option<&str>) -> Result<(Vec<Twitch
         MAX_BODY,
         false,
     )?;
-    if r.status != 200 {
-        return Err(UNAUTHORIZED.into());
+    match r.status {
+        200 => {}
+        401 => return Err(UNAUTHORIZED.into()),
+        s => return Err(format!("token validation failed (HTTP {s})")),
     }
     #[derive(Deserialize)]
     struct V {
@@ -383,17 +385,19 @@ pub fn user_emotes(token: &str, follower_of: Option<&str>) -> Result<(Vec<Twitch
     };
     let user_url = format!("{HELIX}/chat/emotes/user?user_id={}", encode(&v.user_id));
     match follower_of {
-        _ if !full && follower_of.is_some() => Ok((Vec::new(), true)),
-        _ if !full => Ok((page(&format!("{HELIX}/chat/emotes/global"))?.0, true)),
+        _ if !full && follower_of.is_some() => Ok(true),
+        _ if !full => {
+            out.extend(page(&format!("{HELIX}/chat/emotes/global"))?.0);
+            Ok(true)
+        }
         Some(broadcaster_id) => {
             // With `broadcaster_id`, the first page carries that channel's follower emotes if
             // the user follows it (and nothing of it otherwise).
             let (list, _) = page(&format!("{user_url}&broadcaster_id={}", encode(broadcaster_id)))?;
-            let list = list.into_iter().filter(|e| e.owner_id == broadcaster_id && e.emote_type == "follower");
-            Ok((list.collect(), false))
+            out.extend(list.into_iter().filter(|e| e.owner_id == broadcaster_id && e.emote_type == "follower"));
+            Ok(false)
         }
         None => {
-            let mut out = Vec::new();
             let mut after: Option<String> = None;
             for _ in 0..MAX_EMOTE_PAGES {
                 let url = match &after {
@@ -404,11 +408,11 @@ pub fn user_emotes(token: &str, follower_of: Option<&str>) -> Result<(Vec<Twitch
                 out.extend(list);
                 match cursor {
                     Some(c) if after.as_ref() != Some(&c) => after = Some(c),
-                    _ => return Ok((out, false)),
+                    _ => return Ok(false),
                 }
             }
             tracing::warn!("user emotes: stopped after {MAX_EMOTE_PAGES} pages");
-            Ok((out, false))
+            Ok(false)
         }
     }
 }

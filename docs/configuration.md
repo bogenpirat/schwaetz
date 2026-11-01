@@ -64,8 +64,11 @@ and going live, going offline and title or game changes are printed in the chann
 
 **Twitch emotes:** 7TV, BetterTTV and FrankerFaceZ emotes (each channel's and the global ones)
 show inline in Twitch channels like Twitch's own; each provider can be switched off in the
-network settings (`emotes_7tv`, `emotes_bttv`, `emotes_ffz`). With the Twitch sign-in, your own
-messages show your Twitch emotes too (Twitch doesn't mark them in what you send).
+network settings (`emotes_7tv`, `emotes_bttv`, `emotes_ffz`). Your own messages also show your
+personal emotes: a 7TV subscriber's personal set and FFZ's sets for supporters, in any channel.
+BetterTTV Pro emotes aren't available, as BetterTTV's API doesn't list them. With the Twitch
+sign-in, your own messages show your Twitch emotes too (Twitch doesn't mark them in what you
+send).
 
 **Twitch GIFs:** a GIF posted in a channel that allows them shows animated in the message in
 place of its description (`[… GIF by …]`), at its own size but at most 240 × 120, and never
@@ -76,11 +79,13 @@ stays.
 followed by a letter or digit at the start of a word lists matching emotes above the input (↑/↓,
 PgUp/PgDn to move, Tab or Enter to insert, Esc to close; clicking an entry inserts it too). Order:
 the channel's Twitch emotes you may use (follower, subscriber tiers), then the channel's 7TV, FFZ
-and BTTV emotes, then global ones. Each entry names its source; Twitch emotes by kind (`sub`,
-`follower`, `bits`, `global` …). Twitch emotes need the Twitch sign-in (it asks for permission to
-read your emotes; sign-ins from before this was added need to sign in once more); without it only
-Twitch's global emotes are offered, if any API token is available. Emotes are loaded once per
-connection, so emotes from a new subscription or follow are offered after reconnecting.
+and BTTV emotes, then your personal ones, then global ones. Each entry names its source; Twitch
+emotes by kind (`sub`, `follower`, `bits`, `global` …). Twitch emotes need the Twitch sign-in (it
+asks for permission to read your emotes; sign-ins from before this was added need to sign in once
+more); without it only Twitch's global emotes are offered, if any API token is available. Emotes
+are loaded when connecting and joining, lists that fail to load are tried again after a few
+seconds, and everything is loaded again every hour, so emotes from a new subscription or follow
+are offered within the hour, or right after reconnecting.
 
 **ZNC:** `/znc <command>` talks to `*status`; `/znc import` offers to add your other ZNC networks.
 

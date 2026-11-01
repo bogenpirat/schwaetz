@@ -942,6 +942,7 @@ impl App {
                 let was_up = matches!(net.conn, ConnState::Connected | ConnState::Ready);
                 net.session.on_disconnect();
                 net.emotes.reset();
+                net.twitch_self = None;
                 net.conn = if retry_in.is_some() { ConnState::Connecting } else { ConnState::Disconnected };
                 net.lag_ms = None;
                 net.retry_at = retry_in.map(|d| now + d.as_millis() as i64);
@@ -996,6 +997,7 @@ impl App {
             }
             self.flush(id);
             self.live_tick(id);
+            self.emotes_tick(id);
         }
         for id in self.networks.keys().copied().collect::<Vec<_>>() {
             self.auth_tick(id);
@@ -2056,7 +2058,12 @@ impl App {
                 if let Some(n) = self.networks.get_mut(&net_id) {
                     match channel {
                         Some(c) => drop(n.twitch_self_channels.insert(c.to_ascii_lowercase(), tags)),
-                        None => n.twitch_self = Some(tags),
+                        None => {
+                            n.twitch_self = Some(tags);
+                            // Who we are is known now: our own emotes can be fetched.
+                            let sb = n.server_buffer;
+                            self.request_emotes(sb);
+                        }
                     }
                 }
             }
@@ -2875,16 +2882,31 @@ impl App {
 
 // ----- emotes ------------------------------------------------------------------------------------
 
-/// A Twitch network's emotes (for completion and the chat). What a user may use only changes on
-/// reconnect, and the providers' sets rarely change, so each [`Job`] runs once per connection:
-/// the user's Twitch emotes and the providers' global sets right away, a channel's provider sets
-/// once it is joined, its follower emotes when it is first looked at.
+/// First wait before fetching failed emote lists again; it doubles with every failed round. Short,
+/// as an expired token is refreshed within seconds.
+const EMOTE_RETRY_MS: i64 = 5_000;
+const EMOTE_RETRY_MAX_MS: i64 = 600_000;
+/// How often the emote lists are fetched again, for new subscriptions, follows and channel emotes.
+const EMOTE_REFRESH_MS: i64 = 3_600_000;
+
+/// A Twitch network's emotes (for completion and the chat). Each [`Job`] runs once per connection:
+/// the user's Twitch emotes and the providers' global sets right away, what the user has with the
+/// providers once their id is known (GLOBALUSERSTATE), a channel's provider sets once it is joined,
+/// its follower emotes when it is first looked at. Failed jobs run again after a while, and all of
+/// them now and then.
 #[derive(Default)]
 pub(crate) struct ConnEmotes {
     /// Counts connections, so results arriving after a reconnect are dropped.
     connection: u64,
     started: std::collections::HashSet<Job>,
     sets: std::collections::HashMap<SetKey, EmoteSet>,
+    /// Jobs to run again at `retry_at`.
+    failed: Vec<Job>,
+    retry_at: i64,
+    /// Rounds in a row with failures, for the wait until the next one.
+    failed_rounds: u32,
+    /// When to run all jobs again (0: nothing was fetched yet).
+    refresh_at: i64,
 }
 
 impl ConnEmotes {
@@ -2904,7 +2926,8 @@ impl App {
 
     /// Fetches what is missing on this connection of a buffer's network: the network-wide lists
     /// and, for a channel (once its id is known from ROOMSTATE), the providers' sets of it and,
-    /// if it is being looked at, its follower emotes. Twitch emotes need an API token.
+    /// if it is being looked at, its follower emotes. Twitch emotes need an API token, the user's
+    /// personal ones their id (from GLOBALUSERSTATE).
     pub fn request_emotes(&mut self, buffer: BufferId) {
         let Some(b) = self.buffer(buffer) else { return };
         let Some(net) = b.network else { return };
@@ -2915,6 +2938,8 @@ impl App {
         }
         let token = self.api_token(net).map(|(t, _)| t);
         let n = self.networks.get_mut(&net).unwrap();
+        let user_id = n.twitch_self.as_ref().and_then(|t| t.value("user-id")).filter(|id| !id.is_empty());
+        let user_id = user_id.map(str::to_owned);
         let mut jobs = Vec::new();
         if token.is_some() {
             jobs.push(Job::TwitchUser);
@@ -2925,8 +2950,25 @@ impl App {
         for provider in Provider::ALL.into_iter().filter(|&p| n.cfg.emote_provider(p)) {
             jobs.push(Job::Provider { provider, room_id: None });
             jobs.extend(room.clone().map(|r| Job::Provider { provider, room_id: Some(r) }));
+            if provider.has_personal_emotes() {
+                jobs.extend(user_id.clone().map(|user_id| Job::ProviderPersonal { provider, user_id }));
+            }
         }
         jobs.retain(|j| n.emotes.started.insert(j.clone()));
+        self.fetch_emote_jobs(net, jobs);
+    }
+
+    /// Starts fetching these lists.
+    fn fetch_emote_jobs(&mut self, net: NetworkId, jobs: Vec<Job>) {
+        if jobs.is_empty() {
+            return;
+        }
+        let token = self.api_token(net).map(|(t, _)| t);
+        let now = self.now;
+        let Some(n) = self.networks.get_mut(&net) else { return };
+        if n.emotes.refresh_at == 0 {
+            n.emotes.refresh_at = now + EMOTE_REFRESH_MS;
+        }
         let connection = n.emotes.connection;
         // The user's Twitch emotes take many requests: fetched apart, so the rest need not wait.
         let (slow, fast): (Vec<Job>, Vec<Job>) = jobs.into_iter().partition(|j| *j == Job::TwitchUser);
@@ -2934,6 +2976,37 @@ impl App {
             let req = EmoteRequest { network: net, connection, token: token.clone(), jobs };
             self.effects.push(Effect::FetchEmotes(req));
         }
+    }
+
+    /// Runs failed emote jobs again when it is time, and all of them when they are due for a
+    /// refresh. Jobs that can't run any more (provider switched off, no token) count as not
+    /// started, so they run when they can again.
+    fn emotes_tick(&mut self, net: NetworkId) {
+        let now = self.now;
+        let has_token = self.api_token(net).is_some();
+        let Some(n) = self.networks.get_mut(&net).filter(|n| n.is_twitch() && n.conn == ConnState::Ready) else {
+            return;
+        };
+        let mut jobs = Vec::new();
+        if !n.emotes.failed.is_empty() && now >= n.emotes.retry_at {
+            jobs = std::mem::take(&mut n.emotes.failed);
+        }
+        if n.emotes.refresh_at != 0 && now >= n.emotes.refresh_at {
+            n.emotes.refresh_at = now + EMOTE_REFRESH_MS;
+            let waiting = &n.emotes.failed;
+            let due: Vec<Job> =
+                n.emotes.started.iter().filter(|j| !waiting.contains(j) && !jobs.contains(j)).cloned().collect();
+            jobs.extend(due);
+        }
+        let cfg = &n.cfg;
+        let (run, dropped): (Vec<Job>, Vec<Job>) = jobs.into_iter().partition(|j| match j {
+            Job::TwitchUser | Job::TwitchFollower { .. } => has_token,
+            Job::Provider { provider, .. } | Job::ProviderPersonal { provider, .. } => cfg.emote_provider(*provider),
+        });
+        for job in &dropped {
+            n.emotes.started.remove(job);
+        }
+        self.fetch_emote_jobs(net, run);
     }
 
     /// Loads the badge lists a Twitch network needs that are not loaded or loading yet: the
@@ -3011,11 +3084,32 @@ impl App {
 
     /// An [`Effect::FetchEmotes`] fetch finished.
     pub fn on_emote_result(&mut self, r: EmoteResult) {
+        let now = self.now;
         let Some(n) = self.networks.get_mut(&r.network).filter(|n| n.emotes.connection == r.connection) else {
             return;
         };
         for (key, list) in r.sets {
-            n.emotes.sets.entry(key).or_default().emotes.extend(list);
+            // Twitch's sets are filled from several lists (the user's, a channel's follower emotes).
+            let replaces = !matches!(key, SetKey::Twitch { .. });
+            let set = &mut n.emotes.sets.entry(key).or_default().emotes;
+            if replaces {
+                set.clear();
+            }
+            set.extend(list);
+        }
+        if r.unauthorized {
+            n.auth.unauthorized(now);
+        }
+        if !r.failed.is_empty() {
+            // Several requests failing together are one round: the first one sets the time.
+            if n.emotes.failed.is_empty() {
+                let wait = EMOTE_RETRY_MS << n.emotes.failed_rounds.min(10);
+                n.emotes.retry_at = now + wait.min(EMOTE_RETRY_MAX_MS);
+                n.emotes.failed_rounds += 1;
+            }
+            n.emotes.failed.extend(r.failed);
+        } else if n.emotes.failed.is_empty() {
+            n.emotes.failed_rounds = 0;
         }
         let (signed_in, sb) = (n.auth.access_token().is_some(), n.server_buffer);
         self.emote_gen += 1;
@@ -3049,8 +3143,9 @@ impl App {
     }
 
     /// The emote sets of a Twitch channel with where they come from and whether they are the
-    /// channel's own, in lookup order: Twitch (the channel's first), then the channel's provider
-    /// and script sets, then the global ones. Providers switched off are left out.
+    /// channel's own, in lookup order: Twitch (the channel's first), the user's personal ones, then
+    /// the channel's provider and script sets, then the global ones. Providers switched off are
+    /// left out.
     fn channel_emote_sets(&self, buffer: BufferId) -> Vec<(EmoteSource, bool, &EmoteSet)> {
         let Some((n, b, channel)) = self.twitch_channel(buffer) else { return Vec::new() };
         let room = b.room_id.as_deref();
@@ -3066,6 +3161,9 @@ impl App {
         // The channel's own first.
         twitch.sort_by(|a, b| (!a.0, a.1, a.2).cmp(&(!b.0, b.1, b.2)));
         out.extend(twitch.into_iter().map(|(own, _, t, s)| (EmoteSource::Twitch(t.clone()), own, s)));
+        for provider in Provider::ALL.into_iter().filter(|&p| n.cfg.emote_provider(p)) {
+            out.extend(sets.get(&SetKey::Personal { provider }).map(|s| (EmoteSource::Personal(provider), false, s)));
+        }
         let rooms = room.map(|r| Some(r.to_owned())).into_iter().chain([None]);
         for room in rooms {
             let own = room.is_some();
@@ -3082,11 +3180,12 @@ impl App {
     }
 
     /// Which words show as emotes in a Twitch channel: the enabled providers' and the scripts'
-    /// sets, and in the user's own lines also their Twitch emotes.
+    /// sets, and in the user's own lines also their Twitch and personal emotes.
     pub fn emote_lookup(&self, buffer: BufferId) -> Lookup<'_> {
         let mut l = Lookup::default();
         for (source, _, set) in self.channel_emote_sets(buffer) {
-            if matches!(source, EmoteSource::Twitch(_)) { &mut l.own } else { &mut l.sets }.push(set);
+            let own = matches!(source, EmoteSource::Twitch(_) | EmoteSource::Personal(_));
+            if own { &mut l.own } else { &mut l.sets }.push(set);
         }
         l
     }

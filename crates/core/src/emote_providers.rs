@@ -50,13 +50,51 @@ impl Provider {
         }
     }
 
+    /// Whether the provider's API tells which emotes a user has for themselves. BetterTTV doesn't:
+    /// its Pro emotes are only announced over its chat socket, to the other clients in a channel.
+    pub fn has_personal_emotes(self) -> bool {
+        self != Provider::Bttv
+    }
+
     /// Fetches the global set (`room_id` = None) or a channel's (blocking). A channel without an
     /// account with the provider has none.
     pub fn fetch(self, room_id: Option<&str>) -> Result<NamedUrls, String> {
-        let r = schwaetz_net::http::get(&self.url(room_id), 4 << 20, false)?;
+        match self.get(&self.url(room_id))? {
+            Some(body) => self.parse(room_id.is_some(), &body),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Fetches what a Twitch user has for themselves with the provider, usable in any channel: a
+    /// 7TV subscriber's personal set, FFZ's sets for supporters (blocking).
+    pub fn fetch_personal(self, user_id: &str) -> Result<NamedUrls, String> {
+        let id = crate::helix::encode(user_id);
+        match self {
+            Provider::SevenTv => {
+                let Some(user) = self.get(&self.url(Some(user_id)))? else { return Ok(Vec::new()) };
+                let mut out = Vec::new();
+                for set in seven_tv_personal_sets(&user).map_err(|e| format!("unexpected 7tv response: {e}"))? {
+                    let url = format!("https://7tv.io/v3/emote-sets/{}", crate::helix::encode(&set));
+                    if let Some(body) = self.get(&url)? {
+                        out.extend(self.parse(false, &body)?);
+                    }
+                }
+                Ok(out)
+            }
+            Provider::Ffz => match self.get(&format!("https://api.frankerfacez.com/v1/user/id/{id}"))? {
+                Some(body) => self.parse(true, &body),
+                None => Ok(Vec::new()),
+            },
+            Provider::Bttv => Ok(Vec::new()),
+        }
+    }
+
+    /// The body of a provider response; `None` if there is no such thing (HTTP 404).
+    fn get(self, url: &str) -> Result<Option<Vec<u8>>, String> {
+        let r = schwaetz_net::http::get(url, 4 << 20, false)?;
         match r.status {
-            200 => self.parse(room_id.is_some(), &r.body),
-            404 => Ok(Vec::new()),
+            200 => Ok(Some(r.body)),
+            404 => Ok(None),
             s => Err(format!("{} request failed (HTTP {s})", self.id())),
         }
     }
@@ -147,6 +185,30 @@ struct SevenTvData {
 struct SevenTvHost {
     /// `//cdn.7tv.app/emote/<id>`
     url: String,
+}
+
+/// The ids of a 7TV user's personal sets, from `/v3/users/twitch/<id>`.
+fn seven_tv_personal_sets(body: &[u8]) -> Result<Vec<String>, serde_json::Error> {
+    /// In a set's `flags`: the set is the user's personal one.
+    const PERSONAL: u32 = 4;
+    #[derive(Deserialize)]
+    struct Set {
+        id: String,
+        #[serde(default)]
+        flags: u32,
+    }
+    #[derive(Deserialize, Default)]
+    struct User {
+        #[serde(default)]
+        emote_sets: Vec<Set>,
+    }
+    #[derive(Deserialize)]
+    struct Connection {
+        #[serde(default)]
+        user: Option<User>,
+    }
+    let sets = serde_json::from_slice::<Connection>(body)?.user.unwrap_or_default().emote_sets;
+    Ok(sets.into_iter().filter(|s| s.flags & PERSONAL != 0).map(|s| s.id).collect())
 }
 
 fn seven_tv(set: SevenTvSet) -> NamedUrls {
@@ -299,5 +361,22 @@ mod tests {
             [("Room".to_owned(), "https://cdn.frankerfacez.com/r".to_owned())]
         );
         assert!(Provider::Ffz.parse(false, b"<html>").is_err());
+    }
+
+    #[test]
+    fn finds_a_seven_tv_users_personal_sets() {
+        let user = br#"{"id":"u","emote_set":null,"user":{"id":"x","emote_sets":[
+            {"id":"personal","name":"Personal Emotes","flags":4,"capacity":5},
+            {"id":"channel","name":"My Emotes","flags":0,"capacity":1000},
+            {"id":"unflagged","name":"Old"}]}}"#;
+        assert_eq!(seven_tv_personal_sets(user).unwrap(), ["personal"]);
+        assert!(seven_tv_personal_sets(br#"{"id":"u"}"#).unwrap().is_empty());
+        assert!(seven_tv_personal_sets(b"<html>").is_err());
+    }
+
+    #[test]
+    fn only_bttv_cannot_be_asked_for_personal_emotes() {
+        let with: Vec<_> = Provider::ALL.into_iter().filter(|p| p.has_personal_emotes()).collect();
+        assert_eq!(with, [Provider::SevenTv, Provider::Ffz]);
     }
 }
