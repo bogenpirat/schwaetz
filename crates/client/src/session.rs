@@ -10,6 +10,7 @@ use schwaetz_proto::split::{self, DEFAULT_SOURCE_BUDGET};
 use schwaetz_proto::tags::parse_server_time;
 use schwaetz_proto::{CaseMapping, ISupport, Message, Source, Tags, ctcp};
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::ops::Range;
 
 /// Capabilities requested when offered. Vendor/legacy variants are only requested when the
 /// standard one is absent (see [`Session::choose_caps`]).
@@ -1585,14 +1586,27 @@ impl Session {
         }
     }
 
+    /// Bytes of text one PRIVMSG/NOTICE/ACTION to `target` can carry; longer lines are split.
+    fn text_budget(&self, kind: ChatKind, target: &str) -> usize {
+        let command = if kind == ChatKind::Notice { "NOTICE" } else { "PRIVMSG" };
+        // An ACTION wraps the text in "\x01ACTION " and "\x01".
+        let ctcp = if kind == ChatKind::Action { 9 } else { 0 };
+        split::text_budget(self.isupport.linelen, command, target, self.source_len()).saturating_sub(ctcp)
+    }
+
+    /// The byte ranges of `line` (one line of a message) that [`Session::say`] sends as separate
+    /// messages; a single range when the line fits into one.
+    pub fn message_ranges(&self, kind: ChatKind, target: &str, line: &str) -> Vec<Range<usize>> {
+        split::split_ranges(line, self.text_budget(kind, target))
+    }
+
     /// Sends a PRIVMSG/NOTICE, splitting long text, using `draft/multiline` for multi-line input
     /// when available, and producing a local echo when the server won't echo.
     pub fn say(&mut self, kind: ChatKind, target: &str, text: &str, tags: Tags, now: i64) {
         let command = if kind == ChatKind::Notice { "NOTICE" } else { "PRIVMSG" };
         let lines: Vec<&str> = text.split('\n').map(|l| l.trim_end_matches('\r')).collect();
         let body_of = |line: &str| if kind == ChatKind::Action { ctcp::action(line) } else { line.to_owned() };
-        let budget = split::text_budget(self.isupport.linelen, command, target, self.source_len())
-            .saturating_sub(if kind == ChatKind::Action { 9 } else { 0 });
+        let budget = self.text_budget(kind, target);
 
         let multiline =
             lines.len() > 1 && kind != ChatKind::Action && self.has_cap("draft/multiline") && self.has_cap("batch");

@@ -7,6 +7,7 @@ use crate::config::{IgnoreRule, NetworkConfig, NetworkKind};
 use schwaetz_client::ChatKind;
 use schwaetz_net::NetworkId;
 use schwaetz_proto::{Message, Tags, ctcp, mask};
+use std::ops::Range;
 
 pub struct CommandInfo {
     pub name: &'static str,
@@ -129,6 +130,49 @@ impl App {
             let text = line.strip_prefix('/').filter(|r| r.starts_with('/')).unwrap_or(line);
             self.say(buffer, ChatKind::Privmsg, text);
         }
+    }
+
+    /// For each line of the input box text that is too long for one message: the byte ranges of
+    /// the messages sending it would split it into (mirrors [`App::input`]).
+    pub fn input_split_messages(&self, buffer: BufferId, text: &str) -> Vec<Vec<Range<usize>>> {
+        let Some(b) = self.buffer(buffer) else { return Vec::new() };
+        let (Some(net), BufferKind::Channel | BufferKind::Query) = (b.network, b.kind) else { return Vec::new() };
+        let Some(n) = self.networks.get(&net) else { return Vec::new() };
+        let text = text.trim_end_matches(['\r', '\n']);
+        let plain = text.contains('\n') && !text.lines().any(|l| l.starts_with('/') && !l.starts_with("//"));
+        let mut lines = Vec::new();
+        let mut at = 0;
+        for line in text.split('\n') {
+            let message = if plain { Some((ChatKind::Privmsg, 0)) } else { self.chat_in_line(line) };
+            if let Some((kind, skip)) = message {
+                let body = line[skip..].trim_end_matches('\r');
+                let ranges = n.session.message_ranges(kind, &b.name, body);
+                if ranges.len() > 1 {
+                    let offset = at + skip;
+                    lines.push(ranges.into_iter().map(|r| r.start + offset..r.end + offset).collect());
+                }
+            }
+            at += line.len() + 1;
+        }
+        lines
+    }
+
+    /// The kind of message one line of input sends and where its text starts, or `None` for a
+    /// command that sends no chat text of its own.
+    fn chat_in_line(&self, line: &str) -> Option<(ChatKind, usize)> {
+        let Some(rest) = line.strip_prefix('/') else { return Some((ChatKind::Privmsg, 0)) };
+        if rest.starts_with('/') {
+            return Some((ChatKind::Privmsg, 1));
+        }
+        let (cmd, args) = rest.split_once(' ')?;
+        let cmd = cmd.to_lowercase();
+        let kind = match cmd.as_str() {
+            _ if self.config.aliases.contains_key(&cmd) => return None,
+            "me" | "action" => ChatKind::Action,
+            "say" => ChatKind::Privmsg,
+            _ => return None,
+        };
+        Some((kind, line.len() - args.trim_start().len()))
     }
 
     fn say(&mut self, buffer: BufferId, kind: ChatKind, text: &str) {

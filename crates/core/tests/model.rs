@@ -1527,3 +1527,40 @@ fn badge_lists_are_loaded_once_and_refreshed_for_unknown_badges() {
     h.app.upsert_network(Some(&name), cfg);
     assert!(h.app.badge_lookup(c).is_none());
 }
+
+#[test]
+fn input_split_messages_are_the_messages_sent() {
+    let mut h = Harness::new(NetworkKind::Irc, &[]);
+    h.register();
+    h.lines(&[":me!u@h JOIN #c"]);
+    let c = h.buffer("#c");
+    let long = (0..150).map(|i| format!("word{i}")).collect::<Vec<_>>().join(" ");
+    let inputs = [
+        long.clone(),
+        format!("/me {long}"),
+        format!("//{long}"),
+        format!("{long}\n{long}"),
+        format!("/me {long}\n/say {long}"),
+        format!("/topic {long}"),
+        "short".to_owned(),
+    ];
+    for input in inputs {
+        h.sent();
+        let split = h.app.input_split_messages(c, &input);
+        h.app.input(c, &input);
+        let sent: Vec<String> = h
+            .sent()
+            .iter()
+            .filter_map(|l| l.strip_prefix("PRIVMSG #c :"))
+            .map(|t| t.trim_start_matches("\u{1}ACTION ").trim_end_matches('\u{1}').to_owned())
+            .collect();
+        if split.is_empty() {
+            assert!(sent.len() <= 1, "{input:?} is not split");
+        } else {
+            // Every chat line of these inputs is too long, so the ranges are all that is sent.
+            let marked: Vec<&str> = split.iter().flatten().map(|r| &input[r.clone()]).collect();
+            assert_eq!(sent, marked, "the marked messages of {input:?}");
+            assert!(split.iter().all(|line| line.len() > 1));
+        }
+    }
+}

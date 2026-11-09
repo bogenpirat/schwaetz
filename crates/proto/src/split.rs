@@ -1,5 +1,6 @@
 //! Splitting long outgoing messages so every relayed line fits the server's line limit.
 
+use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Worst-case length of a relayed `nick!user@host` source when the host is unknown.
@@ -15,9 +16,15 @@ pub fn text_budget(linelen: usize, command: &str, target: &str, source_len: usiz
 /// Splits `text` into chunks of at most `max_bytes` bytes, preferring whitespace boundaries and
 /// never breaking inside a grapheme cluster. Whitespace at a break is consumed.
 pub fn split_text(text: &str, max_bytes: usize) -> Vec<&str> {
+    split_ranges(text, max_bytes).into_iter().map(|r| &text[r]).collect()
+}
+
+/// The byte ranges of `text` that [`split_text`] returns.
+pub fn split_ranges(text: &str, max_bytes: usize) -> Vec<Range<usize>> {
     let mut out = Vec::new();
-    let mut rest = text;
-    while rest.len() > max_bytes {
+    let mut start = 0;
+    while text.len() - start > max_bytes {
+        let rest = &text[start..];
         let mut cut = 0;
         let mut last_space = None;
         for (idx, g) in rest.grapheme_indices(true) {
@@ -45,17 +52,18 @@ pub fn split_text(text: &str, max_bytes: usize) -> Vec<&str> {
         match last_space {
             // Only break at a space if it doesn't make the chunk tiny.
             Some(sp) if sp > max_bytes / 2 => {
-                out.push(&rest[..sp]);
-                rest = rest[sp..].trim_start_matches(' ');
+                out.push(start..start + sp);
+                let after = &rest[sp..];
+                start += sp + (after.len() - after.trim_start_matches(' ').len());
             }
             _ => {
-                out.push(&rest[..cut]);
-                rest = &rest[cut..];
+                out.push(start..start + cut);
+                start += cut;
             }
         }
     }
-    if !rest.is_empty() || out.is_empty() {
-        out.push(rest);
+    if start < text.len() || out.is_empty() {
+        out.push(start..text.len());
     }
     out
 }
@@ -73,6 +81,13 @@ mod tests {
     #[test]
     fn word_boundaries() {
         assert_eq!(split_text("aaaa bbbb cccc", 10), vec!["aaaa bbbb", "cccc"]);
+    }
+
+    #[test]
+    fn ranges_skip_the_consumed_space() {
+        let text = "aaaa bbbb   cccc";
+        assert_eq!(split_ranges(text, 10), vec![0..9, 12..16]);
+        assert_eq!(split_ranges("", 10), vec![0..0]);
     }
 
     #[test]

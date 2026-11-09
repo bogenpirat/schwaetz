@@ -820,6 +820,18 @@ impl Ui {
             let l = self.text.layout(&ph, &f.chat, inner.w, 40.0);
             p.text(&l, inner.x, inner.y, th.text_dim);
         }
+        // A line too long for one message goes out as several: each is underlined, in alternating
+        // colors, so the user sees where it will be cut (the space at a cut is not sent).
+        let split =
+            if self.search.is_some() { Vec::new() } else { self.app.input_split_messages(id, self.input.text()) };
+        for messages in &split {
+            for (i, range) in messages.iter().enumerate() {
+                let color = if i % 2 == 0 { with_alpha(th.text_dim, 0.55) } else { th.accent };
+                for (sx, sy, sw, sh) in self.input.range_rects(range.start, range.end) {
+                    p.fill(Rect::new(inner.x + sx, inner.y + sy + sh - 2.0 - scroll_y, sw, 2.0), color);
+                }
+            }
+        }
         for (sx, sy, sw, sh) in self.input.selection_rects() {
             p.fill(Rect::new(inner.x + sx, inner.y + sy - scroll_y, sw, sh), th.selection);
         }

@@ -387,13 +387,18 @@ impl Editor {
 
     /// Selection rectangles relative to the layout origin.
     pub fn selection_rects(&self) -> Vec<(f32, f32, f32, f32)> {
-        let Some((l, ..)) = &self.layout else { return Vec::new() };
         if !self.has_selection() {
             return Vec::new();
         }
         let (a, b) = self.selection();
+        self.range_rects(a, b)
+    }
+
+    /// Rectangles covering the text between byte offsets `a` and `b`, relative to the layout origin.
+    pub fn range_rects(&self, a: usize, b: usize) -> Vec<(f32, f32, f32, f32)> {
+        let Some((l, ..)) = &self.layout else { return Vec::new() };
         let (ua, ub) = (self.to_u16(a), self.to_u16(b));
-        text::range_rects(l, ua, ub - ua)
+        text::range_rects(l, ua, ub.saturating_sub(ua))
     }
 
     /// Places the cursor at a point (relative to the layout origin).
