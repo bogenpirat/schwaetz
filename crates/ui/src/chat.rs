@@ -76,6 +76,9 @@ struct Drawn {
     msg_x: f32,
     msg_y: f32,
     nick_rect: Rect,
+    /// The timestamp in front of the line, when timestamps are shown, and the line's time.
+    ts_rect: Option<Rect>,
+    time: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -985,9 +988,11 @@ impl ChatView {
             my += text::metrics(r).height + 2.0;
         }
         let baseline_off = 0.0;
+        let mut ts_rect = None;
         if !c.ts_format.is_empty() {
-            let small_h = text::metrics(&e.ts).height;
-            p.text(&e.ts, x0 + PAD_X, my + (c.text.fonts.line_height - small_h) / 2.0 + baseline_off, th.timestamp);
+            let tm = text::metrics(&e.ts);
+            p.text(&e.ts, x0 + PAD_X, my + (c.text.fonts.line_height - tm.height) / 2.0 + baseline_off, th.timestamp);
+            ts_rect = Some(Rect::new(x0 + PAD_X, my, tm.width, c.text.fonts.line_height));
         }
         let nick_x = x0 + PAD_X + m.ts_w + 4.0;
         if let Some(n) = &e.nick {
@@ -1105,6 +1110,8 @@ impl ChatView {
             msg_x,
             msg_y: my,
             nick_rect: Rect::new(nick_x, my, m.nick_w, c.text.fonts.line_height),
+            ts_rect,
+            time: line.time,
         });
     }
 
@@ -1181,6 +1188,13 @@ impl ChatView {
             let r = Rect::new(d.nick_rect.x + rx, d.nick_rect.y + ry, rw, rh);
             r.contains(x, y).then(|| (b.label.clone(), b.large_url.clone(), r))
         })
+    }
+
+    /// The timestamp under a point: the line's full time in ISO 8601 with the local UTC offset
+    /// ("2026-11-21T00:41:05+01:00") and the timestamp's bounds.
+    pub fn timestamp_at(&self, x: f32, y: f32) -> Option<(String, String, Rect)> {
+        let d = self.drawn.iter().find(|d| d.ts_rect.is_some_and(|r| r.contains(x, y)))?;
+        Some((time::iso8601(d.time), String::new(), d.ts_rect?))
     }
 
     /// The inline emote under a point: its code, image url and bounds.

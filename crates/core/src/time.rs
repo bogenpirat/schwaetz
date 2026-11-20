@@ -146,6 +146,22 @@ pub fn format(fmt: &str, t: LocalTime) -> String {
     out
 }
 
+/// Full local time in ISO 8601 with the UTC offset: `2026-11-21T00:41:05+01:00`.
+pub fn iso8601(unix_ms: i64) -> String {
+    iso8601_at(unix_ms, local_offset_ms(unix_ms))
+}
+
+fn iso8601_at(unix_ms: i64, offset_ms: i64) -> String {
+    let t = breakdown(unix_ms + offset_ms);
+    let off = offset_ms.div_euclid(60_000);
+    let sign = if off < 0 { '-' } else { '+' };
+    let (oh, om) = (off.abs() / 60, off.abs() % 60);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{sign}{oh:02}:{om:02}",
+        t.year, t.month, t.day, t.hour, t.minute, t.second
+    )
+}
+
 /// Human duration: `3d 4h`, `5m 10s`.
 pub fn duration(secs: u64) -> String {
     let (d, h, m, s) = (secs / 86_400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
@@ -160,6 +176,16 @@ pub fn duration(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iso8601_has_the_date_time_and_offset() {
+        // 2026-11-20T23:41:05.250Z
+        let t = 1_795_218_065_250;
+        assert_eq!(iso8601_at(t, 0), "2026-11-20T23:41:05+00:00");
+        assert_eq!(iso8601_at(t, 3_600_000), "2026-11-21T00:41:05+01:00", "the date follows the offset");
+        assert_eq!(iso8601_at(t, -(9 * 60 + 30) * 60_000), "2026-11-20T14:11:05-09:30");
+        assert_eq!(iso8601_at(t, (5 * 60 + 45) * 60_000), "2026-11-21T05:26:05+05:45");
+    }
 
     #[test]
     fn formatting() {

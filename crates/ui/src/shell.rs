@@ -2374,7 +2374,7 @@ impl Ui {
                         }
                         Some(tip)
                     };
-                    emote().or_else(badge)
+                    emote().or_else(badge).or_else(|| self.chat.timestamp_at(x, y))
                 } else if self.chat.rect.contains(x, y) {
                     None
                 } else {
