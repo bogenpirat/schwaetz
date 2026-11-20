@@ -13,4 +13,3 @@ hmac.workspace = true
 pbkdf2.workspace = true
 base64.workspace = true
 getrandom.workspace = true
-tracing.workspace = true

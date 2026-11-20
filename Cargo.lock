@@ -1543,7 +1543,6 @@ dependencies = [
  "pbkdf2",
  "schwaetz-proto",
  "sha2",
- "tracing",
 ]
 
 [[package]]
@@ -1581,7 +1580,6 @@ dependencies = [
  "schwaetz-proto",
  "tokio",
  "tokio-rustls",
- "tracing",
  "ureq",
 ]
 
