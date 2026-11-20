@@ -23,4 +23,3 @@ oxc_transformer = { version = "0.151", optional = true }
 oxc_codegen = { version = "0.151", optional = true }
 oxc_semantic = { version = "0.151", optional = true }
 oxc_span = { version = "0.151", optional = true }
-tracing.workspace = true
