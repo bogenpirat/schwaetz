@@ -77,6 +77,16 @@ pub fn gif_scale(scale: f32) -> f32 {
     scale.clamp(1.0, 1.5)
 }
 
+/// The size (DIPs) of the image in an emote or badge hover preview, for an image of `w`×`h`
+/// pixels: one DIP per pixel (112 for most emotes, 72 for badges), at least 56 and at most 128
+/// high, and narrower than `max_w`. The aspect ratio is kept.
+pub fn tip_image_size(w: f32, h: f32, max_w: f32) -> (f32, f32) {
+    let th = h.clamp(56.0, 128.0);
+    let tw = th * w / h.max(1.0);
+    let fit = (max_w.max(1.0) / tw).min(1.0);
+    (tw * fit, th * fit)
+}
+
 impl ImageStore {
     pub fn insert_frames(&mut self, url: String, w: u32, h: u32, frames: Vec<schwaetz_media::Frame>) {
         if frames.is_empty() {
@@ -493,5 +503,19 @@ impl IDWriteInlineObject_Impl for UploadChip_Impl {
             *after = DWRITE_BREAK_CONDITION_NEUTRAL;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tip_image_size;
+
+    #[test]
+    fn tip_images_show_at_their_own_size_within_limits() {
+        assert_eq!(tip_image_size(112.0, 112.0, 400.0), (112.0, 112.0), "Twitch 3.0 and BTTV 3x");
+        assert_eq!(tip_image_size(72.0, 72.0, 400.0), (72.0, 72.0), "Twitch badges");
+        assert_eq!(tip_image_size(28.0, 28.0, 400.0), (56.0, 56.0), "small images are enlarged");
+        assert_eq!(tip_image_size(256.0, 256.0, 400.0), (128.0, 128.0), "large images are reduced");
+        assert_eq!(tip_image_size(384.0, 128.0, 192.0), (192.0, 64.0), "wide emotes fit the window");
     }
 }

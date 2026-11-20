@@ -259,7 +259,8 @@ fn ffz(set: FfzSet) -> NamedUrls {
 
 /// The URL of the largest size an emote's CDN offers (Twitch 3.0, 7TV 4x, BTTV 3x, FFZ 4), for
 /// the hover preview. Other URLs are returned unchanged. The size may not exist (FFZ emotes
-/// without a 4x image), so callers keep the original as a fallback.
+/// without a 4x image), so callers keep the original as a fallback. Twitch also answers 4.0, with
+/// the same file as 3.0 (112 px); BTTV has no 4x, and FFZ no 8.
 pub fn largest_emote_url(url: &str) -> String {
     const SIZES: [(&str, &[&str], &str); 4] = [
         ("https://static-cdn.jtvnw.net/emoticons/v2/", &["/1.0", "/2.0"], "/3.0"),

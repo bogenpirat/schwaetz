@@ -889,8 +889,7 @@ impl Ui {
         let (iw, ih) = match &img {
             Some(b) => {
                 let s = unsafe { b.GetSize() };
-                let h = 56.0f32;
-                ((h * s.width / s.height.max(1.0)).min(168.0), h)
+                crate::images::tip_image_size(s.width, s.height, (self.win_rect.w - 28.0).min(384.0))
             }
             None => (0.0, 0.0),
         };
@@ -2691,6 +2690,11 @@ impl Ui {
         {
             self.nick_menu(&n);
         } else if self.chat.rect.contains(x, y) {
+            if let Some(url) = self.image_url_at(x, y) {
+                self.image_menu(&url);
+                self.invalidate();
+                return;
+            }
             match self.chat.hit(x, y) {
                 Hit::Nick(n) => self.nick_menu(&n),
                 Hit::Link(LinkTarget::Url(u)) => {
@@ -2741,6 +2745,24 @@ impl Ui {
         }
         self.process_net();
         self.invalidate();
+    }
+
+    /// The image of the emote or badge under a point in the chat: the largest size its CDN
+    /// offers, or the inline size when that one failed to load.
+    fn image_url_at(&self, x: f32, y: f32) -> Option<String> {
+        if let Some((_, url, _)) = self.chat.emote_at(x, y).filter(|t| !t.1.is_empty()) {
+            let large = largest_emote_url(&url);
+            return Some(if self.images.borrow().failed(&large) { url } else { large });
+        }
+        self.chat.badge_at(x, y).map(|t| t.1).filter(|u| !u.is_empty())
+    }
+
+    fn image_menu(&self, url: &str) {
+        match win::popup_menu(self.hwnd, &[MenuItem::Item(1, "Open image"), MenuItem::Item(2, "Copy image link")]) {
+            1 => win::open_url(url),
+            2 => win::set_clipboard(self.hwnd, url),
+            _ => {}
+        }
     }
 
     /// The menu of the settings button in the sidebar footer, opening upwards from the button.
