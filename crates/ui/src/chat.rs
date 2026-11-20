@@ -1215,8 +1215,7 @@ impl ChatView {
         let (ai, zi) = (*order.get(&a.line)?, *order.get(&z.line)?);
         let ((a, ai), (z, zi)) = if (ai, a.u16) <= (zi, z.u16) { ((a, ai), (z, zi)) } else { ((z, zi), (a, ai)) };
         let mut out = String::new();
-        for i in ai..=zi {
-            let line = &b.lines[i];
+        for (i, line) in (ai..).zip(b.lines.range(ai..=zi)) {
             if !visible(line) || self.filter.as_ref().is_some_and(|re| !matches(re, line)) {
                 continue;
             }
