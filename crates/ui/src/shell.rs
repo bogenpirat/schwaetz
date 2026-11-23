@@ -98,6 +98,13 @@ const TIMER_ANIM: usize = 4;
 const TIMER_UI_ANIM: usize = 5;
 /// Repaints the progress of image uploads.
 const TIMER_UPLOAD: usize = 6;
+/// Takes a burst of membership changes into the nick list.
+const TIMER_NICKLIST: usize = 7;
+/// The nick list takes membership changes in once they pause this long (Twitch sends a batch of
+/// joins and parts back to back)...
+const NICKLIST_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+/// ...or at the latest this long after the first one.
+const NICKLIST_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 const SIDEBAR_MIN: f32 = 160.0;
 const TOPIC_H: f32 = 56.0;
 const NICKLIST_W: f32 = 210.0;
@@ -160,7 +167,12 @@ pub struct Ui {
     high_surrogate: Option<u16>,
     last_typing_sent: i64,
     shown_buffer: Option<BufferId>,
-    nicklist_gen: (Option<BufferId>, u64),
+    /// The channel whose members the nick list holds.
+    nicklist_for: Option<BufferId>,
+    /// When the first membership change not yet in the nick list arrived.
+    nicklist_changed: Option<std::time::Instant>,
+    /// A burst of membership changes ended: the nick list takes them in on the next frame.
+    nicklist_due: bool,
     quitting: bool,
     media: schwaetz_media::Media,
     images: std::rc::Rc<std::cell::RefCell<crate::images::ImageStore>>,
@@ -328,7 +340,9 @@ pub fn run(config: Config, paths: Paths, services: Services, startup_notes: Vec<
         high_surrogate: None,
         last_typing_sent: 0,
         shown_buffer: None,
-        nicklist_gen: (None, 0),
+        nicklist_for: None,
+        nicklist_changed: None,
+        nicklist_due: false,
         quitting: false,
         media,
         images: Default::default(),
@@ -597,8 +611,8 @@ impl Ui {
         let dgen = gfx.generation;
         let r = gfx.frame(pw, ph, |dc| self.draw(dc, dgen));
         self.gfx = Some(gfx);
-        if self.anims.moving() {
-            // A button transition is running: next frame at ~60 fps.
+        if self.anims.moving() || (self.show_nicklist && self.nicklist.animating()) {
+            // A button transition is running or members slide in or out: next frame at ~60 fps.
             unsafe {
                 SetTimer(Some(self.hwnd), TIMER_UI_ANIM, 16, None);
             }
@@ -639,14 +653,20 @@ impl Ui {
             self.chat.set_buffer(id, marker);
             self.input.set_text(&draft, None);
             self.shown_buffer = Some(id);
-            self.nicklist_gen = (None, 0);
+            self.nicklist_for = None;
             self.nicklist.scroll = 0.0;
             self.update_title();
         }
-        let dgen = self.app.buffer(id).map_or(0, |b| b.generation);
-        if self.nicklist_gen != (Some(id), dgen) && self.show_nicklist {
-            self.nicklist.refresh(&self.app, id);
-            self.nicklist_gen = (Some(id), dgen);
+        if !self.show_nicklist {
+            self.nicklist_for = None;
+        } else if self.nicklist_for != Some(id) {
+            // Another channel, or the list was hidden: show the members at once.
+            self.nicklist.refresh(&self.app, id, false);
+            self.nicklist_for = Some(id);
+            self.nicklist_due = false;
+        } else if self.nicklist_due {
+            self.nicklist.refresh(&self.app, id, true);
+            self.nicklist_due = false;
         }
     }
 
@@ -978,15 +998,27 @@ impl Ui {
         if d.sidebar || d.topic {
             self.update_title();
         }
-        if d.lines || d.sidebar || d.nicklist || d.topic || d.input {
-            if d.nicklist {
-                self.nicklist_gen = (None, 0);
-            }
+        if d.nicklist {
+            self.nicklist_changed();
+        }
+        if d.lines || d.sidebar || d.topic || d.input {
             if self.background_update {
                 self.invalidate_soon();
             } else {
                 self.invalidate();
             }
+        }
+    }
+
+    /// Membership changes come in bursts: the nick list takes them in together, once they pause
+    /// or a second after the first, so one batch slides in as one cascade.
+    fn nicklist_changed(&mut self) {
+        let now = std::time::Instant::now();
+        let first = *self.nicklist_changed.get_or_insert(now);
+        let wait = NICKLIST_QUIET.min(NICKLIST_MAX_WAIT.saturating_sub(now - first));
+        // Re-arming the timer pushes it back while the burst goes on.
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_NICKLIST, (wait.as_millis() as u32).max(1), None);
         }
     }
 
@@ -3290,6 +3322,14 @@ impl Ui {
                                 let _ = KillTimer(Some(self.hwnd), TIMER_UPLOAD);
                             }
                         }
+                        self.invalidate();
+                    }
+                    TIMER_NICKLIST => {
+                        unsafe {
+                            let _ = KillTimer(Some(self.hwnd), TIMER_NICKLIST);
+                        }
+                        self.nicklist_changed = None;
+                        self.nicklist_due = true;
                         self.invalidate();
                     }
                     TIMER_PAINT => {

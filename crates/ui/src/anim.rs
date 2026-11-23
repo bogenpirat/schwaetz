@@ -150,7 +150,7 @@ pub fn mix(a: Color, b: Color, t: f32) -> Color {
     Color { r: l(a.r, b.r), g: l(a.g, b.g), b: l(a.b, b.b), a: l(a.a, b.a) }
 }
 
-fn smoothstep(t: f32) -> f32 {
+pub(crate) fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
