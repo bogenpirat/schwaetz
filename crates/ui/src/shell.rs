@@ -441,6 +441,14 @@ fn now() -> i64 {
     schwaetz_core::time::now_ms()
 }
 
+/// The Ctrl and Alt state that shortcuts see. AltGr arrives as Ctrl+Alt, and Ctrl+Alt types the
+/// AltGr characters too, so with both held a key is text input (`{` on AltGr+7, `ł` on AltGr+L),
+/// not Alt+7 or Ctrl+L.
+fn shortcut_modifiers(ctrl: bool, alt: bool) -> (bool, bool) {
+    let altgr = ctrl && alt;
+    (ctrl && !altgr, alt && !altgr)
+}
+
 impl Ui {
     fn invalidate(&self) {
         unsafe {
@@ -1825,9 +1833,8 @@ impl Ui {
             self.invalidate();
             return true;
         }
-        let ctrl = win::key_down(VK_CONTROL.0);
+        let (ctrl, alt) = shortcut_modifiers(win::key_down(VK_CONTROL.0), win::key_down(VK_MENU.0));
         let shift = win::key_down(VK_SHIFT.0);
-        let alt = win::key_down(VK_MENU.0);
         let v = VIRTUAL_KEY(vk);
 
         if self.overlay.is_none()
@@ -4098,5 +4105,18 @@ impl Ui {
             let ty = inner.y + (inner.h - th_h) * (c.scroll / (content - inner.h).max(1.0));
             p.fill_round(Rect::new(r.right() - 7.0, ty, 4.0, th_h), 2.0, th.scrollbar);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shortcut_modifiers;
+
+    #[test]
+    fn altgr_is_not_a_shortcut_modifier() {
+        assert_eq!(shortcut_modifiers(true, true), (false, false));
+        assert_eq!(shortcut_modifiers(true, false), (true, false));
+        assert_eq!(shortcut_modifiers(false, true), (false, true));
+        assert_eq!(shortcut_modifiers(false, false), (false, false));
     }
 }
